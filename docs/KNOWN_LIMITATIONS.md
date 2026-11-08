@@ -17,12 +17,14 @@ Channel360 is a validated local prototype, not production-ready software.
 - PDF.js renders digital and scanned PDFs. Supported unsigned AcroForm text, checkbox, radio and choice edits use the persisted review/release workflow and critical qpdf/PDFium verification. A 50-case synthetic acceptance run passed, including qpdf-rewritten forms; producer diversity is limited and does not include Adobe/Microsoft-authored forms.
 - DOCX OOXML inspection and single-run editing/provenance code exist. In this host `sandbox-exec` refuses the isolated LibreOffice renderer. DOCX native controls are disabled and API preflight refuses to freeze/submit; no derivative can reach reviewer approval or download. DOCX page preview and visual/reflow checks remain NOT_VERIFIED.
 - DOCX geometry-comparison adversarial tests reject wrapping, ambiguous repeated targets, changed page count and non-target glyph movement. Actual DOCX before/after rendering is still unavailable, so those tests do not satisfy DOCX visual acceptance.
+- The supplied one-page DOCX pair passes local structural/hash/fingerprint/provenance diagnostics. A separate user-supplied Linux/LibreOffice 25.2.3.2 report says its pixel/layout comparison passed; this host did not reproduce that render. The candidate remains UNVERIFIED and is not an application release.
+- The offline CLI `scripts/validate_docx_candidate.py` can compare existing rendered PDF evidence, but does not launch a renderer. On this Mac, installed LibreOffice 26.8.2.2 crashes under the existing sandbox boundary and no OCI/VM worker runtime is installed.
 - M4 deterministic templates/rules/summaries and M7 optional intelligence providers remain planned, not implemented.
 - The M0 image object has a 1×1 worksheet anchor, so recognizable on-sheet appearance has not been verified even though its workbook preservation tests pass.
 
-## Current local evidence — 2026-11-08
+## Current local evidence — 2026-11-09
 
-- Python regression: 175 passed, 22 skipped, 0 failed. The skips are service-dependent and are not counted as passes.
+- Python regression: 195 passed, 22 skipped, 0 failed. The skips are service-dependent and are not counted as passes.
 - PostgreSQL integration/security: 22 passed against `channel360_test`.
 - ClamAV: 4/4 passed (clean, EICAR quarantine, rejected executable, scanner unavailable fail-closed).
 - Playwright Chromium: 13/13 passed, including PDF text, checkbox, radio and dropdown verified downloads, existing CSV/JSON/XLSX workflows, DOCX read-only/preflight guard and formula-dependent `INCOMPLETE` download denial.
@@ -30,6 +32,7 @@ Channel360 is a validated local prototype, not production-ready software.
 - M0 workbook source fixture hashes: 2/2 passed; full M0 acceptance tests are included in Python regression.
 - Parser loopback probe passed on the current host. Darwin memory enforcement remains sampled parent-side RSS monitoring (up to about 50 ms overshoot); it is not a kernel `RLIMIT_AS` cap.
 - DOCX visual verification returns critical `NOT_VERIFIED`; the workflow remains blocked and native controls are disabled.
+- The exact supplied DOCX pair passes the offline structural diagnostic; local visual remains `NOT_VERIFIED`. Eight generated structural surfaces plus repeated targets and negative integrity cases are covered by new tests.
 - LibreOffice sandbox diagnostics: ordinary invocation is denied before launch; host-authorized diagnostics show a repeatable startup SIGSEGV in `macxp_resolveAlias → osl::realpath → osl_setCommandArgs` after Seatbelt application. A minimal deny-default probe confirms outside-tree reads and loopback access return `EPERM`. No alternative isolated office runtime is installed.
 - PDF synthetic corpus: 50/50 expected outcomes; 40 editable, 8 read-only, 2 rejected. This corpus is not a substitute for broader producer compatibility testing.
 

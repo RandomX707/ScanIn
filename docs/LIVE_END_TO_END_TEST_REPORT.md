@@ -1,12 +1,12 @@
 # Live End-to-End Test Report
 
-Updated 2026-11-08. All live data was synthetic, stored in the existing `channel360_test` database and explicitly labeled `Channel360 Browser E2E` tenant. No database or role was created, dropped or reset.
+Updated 2026-11-09. All live data was synthetic, stored in the existing `channel360_test` database and explicitly labeled `Channel360 Browser E2E` tenant. No database or role was created, dropped or reset.
 
 ## Results
 
 | Gate | Result |
 | --- | --- |
-| Python regression | 175 passed, 22 skipped, 0 failed (34 warnings); skips remain service-dependent and do not count as passes |
+| Python regression | 195 passed, 22 skipped, 0 failed (34 warnings); skips remain service-dependent and do not count as passes |
 | PostgreSQL integration/security | 22 passed against `channel360_test` |
 | ClamAV | 4/4 passed: clean synthetic accepted; EICAR quarantined; executable rejected; scanner unavailable fail-closed |
 | Playwright Chromium | 13/13 passed |

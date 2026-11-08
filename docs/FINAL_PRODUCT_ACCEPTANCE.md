@@ -1,6 +1,6 @@
 # Final Product Acceptance — Development Scope
 
-Updated 2026-11-08.
+Updated 2026-11-09.
 
 ## Decision
 
@@ -8,7 +8,7 @@ The local development workflows and integration evidence below passed for their 
 
 ## Current evidence
 
-- Python regression: 175 passed, 22 skipped, 0 failed (34 warnings). Skipped service-dependent tests are not counted as passes.
+- Python regression: 195 passed, 22 skipped, 0 failed (34 warnings). Skipped service-dependent tests are not counted as passes.
 - PostgreSQL integration/security suite: 22 passed against the existing `channel360_test` database.
 - ClamAV: 4/4 real daemon checks passed.
 - Browser suite: 13/13 Chromium tests passed, including CSV/JSON/XLSX/PDF verified releases, text/checkbox/radio/dropdown PDF edits, DOCX fail-closed preflight, restricted PDF cases, reviewer rejection and formula-dependent incomplete release.

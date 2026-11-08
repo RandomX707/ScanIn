@@ -221,3 +221,73 @@ def test_docx_layout_check_blocks_replacement_that_wraps_onto_another_line():
     result = compare(source, wrapped,
                      [("Policyholder: Ada", "Policyholder: A much longer policyholder name that wraps")])
     assert "target_text_missing_or_wrapped" in result["errors"]
+
+
+def test_docx_layout_check_detects_nontext_border_change_with_identical_glyph_geometry():
+    import packages.core.verification.docx as verifier
+    from reportlab.pdfgen import canvas
+
+    def render(name: str, border: bool) -> bytes:
+        output = io.BytesIO()
+        pdf = canvas.Canvas(output, pagesize=(612, 792))
+        pdf.drawString(40, 740, f"Policyholder: {name}")
+        pdf.drawString(40, 700, "Coverage remains Standard")
+        if border:
+            pdf.setLineWidth(2)
+            pdf.rect(30, 680, 250, 80, stroke=1, fill=0)
+        pdf.showPage()
+        pdf.save()
+        return output.getvalue()
+
+    result = verifier._compare_rendered_layout(
+        render("Ada", False), render("Amy", True), [("Policyholder: Ada", "Policyholder: Amy")]
+    )
+    assert "outside_visual_pixels_changed" in result["errors"]
+    assert result["pixels_changed_outside_targets"] > 0
+
+
+def test_docx_layout_check_detects_changed_embedded_image_pixels():
+    import packages.core.verification.docx as verifier
+    from PIL import Image
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+
+    def render(name: str, color: str) -> bytes:
+        image = Image.new("RGB", (24, 24), color)
+        image_bytes = io.BytesIO()
+        image.save(image_bytes, format="PNG")
+        image_bytes.seek(0)
+        output = io.BytesIO()
+        pdf = canvas.Canvas(output, pagesize=(612, 792))
+        pdf.drawString(40, 740, f"Policyholder: {name}")
+        pdf.drawImage(ImageReader(image_bytes), 400, 600, width=24, height=24)
+        pdf.showPage()
+        pdf.save()
+        return output.getvalue()
+
+    result = verifier._compare_rendered_layout(
+        render("Ada", "red"), render("Amy", "blue"), [("Policyholder: Ada", "Policyholder: Amy")]
+    )
+    assert "outside_visual_pixels_changed" in result["errors"]
+    assert result["pixels_changed_outside_targets"] > 0
+
+
+def test_docx_layout_check_detects_spacing_visual_changes():
+    import packages.core.verification.docx as verifier
+    from reportlab.pdfgen import canvas
+
+    def render(name: str, line_x: int) -> bytes:
+        output = io.BytesIO()
+        pdf = canvas.Canvas(output, pagesize=(612, 792))
+        pdf.drawString(40, 740, f"Policyholder: {name}")
+        pdf.drawString(40, 700, "Coverage remains Standard")
+        pdf.setLineWidth(1)
+        pdf.line(line_x, 680, line_x + 120, 680)
+        pdf.showPage()
+        pdf.save()
+        return output.getvalue()
+
+    result = verifier._compare_rendered_layout(
+        render("Ada", 200), render("Amy", 215), [("Policyholder: Ada", "Policyholder: Amy")]
+    )
+    assert "outside_visual_pixels_changed" in result["errors"]

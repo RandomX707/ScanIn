@@ -166,6 +166,8 @@ The Python suite may skip PostgreSQL-marked tests when no database is available.
 
 Additional limitations include synchronous ingestion, development-only local identities and filesystem storage, sampled (not kernel-enforced) 2 GiB macOS parser RSS monitoring, and an unverified OS-level network boundary on some host configurations. The DOCX safety gate blocks approval until isolated LibreOffice rendering is available. Do not use real policyholder data or treat this prototype as production-ready.
 
+For offline, diagnostic-only comparison of original and candidate DOCX packages, see [DOCX Offline Candidate Diagnostics](docs/DOCX_OFFLINE_DIAGNOSTICS.md). A structural diagnostic result never approves or releases a document; critical visual checks remain `NOT_VERIFIED` unless rendered evidence from an approved isolated renderer is available.
+
 ## License
 
 No license has been assigned to this repository.

@@ -97,6 +97,82 @@ def _qpdfium_layout(pdf: bytes) -> list[list[tuple[str, tuple[float, float, floa
         document.close()
 
 
+def _qpdfium_rendered_pages(pdf: bytes):
+    """Render PDF pages to RGB images for critical non-text visual checks."""
+    import pypdfium2 as pdfium
+
+    document = pdfium.PdfDocument(pdf)
+    try:
+        rendered = []
+        for page in document:
+            bitmap = page.render(scale=1.0)
+            rendered.append((bitmap.to_pil().convert("RGB"), float(page.get_width()), float(page.get_height())))
+            bitmap.close()
+        return rendered
+    finally:
+        document.close()
+
+
+def _compare_rendered_pixels(source_pdf: bytes, candidate_pdf: bytes,
+                             old_glyphs, new_glyphs, old_spans, new_spans,
+                             *, padding_points: float = 4.0) -> dict[str, Any]:
+    from PIL import Image, ImageChops, ImageDraw
+
+    old_pages = _qpdfium_rendered_pages(source_pdf)
+    new_pages = _qpdfium_rendered_pages(candidate_pdf)
+    errors: list[str] = []
+    if len(old_pages) != len(new_pages):
+        return {"errors": ["page_count_changed"], "pixels_changed_outside_targets": None,
+                "pixels_compared_outside_targets": 0}
+    target_boxes: list[list[tuple[float, float, float, float]]] = [[] for _ in old_pages]
+    for glyphs, spans in ((old_glyphs, old_spans), (new_glyphs, new_spans)):
+        for start, end in spans:
+            boxes = [glyphs[index] for index in range(start, end)
+                     if glyphs[index] is not None and glyphs[index][2] is not None]
+            if not boxes:
+                errors.append("target_pixel_region_unavailable")
+                continue
+            pages = {entry[0] for entry in boxes}
+            if len(pages) != 1:
+                errors.append("target_crosses_page_boundary")
+                continue
+            page_number = next(iter(pages))
+            rects = [entry[2] for entry in boxes]
+            target_boxes[page_number].append((min(box[0] for box in rects) - padding_points,
+                                              min(box[1] for box in rects) - padding_points,
+                                              max(box[2] for box in rects) + padding_points,
+                                              max(box[3] for box in rects) + padding_points))
+    if errors:
+        return {"errors": sorted(set(errors)), "pixels_changed_outside_targets": None,
+                "pixels_compared_outside_targets": 0}
+
+    outside_changed = 0
+    outside_compared = 0
+    for page_number, ((old_image, old_width, old_height), (new_image, new_width, new_height)) in enumerate(
+            zip(old_pages, new_pages)):
+        if old_image.size != new_image.size or old_width != new_width or old_height != new_height:
+            errors.append("render_dimensions_changed")
+            continue
+        allowed = Image.new("L", old_image.size, 255)
+        draw = ImageDraw.Draw(allowed)
+        scale_x, scale_y = old_image.width / old_width, old_image.height / old_height
+        for left, bottom, right, top in target_boxes[page_number]:
+            rectangle = (max(0, int((left) * scale_x)),
+                         max(0, int((old_height - top) * scale_y)),
+                         min(old_image.width, int((right) * scale_x) + 1),
+                         min(old_image.height, int((old_height - bottom) * scale_y) + 1))
+            draw.rectangle(rectangle, fill=0)
+        difference = ImageChops.difference(old_image, new_image).convert("L")
+        outside = Image.composite(difference, Image.new("L", difference.size, 0), allowed)
+        outside_changed += sum(outside.histogram()[1:])
+        outside_compared += allowed.histogram()[255]
+    if outside_changed:
+        errors.append("outside_visual_pixels_changed")
+    return {"errors": sorted(set(errors)), "pixels_changed_outside_targets": outside_changed,
+            "pixels_compared_outside_targets": outside_compared,
+            "target_region_padding_points": padding_points}
+
+
 def _flatten_layout(layout: list[list[tuple[str, tuple[float, float, float, float] | None]]]):
     chars: list[str] = []
     glyphs: list[tuple[int, str, tuple[float, float, float, float] | None] | None] = []
@@ -193,9 +269,16 @@ def _compare_rendered_layout(source_pdf: bytes, candidate_pdf: bytes,
             elif any(abs(before - after) > tolerance for before, after in zip(old_box, new_box)):
                 errors.append("outside_content_position_changed")
                 break
+    if not errors:
+        pixels = _compare_rendered_pixels(source_pdf, candidate_pdf, old_glyphs, new_glyphs,
+                                           old_spans, new_spans)
+        errors.extend(pixels["errors"])
+    else:
+        pixels = {"pixels_changed_outside_targets": None,
+                  "pixels_compared_outside_targets": 0}
     return {"errors": sorted(set(errors)), "source_pages": len(old_layout),
             "candidate_pages": len(new_layout), "compared_unchanged_glyphs": min(len(old_unchanged), len(new_unchanged)),
-            "position_tolerance_points": tolerance}
+            "position_tolerance_points": tolerance, **pixels}
 
 
 class DocxIndependentVerifier:
