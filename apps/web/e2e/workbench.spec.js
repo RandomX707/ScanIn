@@ -138,6 +138,22 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await expect(page.getByRole('heading', { name: fixture.filename })).toBeVisible();
   await expect(page.getByText(new RegExp(`SHA-256`))).toBeVisible();
   const adapter = fixture.mime === 'application/json' ? 'json' : fixture.mime === 'text/csv' ? 'csv' : fixture.mime === 'application/pdf' ? 'pdf' : fixture.mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ? 'docx' : 'xlsx';
+  await expect(page.getByRole('tab', { name: 'Summary' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByTestId('structural-summary')).toContainText('Deterministic summary');
+  const summaryList = await (await apiCall(request, processor, '/api/documents')).json();
+  const summaryDocument = summaryList.items.find((item) => item.filename === fixture.filename);
+  const summaryResponse = await apiCall(request, processor, `/api/documents/${summaryDocument.id}/versions/${summaryDocument.current_version_id}/view`);
+  const summaryView = await summaryResponse.json();
+  expect(summaryView.structural_summary.source_sha256).toBe(crypto.createHash('sha256').update(fixture.bytes).digest('hex'));
+  expect(summaryView.structural_summary.source_document_id).toBe(summaryView.document_id);
+  expect(summaryView.structural_summary.source_version_id).toBe(summaryView.version_id);
+  const crossTenantSummary = await apiCall(request, otherTenant, `/api/documents/${summaryDocument.id}/versions/${summaryDocument.current_version_id}/view`);
+  expect(crossTenantSummary.status()).toBe(404);
+  const summaryScreenshotDir = path.resolve(here, '../../../artifacts/ui-redesign');
+  fs.mkdirSync(summaryScreenshotDir, { recursive: true });
+  const notification = page.getByRole('button', { name: 'Dismiss notification' });
+  if (await notification.count()) await notification.click();
+  await page.screenshot({ path: path.join(summaryScreenshotDir, `summary-${adapter}.png`), fullPage: true });
   if (adapter === 'pdf') {
     await expectPdfCanvasRendered(page);
     await page.getByRole('button', { name: 'Next' }).click();
@@ -334,6 +350,16 @@ test('local demo sign-in, navigation, upload and document inspection', async ({ 
   await expect(page.getByRole('button', { name: 'Source document', exact: true })).toHaveCount(0);
   await expect(page.locator('.source-grid')).toBeVisible();
   await page.screenshot({ path: path.join(screenshots, 'document-workspace.png'), fullPage: true });
+  const firstSummaryHash = await page.locator('.source-info code').innerText();
+  await page.getByRole('button', { name: 'Documents' }).click();
+  const secondFilename = `channel360-summary-switch-${crypto.randomUUID()}.json`;
+  await page.getByLabel('Choose a document to upload').setInputFiles({ name: secondFilename,
+    mimeType: 'application/json', buffer: Buffer.from('{"unrelated":{"enabled":true}}') });
+  await page.getByRole('button', { name: 'Upload securely' }).click();
+  await expect(page.getByRole('heading', { name: secondFilename })).toBeVisible();
+  await expect(page.getByTestId('structural-summary')).toContainText('top-level object');
+  await expect(page.locator('.source-info code')).not.toHaveText(firstSummaryHash);
+  await page.screenshot({ path: path.join(screenshots, 'summary-json-switch.png'), fullPage: true });
   await page.getByRole('button', { name: 'Switch identity' }).click();
   await expect(page.getByRole('heading', { name: 'Choose your demo identity' })).toBeVisible();
   await expect(page.getByRole('status')).toHaveCount(0);
@@ -350,6 +376,8 @@ test('DOCX preview remains read only until critical verification is available', 
   await page.getByRole('button', { name: 'Upload securely' }).click();
   await expect(page.getByRole('heading', { name: filename })).toBeVisible();
   await expect(page.getByText('Read-only extracted text')).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Summary' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByTestId('structural-summary')).toContainText('Deterministic summary');
   await expect(page.getByText('DOCX · Read only', { exact: true })).toBeVisible();
   await expect(page.getByText('Policyholder: Ada Example')).toBeVisible();
   const docxBlock = page.locator('.docx-block').filter({ hasText: 'Policyholder: Ada Example' });
@@ -357,6 +385,9 @@ test('DOCX preview remains read only until critical verification is available', 
   await expect(docxBlock.getByRole('button', { name: 'Select for data correction' })).toHaveClass(/selected/);
   const screenshots = path.resolve(here, '../../../artifacts/ui-redesign');
   fs.mkdirSync(screenshots, { recursive: true });
+  const notification = page.getByRole('button', { name: 'Dismiss notification' });
+  if (await notification.count()) await notification.click();
+  await page.screenshot({ path: path.join(screenshots, 'summary-docx.png'), fullPage: true });
   await page.screenshot({ path: path.join(screenshots, 'docx-workspace-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(() => window.scrollTo(0, 0));

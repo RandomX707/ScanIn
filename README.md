@@ -14,6 +14,7 @@ Insurance teams receive structured records in different formats and need to corr
 - Malware scanning before document registration; scanner errors fail closed.
 - Immutable source versions, SHA-256 lineage, audit-chain events and version history.
 - CSV, JSON and XLSX inspection and native correction workflows.
+- A deterministic, source-version-bound Document Summary tab for CSV, JSON, XLSX, PDF and DOCX. Summaries describe observed structure, report limitations, and do not classify documents for editing or alter review/release permissions.
 - Separate data-correction records and native document edit plans.
 - Administrator classification, processor preflight, independent reviewer approval or rejection, and independent release verification.
 - Download access restricted to `VERIFIED` derivatives. Formula-dependent XLSX output can be `INCOMPLETE` and remains unavailable for download.
@@ -31,12 +32,19 @@ Insurance teams receive structured records in different formats and need to corr
 | DOCX | Safe OOXML text/table/header/footer inspection is available. The constrained single-run editor and provenance writer are implemented and unit-tested, but native editing is disabled in the UI and rejected at preflight until isolated LibreOffice layout verification can run. No DOCX derivative is released by the current host. |
 | Other accepted formats | Read-only or unavailable preview depending on format and adapter; upload acceptance does not imply editing support |
 
+The structural summary is generated in the existing restricted parser from the selected immutable source version. Optional AI explanations are a future explicit-request capability; no model, external API, or AI action is currently integrated.
+
 ## Product screenshots
 
 These screenshots use synthetic demo records and contain no session credentials.
 
 | Workspace | Desktop | Narrow viewport |
 | --- | --- | --- |
+| Deterministic summary | ![CSV summary](artifacts/ui-redesign/summary-csv.png) | — |
+| JSON summary and document switching | ![JSON summary](artifacts/ui-redesign/summary-json.png) ![JSON summary after switching documents](artifacts/ui-redesign/summary-json-switch.png) | — |
+| XLSX summary | ![XLSX summary](artifacts/ui-redesign/summary-xlsx.png) | — |
+| PDF summary and page viewer | ![PDF summary](artifacts/ui-redesign/summary-pdf.png) | — |
+| DOCX structural summary | ![DOCX summary with read-only extracted text](artifacts/ui-redesign/summary-docx.png) | — |
 | Native correction | ![Native correction workspace](artifacts/ui-redesign/showcase-workspace-desktop.png) | ![Native correction workspace on a narrow screen](artifacts/ui-redesign/showcase-workspace-mobile.png) |
 | Reviewer queue | ![Reviewer approval queue](artifacts/ui-redesign/showcase-review-queue-desktop.png) | ![Reviewer queue on a narrow screen](artifacts/ui-redesign/showcase-review-queue-mobile.png) |
 | PDF AcroForm workspace | ![PDF page, form targets and frozen correction](artifacts/ui-redesign/native-correction-desktop.png) | ![PDF workspace at 390 pixels](artifacts/ui-redesign/native-correction-mobile.png) |

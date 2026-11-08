@@ -387,6 +387,8 @@ def view_document_version(document_id: str, version_id: str, request: Request,
         "size_bytes": len(source), "media_type": report.media_type,
         "capability": _presentation_capability(report), "adapter": report.adapter,
         "features": list(report.features), "targets": list(report.targets), "details": report.details,
+        "structural_summary": ({**report.structural_summary, "source_document_id": str(parsed_id),
+                                "source_version_id": str(parsed_version_id)} if report.structural_summary else None),
     }
 
 

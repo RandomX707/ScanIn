@@ -42,6 +42,55 @@ def test_content_first_registry_identifies_json_with_mismatched_suffix():
     assert result["findings"] == ["extension_mismatch"]
 
 
+def test_structural_summary_for_csv_uses_real_rows_and_recognized_headers():
+    result = inspect_bytes(b"claim_number,policyholder,amount\nC-17,Example Person,125\nC-18,Another Person,80\n",
+                           filename="claims.csv")
+    summary = result["structural_summary"]
+    assert summary["generation_method"] == "structural"
+    assert summary["format"] == "csv"
+    assert summary["apparent_document_type"] == "insurance claim document"
+    assert summary["statistics"]["record_count"] == 2
+    assert {item["name"] for item in summary["observed_fields"]} >= {"claim_number", "policyholder", "amount"}
+    assert "2 data records" in summary["description"]
+    assert "Example Person" not in summary["description"]
+
+
+def test_structural_summary_for_json_describes_shape_without_inventing_a_type():
+    result = inspect_bytes(b'{"envelope":{"items":[{"reference":"X-1"}]},"enabled":true}', filename="payload.json")
+    summary = result["structural_summary"]
+    assert summary["statistics"]["top_level_structure"] == "object"
+    assert summary["apparent_document_type"] is None
+    assert "envelope contains items" in summary["description"]
+    assert "X-1" not in summary["description"]
+
+
+def test_structural_summary_is_deterministic_and_unknown_type_is_honest():
+    source = b"plain text without a supported document structure"
+    first = inspect_bytes(source, filename="notes.txt")["structural_summary"]
+    second = inspect_bytes(source, filename="notes.txt")["structural_summary"]
+    assert first == second
+    assert first["format"] == "text"
+    assert first["apparent_document_type"] is None
+    assert "unclear" in first["description"].lower()
+    unsupported = inspect_bytes(b"\x89PNG\r\n\x1a\n", filename="image.png")["structural_summary"]
+    assert unsupported["apparent_document_type"] is None
+    assert "could not be read reliably" in unsupported["description"]
+
+
+def test_structural_summary_xlsx_uses_sheet_dimensions_and_headers():
+    from openpyxl import Workbook
+    workbook = Workbook(); sheet = workbook.active; sheet.title = "Claims"
+    sheet.append(["claim_number", "policyholder"]); sheet.append(["CLM-9", "Example"])
+    sheet["C1"] = "=A2"
+    output = io.BytesIO(); workbook.save(output)
+    summary = inspect_bytes(output.getvalue(), filename="claims.xlsx")["structural_summary"]
+    assert summary["format"] == "xlsx"
+    assert summary["statistics"]["worksheets"][0]["rows"] == 2
+    assert summary["statistics"]["worksheets"][0]["columns"] == 3
+    assert summary["apparent_document_type"] == "insurance claim document"
+    assert "=A2" not in summary["description"]
+
+
 def test_restricted_entrypoint_returns_bounded_typed_targets_on_request():
     result = inspect_bytes(b"claim_id,amount\nCLM-1,125\n", filename="claim.csv", include_targets=True)
     assert result["targets"] == [

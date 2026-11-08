@@ -31,6 +31,8 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         reason = profile.reasons[0] if profile.reasons else "invalid_document"
         raise ParserRejected(reason)
     supported = profile.adapter in {"xlsx", "csv", "json", "pdf", "docx"}
+    source_adapter = ({"xlsx": registry.xlsx, "csv": registry.csv, "json": registry.json,
+                       "pdf": registry.pdf, "docx": registry.docx}.get(profile.adapter) if supported else None)
     result = {
         "status": "inspected" if supported else "identified",
         "sha256": digest,
@@ -46,8 +48,6 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         "score": selection.score,
     }
     if include_targets and supported:
-        source_adapter = {"xlsx": registry.xlsx, "csv": registry.csv, "json": registry.json,
-                         "pdf": registry.pdf, "docx": registry.docx}[profile.adapter]
         safe_targets = [target for target in source_adapter.targets(data) if target.editable]
         rejected_targets = source_adapter.unsupported_targets(data)
         all_targets = safe_targets + rejected_targets
@@ -57,6 +57,12 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         result["details"] = _pdf_details(data, registry.pdf, include_targets=include_targets)
     elif supported and profile.adapter == "docx":
         result["details"] = registry.docx.details(data, include_targets=include_targets)
+    from packages.core.summaries.structural import StructuralSummaryProvider
+    summary_targets = all_targets if include_targets and supported else (
+        source_adapter.targets(data) if supported else [])
+    result["structural_summary"] = StructuralSummaryProvider().summarize(
+        source=data, adapter=profile.adapter, details=result.get("details"), targets=[_target_dict(item) for item in summary_targets],
+        sheets=list(profile.sheets))
     return result
 
 

@@ -4,7 +4,7 @@ Updated 2026-11-09. “Validated” below refers to the local synthetic developm
 
 | Capability | Implementation | Evidence and boundary |
 | --- | --- | --- |
-| M0 XLSX integrity/editor | Implemented | Included in 195 passing Python regression tests; input fixture manifest 2/2; formula-dependent case remains incomplete |
+| M0 XLSX integrity/editor | Implemented | Included in 200 passing Python regression tests; input fixture manifest 2/2; formula-dependent case remains incomplete |
 | Tenant isolation and PostgreSQL RLS | Implemented | 22 live PostgreSQL integration tests passed against `channel360_test` |
 | Malware scanning | Implemented, fail-closed | Four real ClamAV checks passed against the configured daemon |
 | CSV and JSON editing | Implemented | Browser upload-to-verified-download workflows passed; originals remain unchanged |
@@ -13,6 +13,7 @@ Updated 2026-11-09. “Validated” below refers to the local synthetic developm
 | Independent approval and rejection | Implemented | Distinct reviewer workflows passed; self-review and cross-tenant checks covered by live integration suite |
 | Version history, audit and verified download | Implemented | Browser round trips and database authorization tests passed |
 | Local demo sign-in | Implemented for local development | API-issued short-lived roles; not a production identity provider |
+| Structural document summary | Implemented for CSV, JSON, XLSX, PDF and DOCX | Deterministic read-only output is hash/version-bound in the tenant-scoped view response; browser tests cover summary rendering, source switching, cross-tenant denial and preserved editing/release workflows. No AI provider is integrated |
 | PDF preview and AcroForm discovery | Implemented for digital and scanned synthetic PDFs | PDF.js Chromium canvas/page navigation and fields pass; scanned pages render without OCR; encrypted is rejected and XFA is read-only |
 | PDF native editing and independent verification | Synthetic acceptance subset passed | 50-case corpus: 40 editable, 8 read-only and 2 rejected. Browser verified downloads cover text, checkbox, radio and dropdown; qpdf/PDFium, prefix, appearance and source-preservation checks pass. Commercial producer diversity remains unverified |
 | DOCX preview | Partial | Sandboxed OOXML text/table/header/footer inspection displays in browser. LibreOffice page preview cannot run in this host; do not represent extracted text as a rendered preview |

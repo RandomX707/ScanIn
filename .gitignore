@@ -48,3 +48,9 @@ test-results/
 !/artifacts/ui-redesign/verified-release-desktop.png
 !/artifacts/ui-redesign/verified-release-mobile.png
 !/artifacts/ui-redesign/incomplete-verification-desktop.png
+!/artifacts/ui-redesign/summary-csv.png
+!/artifacts/ui-redesign/summary-json.png
+!/artifacts/ui-redesign/summary-json-switch.png
+!/artifacts/ui-redesign/summary-xlsx.png
+!/artifacts/ui-redesign/summary-pdf.png
+!/artifacts/ui-redesign/summary-docx.png

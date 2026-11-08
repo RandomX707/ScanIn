@@ -336,7 +336,7 @@ def test_frontend_origin_preflight_is_explicit_and_does_not_allow_credentials():
     with TestClient(_test_app(_settings())) as client:
         allowed = client.options(
             "/api/documents",
-            headers={"Origin": "http://127.0.0.1:5173", "Access-Control-Request-Method": "PUT",
+            headers={"Origin": "http://127.0.0.1:5174", "Access-Control-Request-Method": "PUT",
                      "Access-Control-Request-Headers": "authorization,content-type"},
         )
         denied = client.options(
@@ -344,6 +344,6 @@ def test_frontend_origin_preflight_is_explicit_and_does_not_allow_credentials():
             headers={"Origin": "https://untrusted.example", "Access-Control-Request-Method": "PUT"},
         )
     assert allowed.status_code == 200
-    assert allowed.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+    assert allowed.headers["access-control-allow-origin"] == "http://127.0.0.1:5174"
     assert "access-control-allow-credentials" not in allowed.headers
     assert "access-control-allow-origin" not in denied.headers

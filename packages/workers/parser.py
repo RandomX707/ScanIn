@@ -30,6 +30,7 @@ class ParserReport:
     targets: tuple[dict[str, Any], ...] = ()
     targets_truncated: bool = False
     details: dict[str, Any] | None = None
+    structural_summary: dict[str, Any] | None = None
 
 
 class RestrictedParser:
@@ -68,6 +69,7 @@ class RestrictedParser:
                 findings=tuple(payload.get("findings", ())), score=float(payload.get("score", 0.0)),
                 targets=tuple(payload.get("targets", ())), targets_truncated=bool(payload.get("targets_truncated", False)),
                 details=payload.get("details"),
+                structural_summary=payload.get("structural_summary"),
             )
         except (ValueError, TypeError, KeyError, UnicodeDecodeError):
             raise ParserNotVerified("restricted_parser_response_invalid") from None
