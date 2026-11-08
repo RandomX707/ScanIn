@@ -1,0 +1,278 @@
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any
+
+from PIL import Image, ImageChops, ImageDraw
+from pypdf import PdfReader
+
+from packages.core.models.contracts import CheckResult, PatchPlan, VerifyReport
+
+
+def _blocked(source_hash: str, output_hash: str, reason: str) -> VerifyReport:
+    return VerifyReport((CheckResult("integrity", "FAIL", True, {"reason": reason}),),
+                        "BLOCKED", source_hash, output_hash)
+
+
+def _frozen_plan_hash(plan: PatchPlan) -> str:
+    if not plan.patches:
+        body = {"source_sha256": plan.source_sha256, "patches": [], "provenance": plan.provenance}
+    else:
+        from dataclasses import asdict
+        body = {
+            "source_sha256": plan.source_sha256,
+            "patches": [{"source_version_id": p.source_version_id, "target_id": p.target_id,
+                         "expected_old_value": p.expected_old_value.canonical(),
+                         "expected_fingerprint": p.expected_fingerprint, "new_value": p.new_value.canonical()}
+                        for p in plan.patches],
+            "permissions": [asdict(p) for p in plan.permitted_changes],
+            "provenance": plan.provenance, "dependents": list(plan.dependents),
+            "dependencies_unknown": plan.dependencies_unknown, "no_change": plan.no_change,
+        }
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _read_fields(data: bytes) -> tuple[PdfReader, dict[str, dict[str, Any]]]:
+    reader = PdfReader(io.BytesIO(data), strict=True)
+    if reader.is_encrypted:
+        raise ValueError("encrypted_pdf")
+    fields = reader.get_fields() or {}
+    return reader, {name: dict(field) for name, field in fields.items()}
+
+
+def _resolve(value: Any) -> Any:
+    try:
+        return value.get_object()
+    except (AttributeError, TypeError):
+        return value
+
+
+def _canonical_pdf_object(value: Any) -> Any:
+    if hasattr(value, "get_object"):
+        value = value.get_object()
+    if isinstance(value, dict):
+        return {str(k): _canonical_pdf_object(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+                if str(k) not in {"/P", "/Parent"}}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_pdf_object(item) for item in value]
+    if isinstance(value, bytes):
+        return value.hex()
+    return str(value)
+
+
+def _page_content(page) -> bytes:
+    contents = page.get_contents()
+    return contents.get_data() if contents is not None else b""
+
+
+def _render(data: bytes, scale: float = 1.0) -> list[Image.Image]:
+    import pypdfium2 as pdfium
+
+    document = pdfium.PdfDocument(data)
+    try:
+        result: list[Image.Image] = []
+        for page in document:
+            result.append(page.render(scale=scale, rev_byteorder=True).to_pil().convert("RGB"))
+        return result
+    finally:
+        document.close()
+
+
+class PdfIndependentVerifier:
+    """Critical PDF verifier: qpdf, structural preservation and PDFium pixel comparison."""
+
+    def verify(self, source: bytes, candidate: bytes, plan: PatchPlan) -> VerifyReport:
+        source_hash, output_hash = hashlib.sha256(source).hexdigest(), hashlib.sha256(candidate).hexdigest()
+        if (_frozen_plan_hash(plan) != plan.plan_sha256 or plan.source_sha256 != source_hash
+                or plan.source_version_id != source_hash or plan.no_change or not plan.patches):
+            return _blocked(source_hash, output_hash, "frozen_plan_or_source_mismatch")
+
+        if not candidate.startswith(source):
+            return _blocked(source_hash, output_hash, "original_byte_prefix_not_preserved")
+
+        qpdf = shutil.which("qpdf")
+        if not qpdf:
+            return _blocked(source_hash, output_hash, "qpdf_unavailable")
+        try:
+            with tempfile.TemporaryDirectory(prefix="channel360-pdf-verify-") as temp_dir:
+                path = Path(temp_dir) / "candidate.pdf"
+                path.write_bytes(candidate)
+                qcheck = subprocess.run([qpdf, "--check", str(path)], capture_output=True, timeout=15, check=False)
+            if qcheck.returncode != 0:
+                return _blocked(source_hash, output_hash, "qpdf_check_failed")
+        except (OSError, subprocess.TimeoutExpired):
+            return _blocked(source_hash, output_hash, "qpdf_check_unavailable")
+
+        try:
+            old_reader, old_fields = _read_fields(source)
+            new_reader, new_fields = _read_fields(candidate)
+            if len(old_reader.pages) != len(new_reader.pages):
+                return _blocked(source_hash, output_hash, "page_count_changed")
+            if old_fields.keys() != new_fields.keys():
+                return _blocked(source_hash, output_hash, "field_set_changed")
+        except Exception:
+            return _blocked(source_hash, output_hash, "independent_pdf_parse_failed")
+
+        target_names = {p.target_id.removeprefix("pdf:") for p in plan.patches}
+        allowed = {(p.part, p.locator, p.operation) for p in plan.permitted_changes}
+        permission_ok = (len(target_names) == len(plan.patches)
+                         and allowed == {("pdf", p.target_id, "replace_value") for p in plan.patches})
+        value_errors: list[str] = []
+        for patch in plan.patches:
+            name = patch.target_id.removeprefix("pdf:")
+            field = new_fields.get(name)
+            old = old_fields.get(name)
+            actual_value = str(field.get("/V", "")) if field is not None else ""
+            matches = (actual_value != "/Off") if patch.new_value.type == "boolean" and patch.new_value.value else (
+                actual_value == "/Off" if patch.new_value.type == "boolean" else
+                actual_value.lstrip("/") == str(patch.new_value.value) if field and str(field.get("/FT")) == "/Btn" else
+                actual_value == str(patch.new_value.value))
+            if field is None or old is None or not matches:
+                value_errors.append(f"{patch.target_id}:readback_mismatch")
+            widgets = _target_widget_objects(new_reader, name)
+            if not widgets or any(not _has_normal_appearance(widget) for widget in widgets):
+                value_errors.append(f"{patch.target_id}:appearance_stream_missing")
+            if field is not None and str(field.get("/FT", "")) == "/Btn":
+                selected_state = str(field.get("/V", "/Off"))
+                for widget in widgets:
+                    appearance = _resolve(widget.get("/AP", {}))
+                    normal = _resolve(appearance.get("/N", {})) if appearance else {}
+                    actual_state = str(widget.get("/AS", "/Off"))
+                    if selected_state != "/Off" and actual_state not in {selected_state, "/Off"}:
+                        value_errors.append(f"{patch.target_id}:button_appearance_state_mismatch")
+                    if actual_state not in {str(key) for key in normal}:
+                        value_errors.append(f"{patch.target_id}:button_appearance_state_missing")
+        unintended = [name for name in old_fields if name not in target_names
+                      and _canonical_pdf_object(old_fields[name]) != _canonical_pdf_object(new_fields[name])]
+        for name in target_names & old_fields.keys():
+            for key in ("/FT", "/Ff", "/MaxLen", "/Opt", "/DV"):
+                if _canonical_pdf_object(old_fields[name].get(key)) != _canonical_pdf_object(new_fields[name].get(key)):
+                    value_errors.append(f"pdf:{name}:{key}:changed")
+        if any(_page_content(old_reader.pages[i]) != _page_content(new_reader.pages[i]) for i in range(len(old_reader.pages))):
+            unintended.append("page_content_changed")
+
+        # Require exact non-target annotation preservation and unchanged page-level annotations.
+        annotation_errors: list[str] = []
+        for page_index, (old_page, new_page) in enumerate(zip(old_reader.pages, new_reader.pages)):
+            old_annots = _canonical_annotations(old_page, target_names)
+            new_annots = _canonical_annotations(new_page, target_names)
+            if len(old_annots) != len(new_annots):
+                annotation_errors.append(f"page_{page_index + 1}:annotation_count_changed")
+            # Widget appearance/value object updates are permitted only on target fields.
+            # Stable annotation geometry/order and all non-widget annotations must remain.
+            if old_annots != new_annots:
+                annotation_errors.append(f"page_{page_index + 1}:unrelated_annotation_changed")
+
+        try:
+            before, after = _render(source), _render(candidate)
+            if len(before) != len(after):
+                raise ValueError("render_page_count_changed")
+            visual_errors: list[str] = []
+            for page_index, (old_img, new_img) in enumerate(zip(before, after)):
+                if old_img.size != new_img.size:
+                    visual_errors.append(f"page_{page_index + 1}:render_size_changed")
+                    continue
+                diff = ImageChops.difference(old_img, new_img).convert("L")
+                mask = Image.new("L", old_img.size, 255)
+                draw = ImageDraw.Draw(mask)
+                for patch in plan.patches:
+                    for widget in _target_widgets(old_reader, patch.target_id.removeprefix("pdf:")):
+                        if widget["page"] != page_index + 1:
+                            continue
+                        x0, y0, x1, y1 = widget["rect"]
+                        pad = 3
+                        draw.rectangle((max(0, int(x0) - pad), max(0, int(old_img.height - y1) - pad),
+                                        min(old_img.width, int(x1) + pad), min(old_img.height, int(old_img.height - y0) + pad)),
+                                       fill=0)
+                diff = ImageChops.multiply(diff, mask)
+                if diff.getbbox() is not None:
+                    visual_errors.append(f"page_{page_index + 1}:pixels_changed_outside_target_widgets")
+        except Exception as exc:
+            return _blocked(source_hash, output_hash, f"critical_visual_check_unavailable:{type(exc).__name__}")
+
+        results = [
+            CheckResult("integrity", "PASS", True, {"qpdf_check": "PASS", "original_byte_prefix": True,
+                                                      "page_count": len(old_reader.pages)}),
+            CheckResult("policy", "PASS" if permission_ok else "FAIL", True,
+                        {"target_permissions_match": permission_ok}),
+            CheckResult("intent", "PASS" if not value_errors else "FAIL", True, {"errors": value_errors}),
+            CheckResult("preservation", "PASS" if not unintended and not annotation_errors else "FAIL", True,
+                        {"unintended_changes": unintended, "annotation_errors": annotation_errors}),
+            CheckResult("provenance", "PASS" if _provenance_matches(new_reader, plan) else "FAIL", True,
+                        {"metadata_matches_frozen_plan": _provenance_matches(new_reader, plan)}),
+            CheckResult("visual", "PASS" if not visual_errors else "FAIL", True,
+                        {"renderer": "pypdfium2", "checked_every_page": True, "errors": visual_errors}),
+        ]
+        outcome = "VERIFIED" if all(item.status == "PASS" for item in results) else "BLOCKED"
+        return VerifyReport(tuple(results), outcome, source_hash, output_hash)
+
+
+def _target_widgets(reader: PdfReader, name: str) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for page_number, page in enumerate(reader.pages, start=1):
+        for reference in page.get("/Annots", []):
+            widget = reference.get_object()
+            if str(widget.get("/Subtype", "")) != "/Widget":
+                continue
+            pieces = [str(widget["/T"])] if widget.get("/T") is not None else []
+            parent = widget.get("/Parent")
+            while parent is not None:
+                parent = parent.get_object()
+                if parent.get("/T") is not None:
+                    pieces.insert(0, str(parent["/T"]))
+                parent = parent.get("/Parent")
+            if ".".join(pieces) == name:
+                found.append({"page": page_number, "rect": [float(x) for x in widget.get("/Rect", [])]})
+    return found
+
+
+def _target_widget_objects(reader: PdfReader, name: str) -> list[Any]:
+    found: list[Any] = []
+    for page in reader.pages:
+        for reference in page.get("/Annots", []):
+            widget = reference.get_object()
+            if str(widget.get("/Subtype", "")) == "/Widget" and _widget_field_name(widget) == name:
+                found.append(widget)
+    return found
+
+
+def _has_normal_appearance(widget: Any) -> bool:
+    appearance = _resolve(widget.get("/AP", {}))
+    return bool(appearance and _resolve(appearance.get("/N")))
+
+
+def _canonical_annotations(page, target_names: set[str]) -> list[Any]:
+    output = []
+    for reference in page.get("/Annots", []):
+        annotation = reference.get_object()
+        field_name = _widget_field_name(annotation) if str(annotation.get("/Subtype", "")) == "/Widget" else None
+        normalized = _canonical_pdf_object(annotation)
+        if field_name in target_names:
+            normalized = {key: value for key, value in normalized.items() if key not in {"/AP", "/V", "/AS", "/I"}}
+        output.append(normalized)
+    return output
+
+
+def _widget_field_name(widget) -> str:
+    pieces = [str(widget["/T"])] if widget.get("/T") is not None else []
+    parent = widget.get("/Parent")
+    while parent is not None:
+        parent = parent.get_object()
+        if parent.get("/T") is not None:
+            pieces.insert(0, str(parent["/T"]))
+        parent = parent.get("/Parent")
+    return ".".join(pieces)
+
+
+def _provenance_matches(reader: PdfReader, plan: PatchPlan) -> bool:
+    metadata = reader.metadata or {}
+    provenance = plan.provenance_dict()
+    return (str(metadata.get("/Channel360_Source_SHA256", "")) == plan.source_sha256
+            and str(metadata.get("/Channel360_Edit_Set", "")) == provenance.get("edit_set_id", "")
+            and str(metadata.get("/Channel360_Patch_Plan_SHA256", "")) == plan.plan_sha256)
