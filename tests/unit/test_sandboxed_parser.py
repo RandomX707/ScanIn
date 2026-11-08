@@ -85,6 +85,7 @@ def test_structural_summary_xlsx_uses_sheet_dimensions_and_headers():
     workbook = Workbook(); sheet = workbook.active; sheet.title = "Claims"
     sheet.append(["claim_number", "policyholder"]); sheet.append(["CLM-9", "Example"])
     sheet["C1"] = "=A2"
+    workbook.create_sheet("Totals").append(["records"])
     output = io.BytesIO(); workbook.save(output)
     summary = inspect_bytes(output.getvalue(), filename="claims.xlsx")["structural_summary"]
     assert summary["format"] == "xlsx"
@@ -92,6 +93,7 @@ def test_structural_summary_xlsx_uses_sheet_dimensions_and_headers():
     assert summary["statistics"]["worksheets"][0]["columns"] == 3
     assert summary["apparent_document_type"] == "insurance claim document"
     assert "=A2" not in summary["description"]
+    assert "Totals (1 row × 1 column)" in summary["description"]
 
 
 def test_restricted_entrypoint_returns_bounded_typed_targets_on_request():

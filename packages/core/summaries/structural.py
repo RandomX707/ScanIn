@@ -138,7 +138,9 @@ class StructuralSummaryProvider:
             stats = {"worksheet_count": len(sheet_stats), "worksheets": sheet_stats}
             names = [header for sheet in sheet_stats for header in sheet["headers"]]
             apparent_type = _insurance_type(names)
-            summary_sheets = "; ".join(f"{sheet['name']} ({sheet['rows']} rows × {sheet['columns']} columns)" for sheet in sheet_stats[:6]) or "no readable worksheets"
+            summary_sheets = "; ".join(
+                f"{sheet['name']} ({_count_phrase(sheet['rows'], 'row')} × {_count_phrase(sheet['columns'], 'column')})"
+                for sheet in sheet_stats[:6]) or "no readable worksheets"
             description = f"This workbook contains {len(sheet_stats)} worksheets: {summary_sheets}."
             if names:
                 description += " The first-row headings indicate tabular content, including " + ", ".join(names[:8]) + "."
@@ -248,6 +250,10 @@ def _json_kind(value: Any) -> str:
 
 def _pointer(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
+
+
+def _count_phrase(count: int, noun: str) -> str:
+    return f"{count} {noun if count == 1 else noun + 's'}"
 
 
 def _recognized_sections(text: str) -> list[str]:

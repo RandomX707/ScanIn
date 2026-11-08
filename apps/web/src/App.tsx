@@ -32,7 +32,7 @@ function summaryStatValue(key: string, value: unknown): string {
   if (Array.isArray(value)) return value.map((item) => {
     if (item && typeof item === "object") {
       const sheet = item as { name?: string; rows?: number; columns?: number; headers?: string[] };
-      return `${sheet.name ?? "Worksheet"}: ${sheet.rows ?? 0} rows × ${sheet.columns ?? 0} columns${sheet.headers?.length ? ` · headings ${sheet.headers.join(", ")}` : ""}`;
+      return `${sheet.name ?? "Worksheet"}: ${countLabel(sheet.rows ?? 0, "row")} × ${countLabel(sheet.columns ?? 0, "column")}${sheet.headers?.length ? ` · headings ${sheet.headers.join(", ")}` : ""}`;
     }
     return String(item);
   }).join("; ");
@@ -40,6 +40,7 @@ function summaryStatValue(key: string, value: unknown): string {
   if (key.endsWith("_bytes")) return `${Number(value).toLocaleString()} bytes`;
   return String(value);
 }
+function countLabel(count: number, noun: string) { return `${count} ${noun}${count === 1 ? "" : "s"}`; }
 function summaryStatName(key: string): string {
   return ({ record_count: "Data records", column_count: "Columns", top_level_structure: "Top-level shape",
     top_level_key_count: "Named fields", top_level_item_count: "Top-level items", worksheet_count: "Worksheets",
