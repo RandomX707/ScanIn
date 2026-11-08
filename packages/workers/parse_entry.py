@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import sys
 from pathlib import Path
@@ -29,7 +30,7 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
     if profile.level == "rejected":
         reason = profile.reasons[0] if profile.reasons else "invalid_document"
         raise ParserRejected(reason)
-    supported = profile.adapter in {"xlsx", "csv", "json"}
+    supported = profile.adapter in {"xlsx", "csv", "json", "pdf", "docx"}
     result = {
         "status": "inspected" if supported else "identified",
         "sha256": digest,
@@ -45,17 +46,22 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         "score": selection.score,
     }
     if include_targets and supported:
-        source_adapter = {"xlsx": registry.xlsx, "csv": registry.csv, "json": registry.json}[profile.adapter]
-        safe_targets = source_adapter.targets(data)
+        source_adapter = {"xlsx": registry.xlsx, "csv": registry.csv, "json": registry.json,
+                         "pdf": registry.pdf, "docx": registry.docx}[profile.adapter]
+        safe_targets = [target for target in source_adapter.targets(data) if target.editable]
         rejected_targets = source_adapter.unsupported_targets(data)
         all_targets = safe_targets + rejected_targets
         result["targets"] = [_target_dict(target) for target in all_targets[:MAX_TARGETS]]
         result["targets_truncated"] = len(all_targets) > MAX_TARGETS
+    if supported and profile.adapter == "pdf":
+        result["details"] = _pdf_details(data, registry.pdf, include_targets=include_targets)
+    elif supported and profile.adapter == "docx":
+        result["details"] = registry.docx.details(data, include_targets=include_targets)
     return result
 
 
 def _target_dict(target: Any) -> dict[str, Any]:
-    return {
+    result = {
         "id": target.id,
         "sheet": target.sheet,
         "cell": target.cell,
@@ -66,6 +72,50 @@ def _target_dict(target: Any) -> dict[str, Any]:
         "reason": target.reason,
         "dependents": list(target.dependents) if target.dependents is not None else None,
     }
+    for name in ("field_type", "native_locator", "options", "max_length", "font_size", "part"):
+        value = getattr(target, name, None)
+        if value is not None:
+            result[name] = list(value) if name == "options" else value
+    return result
+
+
+def _pdf_details(data: bytes, adapter, *, include_targets: bool) -> dict[str, Any]:
+    from pypdf import PdfReader
+    import pypdfium2 as pdfium
+
+    reader = PdfReader(io.BytesIO(data), strict=True)
+    fields = adapter.targets(data) if include_targets else []
+    field_rows = [{"id": field.id, "name": field.label, "type": field.field_type,
+                   "value": field.value.canonical(), "editable": field.editable, "reason": field.reason,
+                   "fingerprint": field.fingerprint, "native_locator": field.native_locator,
+                   "options": list(field.options), "max_length": field.max_length}
+                  for field in fields]
+    pages: list[dict[str, Any]] = []
+    document = pdfium.PdfDocument(data)
+    try:
+        for page_number, page in enumerate(document, start=1):
+            text_page = page.get_textpage()
+            count = min(text_page.count_chars(), 10000)
+            text = text_page.get_text_range(0, count)
+            spans: list[dict[str, Any]] = []
+            for char_index, char in enumerate(text[:2000]):
+                if char.isspace():
+                    continue
+                try:
+                    left, bottom, right, top = text_page.get_charbox(char_index)
+                except (IndexError, ValueError):
+                    continue
+                spans.append({"start": char_index, "end": char_index + 1, "text": char,
+                              "bbox": [round(left, 2), round(bottom, 2), round(right, 2), round(top, 2)]})
+            pages.append({"page": page_number, "width": round(page.get_size()[0], 2),
+                          "height": round(page.get_size()[1], 2), "text": text,
+                          "text_spans": spans, "scanned_or_image_only": not bool(text.strip())})
+    finally:
+        document.close()
+    return {"page_count": len(reader.pages), "title": str((reader.metadata or {}).get("/Title", "")),
+            "author": str((reader.metadata or {}).get("/Author", "")), "pages": pages,
+            "fields": field_rows, "xfa": bool(adapter._xfa_present(data)) if hasattr(adapter, "_xfa_present") else False,
+            "preview_note": "Scanned pages are shown without OCR; only detected AcroForm fields are editable."}
 
 
 def main() -> int:

@@ -77,11 +77,10 @@ def test_path_traversal_member_is_rejected():
         inspect_bytes(data)
 
 
-def test_non_xlsx_zip_is_explicit_read_only():
+def test_malformed_docx_zip_is_rejected():
     data = _xlsx({"word/document.xml": b"<document />"})
-    result = inspect_bytes(data)
-    assert result["capability"]["level"] == "Read-only"
-    assert "adapter_not_implemented" in result["capability"]["reasons"]
+    with pytest.raises(ParserRejected, match="not_docx"):
+        inspect_bytes(data)
 
 
 def test_nested_archives_are_rejected_without_extraction(tmp_path):

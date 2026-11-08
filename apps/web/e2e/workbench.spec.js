@@ -42,6 +42,11 @@ const fixtures = [
     bytes: fs.readFileSync(path.resolve(here, '../../../artifacts/m0/m0_original.xlsx')),
     target: 'xlsx:Claim!G2', oldValue: 'constant', newValue: 'confirmed', unrelated: 'CLM-1001',
   },
+  {
+    name: 'PDF AcroForm verified release', filename: 'synthetic-form.pdf', mime: 'application/pdf',
+    bytes: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-form.pdf')),
+    target: 'pdf:claimant_name', oldValue: 'Ada Example', newValue: 'Ada Demo', unrelated: 'Synthetic continuation page',
+  },
 ];
 
 async function apiCall(request, token, route, options = {}) {
@@ -71,6 +76,10 @@ async function connect(page, role, filename) {
 async function selectTarget(page, targetId, adapter) {
   if (adapter === 'json') {
     await page.getByRole('option').filter({ hasText: targetId.replace('json:', '') }).click();
+  } else if (adapter === 'pdf') {
+    await page.locator('.pdf-field-row').filter({ hasText: targetId.replace('pdf:', '') }).click();
+  } else if (adapter === 'docx') {
+    await page.locator('.docx-block').filter({ hasText: 'Policyholder: Ada Example' }).getByRole('button', { name: /Select .*target|Select for data correction/ }).click();
   } else {
     await page.locator(`.grid-value[title^="${targetId}"]`).click();
   }
@@ -81,8 +90,23 @@ async function readBytes(response) {
   return Buffer.from(await response.body());
 }
 
+async function expectPdfCanvasRendered(page) {
+  const canvas = page.locator('.pdf-workspace canvas');
+  await expect(canvas).toBeVisible();
+  await expect.poll(() => canvas.evaluate((element) => {
+    const context = element.getContext('2d');
+    if (!context || element.width === 0 || element.height === 0) return false;
+    const pixels = context.getImageData(0, 0, element.width, element.height).data;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index] < 245 || pixels[index + 1] < 245 || pixels[index + 2] < 245) return true;
+    }
+    return false;
+  })).toBeTruthy();
+}
+
 async function verifiedRoundTrip({ page, request }, fixture) {
   fixture = { ...fixture, filename: uniqueFixtureFilename(fixture.filename) };
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/');
   await connect(page, 'processor');
   await page.getByRole('button', { name: 'Documents' }).click();
@@ -90,7 +114,14 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await page.getByRole('button', { name: 'Upload securely' }).click();
   await expect(page.getByRole('heading', { name: fixture.filename })).toBeVisible();
   await expect(page.getByText(new RegExp(`SHA-256`))).toBeVisible();
-  const adapter = fixture.mime === 'application/json' ? 'json' : fixture.mime === 'text/csv' ? 'csv' : 'xlsx';
+  const adapter = fixture.mime === 'application/json' ? 'json' : fixture.mime === 'text/csv' ? 'csv' : fixture.mime === 'application/pdf' ? 'pdf' : fixture.mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ? 'docx' : 'xlsx';
+  if (adapter === 'pdf') {
+    await expectPdfCanvasRendered(page);
+    await page.getByRole('button', { name: 'Next' }).click();
+    await expect(page.getByText('Page 2 of 2')).toBeVisible();
+    await page.getByRole('button', { name: 'Previous' }).click();
+    await expect(page.getByText('Page 1 of 2')).toBeVisible();
+  }
   await selectTarget(page, fixture.target, adapter);
   await expect(page.getByText(fixture.target, { exact: false }).first()).toBeVisible();
 
@@ -125,17 +156,19 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await page.getByRole('button', { name: 'Create correction draft' }).click();
   const editCard = page.locator('.workflow-status');
   await editCard.getByLabel('Selected target value').fill(fixture.newValue);
-  await editCard.getByLabel('Native value type').selectOption('string');
+  await editCard.getByLabel('Native value type').selectOption(fixture.target === 'pdf:consent' ? 'boolean' : 'string');
   await page.getByRole('button', { name: 'Add selected target patch' }).click();
   await expect(page.getByRole('status')).toContainText(/Native patch prepared/);
   await page.getByRole('button', { name: 'Preflight and freeze' }).click();
   await expect(page.getByRole('status')).toContainText(/Preflight complete: submitted/);
   const screenshots = path.resolve(here, '../../../artifacts/ui-redesign');
   fs.mkdirSync(screenshots, { recursive: true });
+  await page.evaluate(() => window.scrollTo(0, 0));
   await page.getByRole('button', { name: 'Dismiss notification' }).click();
   await page.screenshot({ path: path.join(screenshots, 'native-correction-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: path.join(screenshots, 'native-correction-mobile.png'), fullPage: true });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: path.join(screenshots, 'native-correction-mobile.png') });
   await page.setViewportSize({ width: 1440, height: 1000 });
 
   const staleDraftResponse = await apiCall(request, processor, `/api/documents/${documentId}/edit-sets`, {
@@ -158,7 +191,7 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   fs.mkdirSync(path.resolve(here, '../../../artifacts/ui-redesign'), { recursive: true });
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/approval-queue-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/approval-queue-mobile.png'), fullPage: true });
+  await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/approval-queue-mobile.png') });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.locator('.approval-card').filter({ hasText: fixture.filename }).getByRole('button', { name: 'Approve change' }).click();
   await page.getByRole('button', { name: 'Confirm approval' }).click();
@@ -166,7 +199,7 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await expect(page.locator('.approval-card').filter({ hasText: fixture.filename })).toHaveCount(0);
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/reviewer-approved-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/reviewer-approved-mobile.png'), fullPage: true });
+  await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/reviewer-approved-mobile.png') });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await connect(page, 'processor', fixture.filename);
   await page.getByRole('tab', { name: 'Native changes' }).click();
@@ -178,7 +211,7 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   const uiVerification = JSON.parse(await verification.locator('pre').innerText());
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/verified-release-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/verified-release-mobile.png'), fullPage: true });
+  await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/verified-release-mobile.png') });
   await page.setViewportSize({ width: 1440, height: 1000 });
 
   const releaseResponse = await apiCall(request, processor, `/api/documents/${documentId}/edit-sets/${submitted.edit_set_id}/release`, { method: 'POST' });
@@ -209,8 +242,11 @@ async function verifiedRoundTrip({ page, request }, fixture) {
     const after = JSON.parse(derivedBytes.toString('utf8'));
     expect(after.policy_number).toBe(before.policy_number);
     expect(after.loss_amount).toBe(before.loss_amount);
-  } else {
+  } else if (adapter === 'xlsx') {
     expect(uiVerification.checks.some((check) => check.check === 'preservation' && check.status === 'PASS')).toBeTruthy();
+  } else if (adapter === 'pdf') {
+    expect(derivedBytes.subarray(0, fixture.bytes.length).equals(fixture.bytes)).toBeTruthy();
+    expect(uiVerification.checks.some((check) => check.check === 'visual' && check.status === 'PASS')).toBeTruthy();
   }
   const history = await (await apiCall(request, processor, `/api/documents/${documentId}/versions`)).json();
   expect(history.items.some((item) => item.version_id === originalVersion && item.sha256 === originalSha)).toBeTruthy();
@@ -272,6 +308,133 @@ test('local demo sign-in, navigation, upload and document inspection', async ({ 
   await page.getByRole('button', { name: 'Switch identity' }).click();
   await expect(page.getByRole('heading', { name: 'Choose your demo identity' })).toBeVisible();
   await expect(page.getByRole('status')).toHaveCount(0);
+});
+
+test('DOCX preview remains read only until critical verification is available', async ({ page, request }) => {
+  const fixture = fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-claim.docx'));
+  const filename = uniqueFixtureFilename('synthetic-claim.docx');
+  await page.goto('/');
+  await connect(page, 'processor');
+  await page.getByRole('button', { name: 'Documents' }).click();
+  await page.getByLabel('Choose a document to upload').setInputFiles({ name: filename,
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: fixture });
+  await page.getByRole('button', { name: 'Upload securely' }).click();
+  await expect(page.getByRole('heading', { name: filename })).toBeVisible();
+  await expect(page.getByText('Read-only extracted text')).toBeVisible();
+  await expect(page.getByText('DOCX · Read only', { exact: true })).toBeVisible();
+  await expect(page.getByText('Policyholder: Ada Example')).toBeVisible();
+  const docxBlock = page.locator('.docx-block').filter({ hasText: 'Policyholder: Ada Example' });
+  await docxBlock.getByRole('button', { name: 'Select for data correction' }).click();
+  await expect(docxBlock.getByRole('button', { name: 'Select for data correction' })).toHaveClass(/selected/);
+  const screenshots = path.resolve(here, '../../../artifacts/ui-redesign');
+  fs.mkdirSync(screenshots, { recursive: true });
+  await page.screenshot({ path: path.join(screenshots, 'docx-workspace-desktop.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: path.join(screenshots, 'docx-workspace-mobile.png') });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  const list = await (await apiCall(request, processor, '/api/documents')).json();
+  const uploaded = list.items.find((item) => item.filename === filename);
+  expect(uploaded).toBeTruthy();
+  const docId = uploaded.id;
+  const original = Buffer.from(await (await apiCall(request, processor, `/api/documents/${docId}/original`)).body());
+  expect(original.equals(fixture)).toBeTruthy();
+  const view = await (await apiCall(request, processor, `/api/documents/${docId}/versions/${uploaded.current_version_id}/view`)).json();
+  expect(view.capability.level).toBe('read_only');
+  const target = view.targets.find((entry) => entry.id.includes('document.xml:p1:'));
+  expect(target.editable).toBeTruthy();
+  const classified = await apiCall(request, administrator, `/api/documents/${docId}/category`, {
+    method: 'PUT', data: { category: 'insurer-authored' },
+  });
+  expect(classified.ok()).toBeTruthy();
+  const draftResponse = await apiCall(request, processor, `/api/documents/${docId}/edit-sets`, {
+    method: 'POST', data: { reason: 'Synthetic DOCX browser correction' },
+  });
+  expect(draftResponse.ok()).toBeTruthy();
+  const draft = await draftResponse.json();
+  const patched = await apiCall(request, processor, `/api/documents/${docId}/edit-sets/${draft.edit_set_id}/patches`, {
+    method: 'PUT', data: { patches: [{ target_id: target.id, fingerprint: target.fingerprint,
+      new_value: { type: 'string', value: 'Policyholder: Casey Demo' } }] },
+  });
+  expect(patched.ok()).toBeTruthy();
+  const preflight = await apiCall(request, processor, `/api/documents/${docId}/edit-sets/${draft.edit_set_id}/preflight`, { method: 'POST' });
+  await page.getByRole('tab', { name: 'Native changes' }).click();
+  await expect(page.getByText(/Native DOCX changes are disabled/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Create correction draft' })).toHaveCount(0);
+  expect(preflight.status()).toBe(422);
+  expect((await preflight.json()).code).toBe('critical_docx_verification_unavailable');
+  const edits = await (await apiCall(request, processor, `/api/documents/${docId}/edit-sets`)).json();
+  expect(edits.items.find((item) => item.edit_set_id === draft.edit_set_id).status).toBe('draft');
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: path.join(screenshots, 'docx-blocked-verification-desktop.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: path.join(screenshots, 'docx-blocked-verification-mobile.png') });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await connect(page, 'reviewer');
+  await page.getByRole('button', { name: 'Review queue' }).click();
+  await expect(page.locator('.approval-card').filter({ hasText: filename })).toHaveCount(0);
+  const after = Buffer.from(await (await apiCall(request, processor, `/api/documents/${docId}/original`)).body());
+  expect(after.equals(original)).toBeTruthy();
+  const versions = await (await apiCall(request, processor, `/api/documents/${docId}/versions`)).json();
+  expect(versions.items).toHaveLength(1);
+  await page.screenshot({ path: path.join(screenshots, 'docx-review-queue-desktop.png'), fullPage: true });
+});
+
+test('unsupported encrypted PDF and tracked-change DOCX remain read only in the browser', async ({ page }) => {
+  const screenshots = path.resolve(here, '../../../artifacts/ui-redesign');
+  fs.mkdirSync(screenshots, { recursive: true });
+  await page.goto('/');
+  await connect(page, 'processor');
+  await page.getByRole('button', { name: 'Documents' }).click();
+  const encryptedName = uniqueFixtureFilename('synthetic-encrypted.pdf');
+  await page.getByLabel('Choose a document to upload').setInputFiles({ name: encryptedName, mimeType: 'application/pdf',
+    buffer: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-encrypted.pdf')) });
+  await page.getByRole('button', { name: 'Upload securely' }).click();
+  await expect(page.getByRole('heading', { name: encryptedName })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Safe preview is unavailable' })).toBeVisible();
+  await expect(page.locator('.pdf-field-row')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Create correction draft' })).toHaveCount(0);
+  await page.screenshot({ path: path.join(screenshots, 'encrypted-pdf-read-only.png'), fullPage: true });
+
+  await page.getByRole('button', { name: 'Documents' }).click();
+  const xfaName = uniqueFixtureFilename('synthetic-xfa.pdf');
+  await page.getByLabel('Choose a document to upload').setInputFiles({ name: xfaName, mimeType: 'application/pdf',
+    buffer: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-xfa.pdf')) });
+  await page.getByRole('button', { name: 'Upload securely' }).click();
+  await expect(page.getByRole('heading', { name: xfaName })).toBeVisible();
+  await expect(page.getByText('PDF · Read only', { exact: true })).toBeVisible();
+  await expectPdfCanvasRendered(page);
+  const xfaFields = page.locator('.pdf-field-row');
+  await expect(xfaFields).not.toHaveCount(0);
+  for (const button of await xfaFields.all()) await expect(button).toBeDisabled();
+  await page.screenshot({ path: path.join(screenshots, 'xfa-pdf-read-only.png'), fullPage: true });
+
+  await page.getByRole('button', { name: 'Documents' }).click();
+  const scannedName = uniqueFixtureFilename('synthetic-scanned.pdf');
+  await page.getByLabel('Choose a document to upload').setInputFiles({ name: scannedName, mimeType: 'application/pdf',
+    buffer: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-scanned.pdf')) });
+  await page.getByRole('button', { name: 'Upload securely' }).click();
+  await expect(page.getByRole('heading', { name: scannedName })).toBeVisible();
+  await expectPdfCanvasRendered(page);
+  await expect(page.getByText('No fillable AcroForm fields were found. The PDF remains read-only.')).toBeVisible();
+  await page.screenshot({ path: path.join(screenshots, 'scanned-pdf-read-only.png'), fullPage: true });
+
+  await page.getByRole('button', { name: 'Documents' }).click();
+  const trackedName = uniqueFixtureFilename('synthetic-tracked-changes.docx');
+  await page.getByLabel('Choose a document to upload').setInputFiles({ name: trackedName,
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    buffer: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-tracked-changes.docx')) });
+  await page.getByRole('button', { name: 'Upload securely' }).click();
+  await expect(page.getByRole('heading', { name: trackedName })).toBeVisible();
+  await expect(page.getByText('Read-only extracted text')).toBeVisible();
+  const blockedTargets = page.locator('.text-target');
+  await expect(blockedTargets).not.toHaveCount(0);
+  for (const button of await blockedTargets.all()) await expect(button).toBeDisabled();
+  await page.getByRole('tab', { name: 'Native changes' }).click();
+  await expect(page.getByRole('button', { name: 'Create correction draft' })).toHaveCount(0);
+  await page.screenshot({ path: path.join(screenshots, 'tracked-docx-read-only.png'), fullPage: true });
 });
 
 test('independent reviewer can reject a submitted change', async ({ page, request }) => {

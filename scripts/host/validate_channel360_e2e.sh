@@ -95,7 +95,7 @@ browser_setup() {
 }
 
 browser() {
-  WEB_URL=${IDW_WEB_BASE_URL:-http://127.0.0.1:${IDW_WEB_PORT:-5173}}
+  WEB_URL=${IDW_WEB_BASE_URL:-http://127.0.0.1:${IDW_WEB_PORT:-5174}}
   if [ ! -x apps/web/node_modules/.bin/playwright ]; then
     echo "Run browser-setup first; it installs the pinned local Playwright runner and Chromium." >&2
     exit 2

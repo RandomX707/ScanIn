@@ -26,8 +26,12 @@ from packages.workers.lifecycle import WorkerLifecycleRepository
 from packages.core.adapters.csv_adapter.adapter import CsvAdapter
 from packages.core.adapters.json_adapter.adapter import JsonAdapter
 from packages.core.adapters.xlsx.adapter import XlsxAdapter
+from packages.core.adapters.pdf.adapter import PdfAdapter
+from packages.core.adapters.docx.adapter import DocxAdapter
 from packages.core.models.contracts import Patch
 from packages.core.verification.text_adapters import CsvIndependentVerifier, JsonIndependentVerifier
+from packages.core.verification.pdf import PdfIndependentVerifier
+from packages.core.verification.docx import DocxIndependentVerifier
 from packages.core.verification.independent import IndependentVerifier
 from packages.workflow.frozen_serialization import deserialize_frozen_edit_set, serialize_frozen_edit_set
 from packages.workflow.release import NativeReleaseWorkflow, WorkflowRejected, XlsxReleaseWorkflow
@@ -143,6 +147,14 @@ def _source_version(request: Request, identity: AuthenticatedIdentity, document_
     return version, source
 
 
+def _presentation_capability(report: object) -> dict[str, object]:
+    capability = dict(getattr(report, "capability"))
+    if getattr(report, "adapter") == "docx":
+        capability["level"] = "read_only"
+        capability["reasons"] = list(capability.get("reasons", [])) + ["critical_visual_verifier_unavailable"]
+    return capability
+
+
 def _release_workflow(adapter_name: str) -> NativeReleaseWorkflow:
     if adapter_name == "csv":
         return NativeReleaseWorkflow(CsvAdapter(), CsvIndependentVerifier())
@@ -150,6 +162,10 @@ def _release_workflow(adapter_name: str) -> NativeReleaseWorkflow:
         return NativeReleaseWorkflow(JsonAdapter(), JsonIndependentVerifier())
     if adapter_name == "xlsx":
         return XlsxReleaseWorkflow()
+    if adapter_name == "pdf":
+        return NativeReleaseWorkflow(PdfAdapter(), PdfIndependentVerifier())
+    if adapter_name == "docx":
+        return NativeReleaseWorkflow(DocxAdapter(), DocxIndependentVerifier())
     raise APIError(415, "native_adapter_unsupported", "This document format does not support native editing.")
 
 
@@ -310,11 +326,11 @@ def inspect_document(
     return {
         "document_id": str(parsed_id), "filename": filename, "source_sha256": report.sha256,
         "size_bytes": report.size_bytes, "media_type": report.media_type,
-        "capability": report.capability, "adapter": report.adapter,
+        "capability": _presentation_capability(report), "adapter": report.adapter,
         "adapter_version": report.adapter_version, "sheets": list(report.sheets),
         "features": list(report.features), "findings": list(report.findings),
         "inspection_score": report.score, "state": state, "viewing_ready": state == "ready",
-        "targets": list(report.targets), "targets_truncated": report.targets_truncated,
+        "targets": list(report.targets), "targets_truncated": report.targets_truncated, "details": report.details,
     }
 
 
@@ -360,7 +376,7 @@ def view_document_version(document_id: str, version_id: str, request: Request,
         raise APIError(503, "view_not_verified", "Safe document viewing is unavailable.") from None
     if report.sha256 != row["sha256"]:
         raise APIError(409, "source_version_changed", "The requested version failed integrity validation.")
-    if report.adapter not in {"csv", "json", "xlsx"} or report.status != "inspected":
+    if report.adapter not in {"csv", "json", "xlsx", "pdf", "docx"} or report.status != "inspected":
         raise APIError(415, "viewer_not_supported", "This file type has no supported read-only viewer.")
     if report.targets_truncated:
         raise APIError(413, "viewer_target_limit", "The document exceeds the safe viewer target limit.")
@@ -369,8 +385,8 @@ def view_document_version(document_id: str, version_id: str, request: Request,
         "parent_version_id": str(row["parent_version_id"]) if row["parent_version_id"] else None,
         "version_kind": row["kind"], "filename": filename, "source_sha256": report.sha256,
         "size_bytes": len(source), "media_type": report.media_type,
-        "capability": report.capability, "adapter": report.adapter,
-        "features": list(report.features), "targets": list(report.targets),
+        "capability": _presentation_capability(report), "adapter": report.adapter,
+        "features": list(report.features), "targets": list(report.targets), "details": report.details,
     }
 
 
@@ -678,7 +694,17 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
         frozen = workflow.freeze(source=source, document_id=str(parsed_id), base_version_id=str(base_version_id),
             actor_id=identity.subject, role=identity.role, authorized_category="insurer-authored",
             reason=str(edit_set["reason"]), patches=patch_values, edit_set_id=str(parsed_edit_id))
+        if report.adapter == "docx":
+            # DOCX is not reviewable until its critical isolated render/layout
+            # verifier has completed. Keep the edit as a draft on hosts where
+            # that boundary is unavailable; never queue an unreleasable plan.
+            readiness = workflow.release(source=source, edit_set=frozen)
+            if readiness.status != "VERIFIED":
+                raise APIError(422, "critical_docx_verification_unavailable",
+                               "DOCX preflight requires a verified isolated render and layout check.")
         plan_payload = serialize_frozen_edit_set(frozen)
+    except APIError:
+        raise
     except (PlanError, WorkflowRejected, ValueError) as error:
         reason = getattr(error, "code", getattr(error, "reason_code", str(error)))
         raise APIError(422, str(reason), "The edit set failed preflight validation.") from None
@@ -736,7 +762,7 @@ def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
         raise APIError(503, "rebase_not_verified", "Restricted target resolution is unavailable.") from None
     if report.sha256 != version["sha256"]:
         raise APIError(409, "stale_base_version", "The proposed rebase version failed its source fingerprint check.")
-    if report.status != "inspected" or report.adapter not in {"csv", "json", "xlsx"}:
+    if report.status != "inspected" or report.adapter not in {"csv", "json", "xlsx", "pdf", "docx"}:
         raise APIError(415, "native_adapter_unsupported", "This version has no safe native editing adapter.")
     target_map = {item["id"]: item for item in report.targets}
     rebased: list[dict[str, object]] = []

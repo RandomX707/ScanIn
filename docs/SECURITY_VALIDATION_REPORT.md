@@ -6,7 +6,7 @@ Validation date: 2026-11-08. Scope: local development prototype and the dedicate
 
 - PostgreSQL integration suite: 22 passed. The tests exercise tenant RLS, cross-tenant isolation, role boundaries, reviewer separation, immutable/frozen edit sets, release transaction behavior, audit chain, and verified-only download.
 - ClamAV suite: 4/4 passed against ClamAV 1.5.4: clean synthetic file accepted; EICAR quarantined; executable rejected; unavailable scanner remains private and unpromoted.
-- Browser workflows: 6/6 passed using separate server-issued processor, administrator and reviewer identities. Browser checks include cross-tenant denial, rejection, approval, verification, original hash preservation and formula-dependent XLSX download denial.
+- Browser workflows: 9/9 passed using separate server-issued processor, administrator and reviewer identities. Browser checks include CSV/JSON/XLSX/PDF release, DOCX fail-closed handling, rejection, approval, verification, original hash preservation and formula-dependent XLSX download denial.
 - Local-demo session issuance is server-side, short-lived, loopback-only and restricted to explicitly configured local development. The browser contains no signing secret.
 - The application launcher uses the existing private PGPASSFILE, validates restrictive permissions, targets `channel360_test`, verifies the expected owner and refuses missing PostgreSQL or ClamAV. No database or role reset was performed.
 - Generated browser traces/results, runtime state, storage, credentials and derived downloads are excluded from Git. Only synthetic M0 source workbooks and credential-free UI screenshots are retained.

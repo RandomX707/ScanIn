@@ -20,14 +20,15 @@ def test_registry_selects_json_over_csv_when_json_signature_is_present():
     assert "extension_mismatch" in result.findings
 
 
-def test_registry_routes_docx_to_explicit_read_only_instead_of_xlsx():
+def test_registry_routes_docx_to_the_constrained_ooxml_adapter():
     content = io.BytesIO()
     with zipfile.ZipFile(content, "w") as package:
         package.writestr("[Content_Types].xml", b"<Types />")
         package.writestr("word/document.xml", b"<document />")
     result = AdapterRegistry().inspect(content.getvalue(), filename="claim.xlsx")
     assert result.profile.level == "read_only"
-    assert result.profile.reasons == ("adapter_not_implemented",)
+    assert result.profile.adapter == "docx"
+    assert result.profile.reasons == ("no_supported_single_run_targets",)
     assert "extension_mismatch" in result.findings
 
 

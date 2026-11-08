@@ -20,9 +20,17 @@ export PGPASSFILE="${HOME:?HOME must be set}/.channel360-pgpass"
 [ -r "$PGPASSFILE" ] || { echo "PGPASSFILE is not readable." >&2; exit 2; }
 
 # start.sh verifies database ownership/credentials, bootstraps only the
-# dedicated local demo tenant, and starts API/Vite. It leaves them running.
-env -u IDW_DATABASE_URL -u IDW_WORKER_DATABASE_URL -u IDW_MIGRATION_DATABASE_URL \
-  -u IDW_DEVELOPMENT_AUTH_SECRET scripts/dev/start.sh
+# dedicated local demo tenant, and starts API/Vite. Reuse a healthy Channel360
+# instance so this runner can be invoked against an already-running workbench.
+if curl --silent --fail http://127.0.0.1:8000/health/ready >/dev/null \
+  && curl --silent --fail "$IDW_WEB_BASE_URL/" >/dev/null; then
+  echo "Using the ready Channel360 instance at $IDW_WEB_BASE_URL."
+else
+  env -u IDW_DATABASE_URL -u IDW_WORKER_DATABASE_URL -u IDW_MIGRATION_DATABASE_URL \
+    -u IDW_DEVELOPMENT_AUTH_SECRET scripts/dev/start.sh
+fi
+
+.venv/bin/python scripts/host/create_browser_fixtures.py
 
 if [ ! -x apps/web/node_modules/.bin/playwright ]; then
   env -u PGPASSFILE scripts/host/validate_channel360_e2e.sh browser-setup
