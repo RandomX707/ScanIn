@@ -53,15 +53,18 @@ def test_structural_summary_for_csv_uses_real_rows_and_recognized_headers():
     assert {item["name"] for item in summary["observed_fields"]} >= {"claim_number", "policyholder", "amount"}
     assert "2 data records" in summary["description"]
     assert "Example Person" not in summary["description"]
+    single = inspect_bytes(b"claim_number\nCLM-1\n", filename="claim.csv")["structural_summary"]
+    assert "1 data record across" in single["description"]
 
 
 def test_structural_summary_for_json_describes_shape_without_inventing_a_type():
-    result = inspect_bytes(b'{"envelope":{"items":[{"reference":"X-1"}]},"enabled":true}', filename="payload.json")
+    result = inspect_bytes(b'{"envelope":{"items":[{"reference":"X-1"}]},"enabled":true,"loss_amount":125.5}', filename="payload.json")
     summary = result["structural_summary"]
     assert summary["statistics"]["top_level_structure"] == "object"
     assert summary["apparent_document_type"] is None
     assert "envelope contains items" in summary["description"]
     assert "X-1" not in summary["description"]
+    assert next(item for item in summary["observed_fields"] if item["name"] == "loss_amount")["kind"] == "number"
 
 
 def test_structural_summary_is_deterministic_and_unknown_type_is_honest():

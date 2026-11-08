@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal
 from typing import Any, Protocol
 
 
@@ -67,6 +68,7 @@ class StructuralSummaryProvider:
             headers = [document.cell(1, col).value.strip() for col in range(1, max(document.row_lengths, default=0) + 1)]
             has_header = bool(headers and any(not _looks_data_like(value) for value in headers))
             record_count = max(0, nonempty_rows - (1 if has_header else 0))
+            record_word = "record" if record_count == 1 else "records"
             stats = {"record_count": record_count, "column_count": len([name for name in headers if name])}
             names = headers if has_header else [f"Column {index}" for index in range(1, max(document.row_lengths, default=0) + 1)]
             for index, name in enumerate(names, start=1):
@@ -76,7 +78,7 @@ class StructuralSummaryProvider:
                 evidence.append({"reference": f"csv:column:{index}", "label": name[:100]})
             apparent_type = _insurance_type(headers if has_header else [])
             fields = ", ".join(names[:8]) or "unnamed columns"
-            description = f"This CSV contains {record_count} data records across {stats['column_count']} columns. Its column headings include {fields}."
+            description = f"This CSV contains {record_count} data {record_word} across {stats['column_count']} columns. Its column headings include {fields}."
             if apparent_type:
                 description += f" The field names are consistent with an {apparent_type.replace(' document', '')} dataset."
             else:
@@ -240,7 +242,7 @@ def _json_kind(value: Any) -> str:
     if isinstance(value, list): return "array"
     if value is None: return "null"
     if isinstance(value, bool): return "boolean"
-    if isinstance(value, (int, float)): return "number"
+    if isinstance(value, (int, float, Decimal)): return "number"
     return "text"
 
 
