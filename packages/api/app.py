@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -51,6 +52,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = runtime_settings
+    app.state.ai_summary_requests = {}
+    app.state.ai_summary_lock = Lock()
     app.state.engine = engine
     app.state.worker_engine = worker_engine
     app.state.document_storage = ImmutableLocalStorage(runtime_settings.storage_root)

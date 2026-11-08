@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import io
 import json
+import time
 from urllib.parse import quote
 from uuid import UUID, uuid4
 from typing import Any
@@ -390,6 +391,89 @@ def view_document_version(document_id: str, version_id: str, request: Request,
         "structural_summary": ({**report.structural_summary, "source_document_id": str(parsed_id),
                                 "source_version_id": str(parsed_version_id)} if report.structural_summary else None),
     }
+
+
+@router.post("/{document_id}/versions/{version_id}/ai-summary")
+def generate_ai_summary(document_id: str, version_id: str, request: Request,
+                        identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
+    """Generate an optional explanation from bounded evidence for one authorized immutable version."""
+    try:
+        parsed_id, parsed_version_id = UUID(document_id), UUID(version_id)
+    except ValueError:
+        raise APIError(404, "not_found", "The requested version was not found.") from None
+    storage: ImmutableLocalStorage = request.app.state.document_storage
+    with request.app.state.engine.connect() as connection:
+        with api_tenant_transaction(connection, identity):
+            repo = DocumentRepository(connection, identity.tenant_id)
+            row = repo.get_version(parsed_id, parsed_version_id)
+            if row is None:
+                raise APIError(404, "not_found", "The requested version was not found.")
+            if row["ingestion_state"] != "ready":
+                raise APIError(409, "document_not_ready", "The document must finish safe inspection first.")
+            if row["kind"] == "derived":
+                version = next((item for item in repo.list_versions(parsed_id)
+                                if str(item["version_id"]) == str(parsed_version_id)), None)
+                if version is None or version.get("verification_outcome") != "VERIFIED":
+                    raise APIError(404, "not_found", "The requested version was not found.")
+            stored = StoredFile(identity.tenant_id, parsed_id, storage.root / str(row["storage_key"]),
+                                str(row["storage_key"]), int(row["size_bytes"]), str(row["sha256"]))
+            storage.read_original(stored)
+            filename = _filename(str(row["filename"]))
+    try:
+        report = request.app.state.restricted_parser.inspect(
+            stored.path, filename=filename, include_summary_evidence=True, timeout_seconds=30)
+    except ParserNotVerified:
+        raise APIError(503, "view_not_verified", "Safe document inspection is unavailable.") from None
+    if report.status != "inspected" or report.adapter not in {"csv", "json", "xlsx", "pdf", "docx"}:
+        raise APIError(415, "viewer_not_supported", "This file type has no supported safe text extraction.")
+    if report.sha256 != row["sha256"]:
+        raise APIError(409, "source_version_changed", "The requested version failed integrity validation.")
+    if report.targets_truncated:
+        raise APIError(413, "summary_evidence_limit", "The document exceeds safe summary evidence limits.")
+    evidence = list(report.summary_evidence)
+    pdf_pages = (report.details or {}).get("pages", []) if report.adapter == "pdf" else []
+    if not evidence or (pdf_pages and not any(not page.get("scanned_or_image_only") for page in pdf_pages)):
+        raise APIError(422, "ai_insufficient_readable_content",
+                       "No readable document content is available to explain. Scanned PDFs require OCR, which is not enabled.")
+    provider = getattr(request.app.state, "llm_provider", None)
+    if provider is None:
+        from packages.core.summaries.llm import LLMConfigurationError, OpenAICompatibleExplanationProvider
+        try:
+            provider = OpenAICompatibleExplanationProvider(request.app.state.settings)
+        except LLMConfigurationError:
+            raise APIError(503, "ai_not_configured", "AI explanations are unavailable until a server-side provider is configured.") from None
+    now = time.monotonic()
+    limiter = request.app.state.ai_summary_requests
+    with request.app.state.ai_summary_lock:
+        recent = [stamp for stamp in limiter.get((str(identity.tenant_id), identity.subject), []) if now - stamp < 60]
+        if len(recent) >= 5:
+            raise APIError(429, "ai_rate_limited", "The AI explanation limit is five requests per user per minute.")
+        recent.append(now)
+        limiter[(str(identity.tenant_id), identity.subject)] = recent
+    from packages.core.summaries.llm import LLMProviderError
+    try:
+        result = provider.explain(source_document_id=str(parsed_id), source_version_id=str(parsed_version_id),
+                                 source_sha256=report.sha256,
+                                 structural_summary=report.structural_summary or {}, evidence=evidence)
+    except LLMProviderError as error:
+        messages = {
+            "provider_timeout": ("The AI provider did not respond in time.", 504),
+            "provider_rate_limited": ("The AI provider is rate limiting requests. Try again later.", 429),
+            "provider_credentials_rejected": ("The configured AI provider credentials were rejected.", 503),
+            "provider_unavailable": ("The AI provider is temporarily unavailable.", 503),
+            "provider_response_not_grounded": ("The AI response could not be grounded in extracted evidence.", 502),
+            "insufficient_readable_evidence": ("There is not enough readable content to explain.", 422),
+        }
+        message, status = messages.get(error.code, ("The AI provider returned an invalid response.", error.status_code))
+        raise APIError(status, error.code, message) from None
+    except Exception:
+        # Provider exceptions may contain request/response material; never propagate or log their text.
+        raise APIError(502, "provider_request_failed", "The AI explanation could not be generated.") from None
+    if (result.get("source_document_id") != str(parsed_id) or
+            result.get("source_version_id") != str(parsed_version_id) or
+            result.get("source_sha256") != report.sha256 or result.get("generation_method") != "ai"):
+        raise APIError(502, "provider_response_invalid", "The AI response did not match the selected source version.")
+    return result
 
 
 @router.post("/{document_id}/fields")

@@ -14,9 +14,10 @@ class SummaryProvider(Protocol):
 
 
 class AIExplanationProvider(Protocol):
-    """Future explicit-request provider; it must never determine authorization."""
+    """Explicit-request explanation contract; implementations cannot determine authorization."""
 
-    def explain(self, *, structural_summary: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]: ...
+    def explain(self, *, source_document_id: str, source_version_id: str, source_sha256: str,
+                structural_summary: dict[str, Any], evidence: list[dict[str, str]]) -> dict[str, Any]: ...
 
 
 _INSURANCE_FIELDS = (

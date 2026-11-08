@@ -198,10 +198,18 @@ class DocxAdapter:
             for paragraph_index, paragraph in enumerate(root.xpath(".//w:p", namespaces=NS)):
                 text = "".join(paragraph.xpath(".//w:t/text()", namespaces=NS))
                 if text:
-                    blocks.append({"id": f"{part}:p{paragraph_index}", "part": part,
-                                   "paragraph_index": paragraph_index, "text": text,
-                                   "kind": "header" if "header" in part else "footer" if "footer" in part else
-                                           "table_cell" if paragraph.xpath("ancestor::w:tc", namespaces=NS) else "paragraph"})
+                    block = {"id": f"{part}:p{paragraph_index}", "part": part,
+                             "paragraph_index": paragraph_index, "text": text,
+                             "kind": "header" if "header" in part else "footer" if "footer" in part else
+                                     "table_cell" if paragraph.xpath("ancestor::w:tc", namespaces=NS) else "paragraph"}
+                    style_ids = paragraph.xpath("./w:pPr/w:pStyle/@w:val", namespaces=NS)
+                    outline_levels = paragraph.xpath("./w:pPr/w:outlineLvl/@w:val", namespaces=NS)
+                    style_match = re.fullmatch(r"Heading([1-9])", style_ids[0]) if style_ids else None
+                    if style_match:
+                        block["heading_level"] = int(style_match.group(1))
+                    elif outline_levels and outline_levels[0].isdigit() and int(outline_levels[0]) < 9:
+                        block["heading_level"] = int(outline_levels[0]) + 1
+                    blocks.append(block)
         target_list = self.targets(source, roots=roots) if include_targets else []
         targets_by_block: dict[str, list[str]] = {}
         for target in target_list:

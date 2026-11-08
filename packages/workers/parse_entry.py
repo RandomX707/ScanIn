@@ -20,7 +20,7 @@ class ParserRejected(ValueError):
 
 
 def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int = 100,
-                  include_targets: bool = False) -> dict[str, Any]:
+                  include_targets: bool = False, include_summary_evidence: bool = False) -> dict[str, Any]:
     digest = hashlib.sha256(data).hexdigest()
     if not data or len(data) > MAX_FILE_BYTES:
         raise ParserRejected("file_size_limit")
@@ -63,7 +63,98 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
     result["structural_summary"] = StructuralSummaryProvider().summarize(
         source=data, adapter=profile.adapter, details=result.get("details"), targets=[_target_dict(item) for item in summary_targets],
         sheets=list(profile.sheets))
+    if include_summary_evidence and supported:
+        result["summary_evidence"] = _summary_evidence(data, profile.adapter, result.get("details"), source_adapter)
     return result
+
+
+def _summary_evidence(data: bytes, adapter: str, details: dict[str, Any] | None, source_adapter: Any) -> list[dict[str, str]]:
+    """Build a small, location-addressable content bundle only for an explicit AI request."""
+    items: list[dict[str, str]] = []
+    if adapter == "csv":
+        document = source_adapter._parse(data)
+        max_col = max(document.row_lengths, default=0)
+        headers = [document.cell(1, col).value.strip()[:400] for col in range(1, max_col + 1)]
+        if headers:
+            items.append({"id": "csv:header", "location": "CSV header", "text": " | ".join(headers)})
+            for row in range(2, min(len(document.row_lengths), 8) + 1):
+                cells = [document.cell(row, col).value.strip()[:400] for col in range(1, max_col + 1)]
+                items.append({"id": f"csv:row:{row}", "location": f"CSV record {row - 1}",
+                              "text": "; ".join(f"{headers[col - 1] or f'Column {col}'}: {value}"
+                                                 for col, value in enumerate(cells, 1) if value)})
+    elif adapter == "json":
+        import json as json_module
+        value = json_module.loads(data)
+        stack: list[tuple[str, Any, int]] = [("$", value, 0)]
+        while stack and len(items) < 40:
+            path, node, depth = stack.pop()
+            if depth > 12:
+                continue
+            if isinstance(node, dict):
+                for key, child in reversed(list(node.items())):
+                    escaped = str(key).replace("~", "~0").replace("/", "~1")[:120]
+                    stack.append((f"{path}/{escaped}", child, depth + 1))
+            elif isinstance(node, list):
+                for index, child in reversed(list(enumerate(node[:8]))):
+                    stack.append((f"{path}/{index}", child, depth + 1))
+            else:
+                raw_value = node[:400] if isinstance(node, str) else node
+                serialized = json_module.dumps(raw_value, ensure_ascii=False)[:420]
+                items.append({"id": f"json:{path}", "location": f"JSON {path}"[:180],
+                              "text": f"{path[:180]}: {serialized}"})
+    elif adapter == "xlsx":
+        targets = source_adapter.targets(data)
+        for target in targets[:40]:
+            value = target.value.canonical().get("value")
+            if value is not None and str(value).strip():
+                items.append({"id": target.id, "location": f"Worksheet {target.sheet}, cell {target.cell}"[:180],
+                              "text": f"{target.sheet}!{target.cell}: {str(value)[:400]}"})
+    elif adapter == "pdf":
+        details = details or {}
+        for page in details.get("pages", [])[:20]:
+            text = str(page.get("text", "")).strip()
+            if page.get("scanned_or_image_only"):
+                items.append({"id": f"pdf:scan-limitation:page:{page['page']}",
+                              "location": f"PDF page {page['page']} inspection limitation",
+                              "text": f"Page {page['page']} has no readable extracted text. No OCR was performed; document content on this page cannot be reliably explained."})
+            elif text:
+                items.append({"id": f"pdf:page:{page['page']}", "location": f"PDF page {page['page']}", "text": text[:500]})
+        for field in details.get("fields", [])[:40]:
+            value = field.get("value")
+            items.append({"id": str(field["id"]), "location": f"PDF form field {field['name']}",
+                          "text": f"{field['name']}: {str(value)[:350]}"})
+        if not items and details.get("page_count"):
+            items.append({"id": "pdf:scan-limitation", "location": "PDF inspection limitation",
+                          "text": f"{details['page_count']} page(s) contain no readable extracted text. No OCR was performed."})
+    elif adapter == "docx":
+        blocks = (details or {}).get("blocks", [])
+        selected_ids: set[str] = set()
+        selected_blocks: list[dict[str, Any]] = []
+        for kind in ("header", "footer", "table_cell", "paragraph"):
+            preferred = next((block for block in blocks if block.get("kind") == kind and
+                              (kind != "paragraph" or not block.get("heading_level"))), None)
+            if preferred and preferred["id"] not in selected_ids:
+                selected_ids.add(preferred["id"])
+                selected_blocks.append(preferred)
+        selected_blocks.extend(block for block in blocks if block.get("heading_level") and block["id"] not in selected_ids)
+        selected_ids.update(block["id"] for block in selected_blocks)
+        selected_blocks.extend(block for block in blocks if block["id"] not in selected_ids)
+        for block in selected_blocks[:40]:
+            text = str(block.get("text", "")).strip()
+            if text:
+                location = (f"DOCX heading level {block['heading_level']} {block['id']}" if block.get("heading_level")
+                            else f"DOCX {block['kind']} {block['id']}")
+                items.append({"id": str(block["id"]), "location": location[:180], "text": text[:500]})
+    bounded: list[dict[str, str]] = []
+    remaining = 8000
+    for item in items:
+        if remaining <= 0:
+            break
+        text = item["text"][:min(500, remaining)]
+        if text:
+            bounded.append({**item, "text": text})
+            remaining -= len(text)
+    return bounded
 
 
 def _target_dict(target: Any) -> dict[str, Any]:
@@ -129,13 +220,15 @@ def main() -> int:
     parser.add_argument("--input", required=True)
     parser.add_argument("--filename", default="")
     parser.add_argument("--targets", action="store_true")
+    parser.add_argument("--summary-evidence", action="store_true")
     args = parser.parse_args()
     try:
         path = Path(args.input)
         size = path.stat().st_size
         if size > MAX_FILE_BYTES:
             raise ParserRejected("file_size_limit")
-        result = inspect_bytes(path.read_bytes(), filename=args.filename or path.name, include_targets=args.targets)
+        result = inspect_bytes(path.read_bytes(), filename=args.filename or path.name,
+                               include_targets=args.targets, include_summary_evidence=args.summary_evidence)
     except ParserRejected as error:
         result = {"status": "rejected", "reason": error.reason_code}
     except (OSError, ValueError):

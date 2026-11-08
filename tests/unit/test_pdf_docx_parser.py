@@ -50,3 +50,37 @@ def test_structural_summary_marks_scanned_pages_without_claiming_ocr():
     summary = inspect_bytes(stream.getvalue(), filename="scanned.pdf")["structural_summary"]
     assert summary["statistics"]["scanned_or_image_only_pages"] == 1
     assert any("without OCR" in note for note in summary["limitations"])
+
+
+def test_ai_summary_evidence_uses_safe_locations_for_pdf_docx_and_scanned_pdf():
+    pdf_stream = io.BytesIO()
+    pdf = canvas.Canvas(pdf_stream)
+    pdf.drawString(40, 760, "Synthetic claim reference SYN-PDF-1")
+    pdf.showPage(); pdf.save()
+    pdf_result = inspect_bytes(pdf_stream.getvalue(), filename="synthetic.pdf", include_summary_evidence=True)
+    assert pdf_result["summary_evidence"][0]["id"] == "pdf:page:1"
+    assert "SYN-PDF-1" in pdf_result["summary_evidence"][0]["text"]
+
+    document = Document(); document.add_paragraph("Synthetic policy statement")
+    document.add_heading("Synthetic coverage section", level=1)
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "Synthetic coverage row"
+    document.sections[0].header.paragraphs[0].text = "Synthetic header text"
+    document.sections[0].footer.paragraphs[0].text = "Synthetic footer text"
+    for index in range(45):
+        document.add_paragraph(f"Synthetic body paragraph {index}")
+    stream = io.BytesIO(); document.save(stream)
+    docx_result = inspect_bytes(stream.getvalue(), filename="synthetic.docx", include_summary_evidence=True)
+    assert {item["location"].split()[1] for item in docx_result["summary_evidence"]} >= {"paragraph", "table_cell"}
+    assert any("heading level 1" in item["location"] and "Synthetic coverage section" in item["text"]
+               for item in docx_result["summary_evidence"])
+    assert any(item["id"].startswith("word/header") and "Synthetic header text" in item["text"]
+               for item in docx_result["summary_evidence"])
+    assert any(item["id"].startswith("word/footer") and "Synthetic footer text" in item["text"]
+               for item in docx_result["summary_evidence"])
+
+    scanned_stream = io.BytesIO()
+    scanned = canvas.Canvas(scanned_stream); scanned.rect(20, 20, 500, 700, fill=1); scanned.showPage(); scanned.save()
+    scanned_result = inspect_bytes(scanned_stream.getvalue(), filename="scanned.pdf", include_summary_evidence=True)
+    assert scanned_result["summary_evidence"] == [{"id": "pdf:scan-limitation:page:1",
+        "location": "PDF page 1 inspection limitation",
+        "text": "Page 1 has no readable extracted text. No OCR was performed; document content on this page cannot be reliably explained."}]

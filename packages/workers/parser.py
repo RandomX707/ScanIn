@@ -31,6 +31,7 @@ class ParserReport:
     targets_truncated: bool = False
     details: dict[str, Any] | None = None
     structural_summary: dict[str, Any] | None = None
+    summary_evidence: tuple[dict[str, str], ...] = ()
 
 
 class RestrictedParser:
@@ -39,7 +40,8 @@ class RestrictedParser:
         self.runner = runner or RestrictedSubprocess(self.project_root)
 
     def inspect(self, source_path: str | Path, *, filename: str | None = None,
-                include_targets: bool = False, timeout_seconds: int = 30) -> ParserReport:
+                include_targets: bool = False, include_summary_evidence: bool = False,
+                timeout_seconds: int = 30) -> ParserReport:
         source = Path(source_path).resolve(strict=True)
         size = source.stat().st_size
         if not source.is_file() or size > 50 * 1024 * 1024:
@@ -48,6 +50,8 @@ class RestrictedParser:
                    "--filename", filename or source.name]
         if include_targets:
             command.append("--targets")
+        if include_summary_evidence:
+            command.append("--summary-evidence")
         try:
             result = self.runner.run(command, input_path=source, timeout_seconds=timeout_seconds)
         except (OSError, RestrictedWorkerFailed) as error:
@@ -70,6 +74,7 @@ class RestrictedParser:
                 targets=tuple(payload.get("targets", ())), targets_truncated=bool(payload.get("targets_truncated", False)),
                 details=payload.get("details"),
                 structural_summary=payload.get("structural_summary"),
+                summary_evidence=tuple(payload.get("summary_evidence", ())),
             )
         except (ValueError, TypeError, KeyError, UnicodeDecodeError):
             raise ParserNotVerified("restricted_parser_response_invalid") from None

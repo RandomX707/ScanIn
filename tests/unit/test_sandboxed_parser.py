@@ -115,6 +115,32 @@ def test_restricted_entrypoint_returns_bounded_typed_targets_on_request():
     assert result["targets_truncated"] is False
 
 
+def test_ai_evidence_is_opt_in_bounded_and_uses_server_references():
+    source = b"claim_number,policyholder\nC-17,Example Person\nC-18,Second Person\n"
+    normal = inspect_bytes(source, filename="claims.csv")
+    ai = inspect_bytes(source, filename="claims.csv", include_summary_evidence=True)
+    assert "summary_evidence" not in normal
+    assert ai["summary_evidence"] == [
+        {"id": "csv:header", "location": "CSV header", "text": "claim_number | policyholder"},
+        {"id": "csv:row:2", "location": "CSV record 1", "text": "claim_number: C-17; policyholder: Example Person"},
+        {"id": "csv:row:3", "location": "CSV record 2", "text": "claim_number: C-18; policyholder: Second Person"},
+    ]
+    assert sum(len(item["text"]) for item in ai["summary_evidence"]) <= 8000
+
+
+def test_ai_evidence_for_json_and_xlsx_is_content_bounded_and_location_addressable():
+    parsed_json = inspect_bytes(b'{"claim":{"reference":"SYN-17","status":"open"}}',
+                                filename="claim.json", include_summary_evidence=True)
+    assert {item["id"] for item in parsed_json["summary_evidence"]} >= {"json:$/claim/reference", "json:$/claim/status"}
+    from openpyxl import Workbook
+    workbook = Workbook(); sheet = workbook.active; sheet.title = "Synthetic Claims"
+    sheet.append(["claim_number", "status"]); sheet.append(["SYN-18", "open"])
+    output = io.BytesIO(); workbook.save(output)
+    parsed_xlsx = inspect_bytes(output.getvalue(), filename="claims.xlsx", include_summary_evidence=True)
+    assert any(item["location"].startswith("Worksheet Synthetic Claims") and "SYN-18" in item["text"]
+               for item in parsed_xlsx["summary_evidence"])
+
+
 def test_zip_expansion_bomb_is_rejected_before_adapter_load():
     data = _xlsx({
         "[Content_Types].xml": b"Types",

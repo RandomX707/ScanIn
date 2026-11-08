@@ -365,6 +365,79 @@ test('local demo sign-in, navigation, upload and document inspection', async ({ 
   await expect(page.getByRole('status')).toHaveCount(0);
 });
 
+test('Summary defaults to No AI and explicit AI generation is cached and comparable', async ({ page, request }) => {
+  let calls = 0;
+  await page.route(/\/api\/documents\/[^/]+\/versions\/[^/]+\/ai-summary$/, async (route) => {
+    calls += 1;
+    const requestUrl = new URL(route.request().url());
+    const match = requestUrl.pathname.match(/\/api\/documents\/([^/]+)\/versions\/([^/]+)\/ai-summary$/);
+    const view = await (await apiCall(request, processor,
+      `/api/documents/${match[1]}/versions/${match[2]}/view`)).json();
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      source_document_id: view.document_id, source_version_id: view.version_id, source_sha256: view.source_sha256,
+      generation_method: 'ai', provider: 'mock-openai-compatible', model: 'synthetic-test-model',
+      explanation: 'This synthetic claim record includes a claim reference and policyholder field.',
+      key_points: [{ text: 'A claim reference is present.', evidence_references: [{ reference: 'csv:header', label: 'CSV header' }] }],
+      evidence_references: [{ reference: 'csv:header', label: 'CSV header' }],
+      limitations: ['AI-generated explanation; check important details against the original source.'],
+    }) });
+  });
+  await page.goto('/');
+  await connect(page, 'processor');
+  await page.getByRole('button', { name: 'Documents' }).click();
+  const filename = `channel360-ai-summary-${crypto.randomUUID()}.csv`;
+  await page.getByLabel('Choose a document to upload').setInputFiles({ name: filename, mimeType: 'text/csv',
+    buffer: Buffer.from('claim_number,policyholder\nSYN-AI-1,Example Person\n') });
+  await page.getByRole('button', { name: 'Upload securely' }).click();
+  await expect(page.getByRole('heading', { name: filename })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'No AI' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByText('Deterministic summary', { exact: false })).toBeVisible();
+  const notification = page.getByRole('button', { name: 'Dismiss notification' });
+  if (await notification.count()) await notification.click();
+  expect(calls).toBe(0);
+  const summaryShots = path.resolve(here, '../../../artifacts/ui-redesign');
+  fs.mkdirSync(summaryShots, { recursive: true });
+  await page.screenshot({ path: path.join(summaryShots, 'summary-no-ai-mode.png'), fullPage: true });
+  await page.getByRole('button', { name: 'AI', exact: true }).click();
+  await expect(page.getByText(/send a bounded extract.*external LLM provider/i)).toBeVisible();
+  await page.getByRole('button', { name: 'Compare summaries' }).click();
+  await expect(page.getByRole('heading', { name: 'Structural facts' })).toBeVisible();
+  expect(calls).toBe(0);
+  await page.screenshot({ path: path.join(summaryShots, 'summary-compare-mode.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  const compareColumns = await page.locator('.summary-compare-grid').evaluate((element) =>
+    getComputedStyle(element).gridTemplateColumns.split(' ').length);
+  expect(compareColumns).toBe(1);
+  await page.getByRole('heading', { name: 'AI-generated explanation' }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(summaryShots, 'summary-compare-mode-mobile.png') });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.getByRole('button', { name: 'AI', exact: true }).click();
+  await page.getByRole('button', { name: 'Generate AI Explanation' }).click();
+  await expect(page.getByText('This synthetic claim record includes a claim reference and policyholder field.')).toBeVisible();
+  await expect(page.getByText('AI-generated', { exact: true })).toBeVisible();
+  await page.screenshot({ path: path.join(summaryShots, 'summary-ai-mode.png'), fullPage: true });
+  expect(calls).toBe(1);
+  await page.getByRole('button', { name: 'No AI' }).click();
+  await page.getByRole('button', { name: 'AI', exact: true }).click();
+  await expect(page.getByText('This synthetic claim record includes a claim reference and policyholder field.')).toBeVisible();
+  expect(calls).toBe(1);
+  await page.getByRole('button', { name: 'Compare summaries' }).click();
+  await expect(page.getByRole('heading', { name: 'Structural facts' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'AI-generated explanation' })).toBeVisible();
+  expect(calls).toBe(1);
+  await page.screenshot({ path: path.join(summaryShots, 'summary-compare-mode.png'), fullPage: true });
+  await page.getByRole('button', { name: 'Documents' }).click();
+  const secondFilename = `channel360-ai-summary-other-${crypto.randomUUID()}.json`;
+  await page.getByLabel('Choose a document to upload').setInputFiles({ name: secondFilename, mimeType: 'application/json',
+    buffer: Buffer.from('{"synthetic":{"status":"pending"}}') });
+  await page.getByRole('button', { name: 'Upload securely' }).click();
+  await expect(page.getByRole('heading', { name: secondFilename })).toBeVisible();
+  await page.getByRole('button', { name: 'AI', exact: true }).click();
+  await expect(page.getByText('This synthetic claim record includes a claim reference and policyholder field.')).toHaveCount(0);
+  await expect(page.getByText('No request has been made for this document version.')).toBeVisible();
+  expect(calls).toBe(1);
+});
+
 test('DOCX preview remains read only until critical verification is available', async ({ page, request }) => {
   const fixture = fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-claim.docx'));
   const filename = uniqueFixtureFilename('synthetic-claim.docx');

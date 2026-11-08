@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AnyUrl, SecretStr, field_validator, model_validator
+from pydantic import AnyUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     clamav_socket_path: str = "/var/run/clamav/clamd.ctl"
     max_upload_bytes: int = 50 * 1024 * 1024
     web_origins: list[str] = ["http://127.0.0.1:5173", "http://127.0.0.1:5174"]
+
+    channel360_llm_provider: Literal["disabled", "openai_compatible"] = Field(
+        default="disabled", validation_alias="CHANNEL360_LLM_PROVIDER")
+    channel360_llm_api_key: SecretStr | None = Field(default=None, validation_alias="CHANNEL360_LLM_API_KEY")
+    channel360_llm_model: str = Field(default="", validation_alias="CHANNEL360_LLM_MODEL")
+    channel360_llm_base_url: str | None = Field(default=None, validation_alias="CHANNEL360_LLM_BASE_URL")
+    channel360_llm_timeout_seconds: int = Field(default=20, validation_alias="CHANNEL360_LLM_TIMEOUT_SECONDS")
+    channel360_llm_max_output_tokens: int = Field(default=500, validation_alias="CHANNEL360_LLM_MAX_OUTPUT_TOKENS")
 
     @field_validator("database_url")
     @classmethod
@@ -73,6 +81,29 @@ class Settings(BaseSettings):
             raise ValueError("IDW_MAX_UPLOAD_BYTES must be between 1 and 50 MiB")
         if not self.web_origins or any(not origin.startswith(("http://", "https://")) for origin in self.web_origins):
             raise ValueError("IDW_WEB_ORIGINS must contain explicit HTTP(S) origins")
+        if not 1 <= self.channel360_llm_timeout_seconds <= 60:
+            raise ValueError("CHANNEL360_LLM_TIMEOUT_SECONDS must be between 1 and 60")
+        if not 64 <= self.channel360_llm_max_output_tokens <= 2000:
+            raise ValueError("CHANNEL360_LLM_MAX_OUTPUT_TOKENS must be between 64 and 2000")
+        if len(self.channel360_llm_model) > 200:
+            raise ValueError("CHANNEL360_LLM_MODEL must be at most 200 characters")
+        if self.channel360_llm_base_url is not None:
+            from urllib.parse import urlsplit
+            from ipaddress import ip_address
+            parsed = urlsplit(self.channel360_llm_base_url)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or
+                    parsed.query or parsed.fragment or parsed.port not in (None, 443)):
+                raise ValueError("CHANNEL360_LLM_BASE_URL must be a plain HTTPS endpoint without credentials or query")
+            if parsed.hostname.lower() == "localhost" or parsed.hostname.lower().endswith((".localhost", ".local", ".internal")):
+                raise ValueError("CHANNEL360_LLM_BASE_URL must not target a local or internal host")
+            try:
+                if not ip_address(parsed.hostname).is_global:
+                    raise ValueError("CHANNEL360_LLM_BASE_URL must not target a private IP address")
+            except ValueError as error:
+                if "private IP" in str(error):
+                    raise
+        if self.channel360_llm_provider == "openai_compatible" and self.channel360_llm_base_url is None:
+            raise ValueError("CHANNEL360_LLM_BASE_URL is required for the OpenAI-compatible provider")
         if self.auth_mode == "development":
             if self.environment == "production":
                 raise ValueError("development authentication is forbidden in production")

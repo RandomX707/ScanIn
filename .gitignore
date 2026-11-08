@@ -54,3 +54,7 @@ test-results/
 !/artifacts/ui-redesign/summary-xlsx.png
 !/artifacts/ui-redesign/summary-pdf.png
 !/artifacts/ui-redesign/summary-docx.png
+!/artifacts/ui-redesign/summary-no-ai-mode.png
+!/artifacts/ui-redesign/summary-ai-mode.png
+!/artifacts/ui-redesign/summary-compare-mode.png
+!/artifacts/ui-redesign/summary-compare-mode-mobile.png

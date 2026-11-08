@@ -1,5 +1,7 @@
 # Known Limitations
 
+- Optional AI explanation uses a process-local five-requests-per-user-per-minute limiter; multiple API worker processes do not share counters. Configure only an approved HTTPS-compatible provider, and use synthetic documents for development. Standard tests mock the provider; no live provider response has been validated. No AI remains available without provider configuration.
+
 Channel360 is a validated local prototype, not production-ready software.
 
 ## Security and operations
