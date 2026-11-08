@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import io
 import hashlib
+import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 from pypdf import PdfReader
@@ -69,6 +72,9 @@ def test_pdf_checkbox_radio_and_dropdown_updates_use_real_appearance_options():
     source = output.getvalue()
     adapter = PdfAdapter()
     by_name = {target.id: target for target in adapter.targets(source)}
+    assert by_name["pdf:consent"].options == ()
+    assert by_name["pdf:consent"].native_locator["on_state"]
+    assert set(by_name["pdf:coverage"].options) == {"basic", "extended"}
     from packages.core.models.contracts import Patch
     values = {"pdf:consent": TypedValue("boolean", True), "pdf:coverage": TypedValue("choice", "extended"),
               "pdf:region": TypedValue("choice", "NY")}
@@ -80,6 +86,26 @@ def test_pdf_checkbox_radio_and_dropdown_updates_use_real_appearance_options():
     assert candidate.startswith(source)
     report = PdfIndependentVerifier().verify(source, candidate, plan)
     assert report.outcome == "VERIFIED", report.as_dict()
+
+
+def test_pdf_incremental_edit_verifies_qpdf_object_stream_input():
+    source = _form_pdf()
+    with tempfile.TemporaryDirectory(prefix="channel360-qpdf-fixture-") as temporary:
+        original = Path(temporary) / "reportlab-source.pdf"
+        rewritten = Path(temporary) / "qpdf-object-streams.pdf"
+        original.write_bytes(source)
+        subprocess.run(["qpdf", "--object-streams=generate", str(original), str(rewritten)],
+                       check=True, capture_output=True)
+        source = rewritten.read_bytes()
+
+    adapter = PdfAdapter()
+    target = adapter.targets(source)[0]
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "Adele"))
+    plan = build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": "qpdf-object-stream-fixture"})
+    candidate = adapter.apply(source, plan)
+    assert candidate.startswith(source)
+    assert PdfIndependentVerifier().verify(source, candidate, plan).outcome == "VERIFIED"
 
 
 def test_pdf_corrupt_and_encrypted_documents_fail_closed():

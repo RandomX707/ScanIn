@@ -72,17 +72,130 @@ def _normalize_target_part(data: bytes, targets: list[str]) -> str:
     return _canonical(root)
 
 
-def _qpdfium_text(pdf: bytes) -> list[str]:
+def _qpdfium_layout(pdf: bytes) -> list[list[tuple[str, tuple[float, float, float, float] | None]]]:
     import pypdfium2 as pdfium
+
     document = pdfium.PdfDocument(pdf)
     try:
-        output = []
+        output: list[list[tuple[str, tuple[float, float, float, float] | None]]] = []
         for page in document:
-            text = page.get_textpage().get_text_range()
-            output.append(text.replace("\r\n", "\n").replace("\r", "\n"))
+            text_page = page.get_textpage()
+            text = text_page.get_text_range()
+            if text_page.count_chars() != len(text):
+                raise ValueError("pdfium_text_geometry_length_mismatch")
+            glyphs = []
+            for index, char in enumerate(text):
+                try:
+                    raw_box = text_page.get_charbox(index)
+                    box = tuple(float(value) for value in raw_box) if raw_box is not None else None
+                except (IndexError, ValueError):
+                    box = None
+                glyphs.append((char, box))
+            output.append(glyphs)
         return output
     finally:
         document.close()
+
+
+def _flatten_layout(layout: list[list[tuple[str, tuple[float, float, float, float] | None]]]):
+    chars: list[str] = []
+    glyphs: list[tuple[int, str, tuple[float, float, float, float] | None] | None] = []
+    for page_number, page in enumerate(layout):
+        if page_number:
+            chars.append("\f")
+            glyphs.append(None)
+        for char, box in page:
+            chars.append(char)
+            glyphs.append((page_number, char, box))
+    return "".join(chars), glyphs
+
+
+def _occurrences(text: str, value: str) -> list[int]:
+    if not value:
+        return []
+    result: list[int] = []
+    cursor = 0
+    while True:
+        found = text.find(value, cursor)
+        if found < 0:
+            return result
+        result.append(found)
+        cursor = found + 1
+
+
+def _compare_rendered_layout(source_pdf: bytes, candidate_pdf: bytes,
+                              replacements: list[tuple[str, str]], *, tolerance: float = 0.35) -> dict[str, Any]:
+    """Compare rendered glyph layout outside uniquely mapped edited spans.
+
+    Repeated target text is ambiguous without a renderer-provided source locator,
+    so it blocks verification instead of normalizing every matching occurrence.
+    All non-target text and its page and glyph bounding boxes must remain stable.
+    """
+    errors: list[str] = []
+    old_layout, new_layout = _qpdfium_layout(source_pdf), _qpdfium_layout(candidate_pdf)
+    if len(old_layout) != len(new_layout):
+        errors.append("page_count_changed")
+    old_text, old_glyphs = _flatten_layout(old_layout)
+    new_text, new_glyphs = _flatten_layout(new_layout)
+    old_spans: list[tuple[int, int]] = []
+    new_spans: list[tuple[int, int]] = []
+    for old_value, new_value in replacements:
+        old_matches, new_matches = _occurrences(old_text, old_value), _occurrences(new_text, new_value)
+        if len(old_matches) != 1 or len(new_matches) != 1:
+            errors.append("ambiguous_target_render_match" if len(old_matches) > 1 or len(new_matches) > 1
+                          else "target_text_missing_or_wrapped")
+            continue
+        old_start, new_start = old_matches[0], new_matches[0]
+        old_end, new_end = old_start + len(old_value), new_start + len(new_value)
+        if "\f" in old_text[old_start:old_end] or "\f" in new_text[new_start:new_end]:
+            errors.append("target_crosses_page_boundary")
+            continue
+        old_spans.append((old_start, old_end))
+        new_spans.append((new_start, new_end))
+    if len(old_spans) != len(replacements) or len(new_spans) != len(replacements):
+        return {"errors": sorted(set(errors)), "source_pages": len(old_layout),
+                "candidate_pages": len(new_layout), "compared_unchanged_glyphs": 0}
+    for spans in (old_spans, new_spans):
+        ordered = sorted(spans)
+        if any(left[1] > right[0] for left, right in zip(ordered, ordered[1:])):
+            errors.append("overlapping_target_render_spans")
+    if errors:
+        return {"errors": sorted(set(errors)), "source_pages": len(old_layout),
+                "candidate_pages": len(new_layout), "compared_unchanged_glyphs": 0}
+
+    def unchanged(glyphs, spans):
+        excluded = {index for start, end in spans for index in range(start, end)}
+        return [(index, glyph) for index, glyph in enumerate(glyphs)
+                if index not in excluded and glyph is not None]
+
+    old_unchanged, new_unchanged = unchanged(old_glyphs, old_spans), unchanged(new_glyphs, new_spans)
+    if len(old_unchanged) != len(new_unchanged) or any(
+        old_glyph[1] != new_glyph[1]
+        for (_, old_glyph), (_, new_glyph) in zip(old_unchanged, new_unchanged)
+    ):
+        errors.append("outside_content_changed")
+    else:
+        for (_, old_glyph), (_, new_glyph) in zip(old_unchanged, new_unchanged):
+            old_page, _, old_box = old_glyph
+            new_page, _, new_box = new_glyph
+            if old_page != new_page:
+                errors.append("outside_content_page_changed")
+                break
+            if old_glyph[1] in {"\r", "\n"}:
+                # PDF text APIs anchor line separators at the preceding line's
+                # final glyph, whose x position naturally changes with an edit.
+                # The separator remains in the exact text comparison above.
+                continue
+            if old_box is None or new_box is None:
+                if old_box != new_box:
+                    errors.append("outside_content_geometry_unavailable")
+                    break
+            elif any(abs(before - after) > tolerance for before, after in zip(old_box, new_box)):
+                errors.append("outside_content_position_changed")
+                break
+    return {"errors": sorted(set(errors)), "source_pages": len(old_layout),
+            "candidate_pages": len(new_layout), "compared_unchanged_glyphs": min(len(old_unchanged), len(new_unchanged)),
+            "position_tolerance_points": tolerance}
 
 
 class DocxIndependentVerifier:
@@ -159,18 +272,12 @@ class DocxIndependentVerifier:
         ]
         try:
             old_pdf, new_pdf = render_docx_pdf(source), render_docx_pdf(candidate)
-            old_text, new_text = _qpdfium_text(old_pdf), _qpdfium_text(new_pdf)
-            if len(old_text) != len(new_text):
-                visual_errors = ["page_count_changed"]
-            else:
-                expected_text = new_text[:]
-                for patch in plan.patches:
-                    expected_text = [text.replace(str(patch.new_value.value), str(patch.expected_old_value.value))
-                                     for text in expected_text]
-                visual_errors = [] if old_text == expected_text else ["paragraph_line_breaks_or_layout_changed"]
-            results.append(CheckResult("visual", "PASS" if not visual_errors else "FAIL", True,
-                                       {"renderer": "LibreOffice + pypdfium2", "page_count": len(old_text),
-                                        "errors": visual_errors}))
+            visual = _compare_rendered_layout(
+                old_pdf, new_pdf,
+                [(str(patch.expected_old_value.value), str(patch.new_value.value)) for patch in plan.patches],
+            )
+            results.append(CheckResult("visual", "PASS" if not visual["errors"] else "FAIL", True,
+                                       {"renderer": "LibreOffice + PDFium glyph geometry", **visual}))
         except (OfficeRenderError, Exception) as exc:
             results.append(CheckResult("visual", "NOT_VERIFIED", True,
                                        {"reason": f"critical_render_check_unavailable:{type(exc).__name__}"}))

@@ -160,7 +160,7 @@ The Python suite may skip PostgreSQL-marked tests when no database is available.
 | M2 — data corrections, native edit/review/release | CSV, JSON and XLSX persisted workflows exercised; approval separation and verified-only downloads enforced. Product still requires production identity, deployment and operational hardening |
 | M3 — XLSX application integration | Exercised through the persisted review/release path; independent verification preserves incomplete formula-dependent behavior |
 | M4 — templates, deterministic rules and structural summaries | Planned, not implemented |
-| M5 — supported AcroForm PDF editing | Implemented for a narrow synthetic unsigned-form path and passed a live browser verified download. Full milestone acceptance remains open: the 50-file multi-producer corpus and all PDF-1..PDF-5 acceptance variants are incomplete. |
+| M5 — supported AcroForm PDF editing | Synthetic acceptance subset passes: 50 corpus outcomes and browser verified downloads for text, checkbox, radio and dropdown. External producer diversity (including Adobe/Microsoft-authored forms) remains unverified. |
 | M6 — constrained DOCX editing | Adapter, provenance, parser and verifier code are implemented; browser-native editing is intentionally disabled because the host cannot run the isolated LibreOffice check. DOCX-1..DOCX-5 are NOT_VERIFIED as a milestone. |
 | M7 — optional OCR/Docling/LLM providers | Planned, not implemented |
 

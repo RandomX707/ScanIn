@@ -11,10 +11,10 @@ Updated 2026-11-08. Validated on local synthetic data; not a production readines
 | Worker boundary | `packages/workers`, worker roles/grants | Restricted parser loopback probe passes on current macOS host. Darwin memory control is parent-sampled RSS (~50 ms overshoot), not kernel-enforced `RLIMIT_AS`; host OS boundary still requires platform-specific review |
 | Native adapters | CSV, JSON, supported XLSX and narrow PDF AcroForm | Browser verified-release workflows pass for CSV/JSON/XLSX/PDF; PDF release checks qpdf and PDFium visual preservation. Incomplete/blocked results are nondownloadable |
 | DOCX adapter and verifier | `packages/core/adapters/docx`, `packages/core/verification/docx.py` | Constrained OOXML edits, provenance and structural checks are implemented. LibreOffice critical visual/reflow check cannot run in this host, so API preflight and UI remain read-only |
-| Viewer and UI | API version view and `apps/web` | CSV/JSON/XLSX and PDF.js canvases; DOCX extracted-text inspection; local demo sign-in, library, correction and review views; nine Playwright tests pass |
+| Viewer and UI | API version view and `apps/web` | CSV/JSON/XLSX and PDF.js canvases; DOCX extracted-text inspection; local demo sign-in, library, correction and review views; 13 Playwright tests pass |
 | Corrections and release | `packages/workflow`, `packages/api/documents.py`, registry/storage | Sidecar corrections, frozen plans, reviewer decisions, verification, audit and verified-only download exercised |
 | Durable jobs/events | None | Not implemented; ingestion is synchronous |
 | M4 templates and rules | None | Planned, not implemented |
-| M5 PDF native editing | `packages/core/adapters/pdf`, `packages/core/verification/pdf.py` | Partial: one synthetic PDF completed upload/review/release/download in Chromium. Full acceptance corpus and all PDF-1..PDF-5 variations are not complete |
+| M5 PDF native editing | `packages/core/adapters/pdf`, `packages/core/verification/pdf.py` | Synthetic subset: 50 corpus cases and text/checkbox/radio/dropdown browser releases pass; external producer diversity remains unverified |
 | M6 DOCX native editing | `packages/core/adapters/docx`, `packages/core/verification/docx.py`, `packages/workers/office.py` | Partial: package writer and verifier are exercised at unit level; host isolation blocks LibreOffice, so native editing is gated and DOCX-1..DOCX-5 are NOT_VERIFIED as a milestone |
 | M7 optional intelligence | None | Planned; deterministic core has no AI dependency |

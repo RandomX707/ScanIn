@@ -4,7 +4,7 @@ Updated 2026-11-08. “Validated” below refers to the local synthetic developm
 
 | Capability | Implementation | Evidence and boundary |
 | --- | --- | --- |
-| M0 XLSX integrity/editor | Implemented | Included in 171 passing Python regression tests; input fixture manifest 2/2; formula-dependent case remains incomplete |
+| M0 XLSX integrity/editor | Implemented | Included in 175 passing Python regression tests; input fixture manifest 2/2; formula-dependent case remains incomplete |
 | Tenant isolation and PostgreSQL RLS | Implemented | 22 live PostgreSQL integration tests passed against `channel360_test` |
 | Malware scanning | Implemented, fail-closed | Four real ClamAV checks passed against the configured daemon |
 | CSV and JSON editing | Implemented | Browser upload-to-verified-download workflows passed; originals remain unchanged |
@@ -14,11 +14,11 @@ Updated 2026-11-08. “Validated” below refers to the local synthetic developm
 | Version history, audit and verified download | Implemented | Browser round trips and database authorization tests passed |
 | Local demo sign-in | Implemented for local development | API-issued short-lived roles; not a production identity provider |
 | PDF preview and AcroForm discovery | Implemented for digital and scanned synthetic PDFs | PDF.js Chromium canvas/page navigation and fields pass; scanned pages render without OCR; encrypted is rejected and XFA is read-only |
-| PDF native editing and independent verification | Narrow implementation exercised end to end | Synthetic unsigned AcroForm text edit passed browser review, qpdf, PDFium visual check, verified-only download, exact byte-prefix and unchanged original. Checkbox/radio/dropdown, MaxLen, signatures/certification/XFA have targeted unit checks. Full PDF-1..PDF-5 producer corpus and widget-overflow case remain outstanding |
+| PDF native editing and independent verification | Synthetic acceptance subset passed | 50-case corpus: 40 editable, 8 read-only and 2 rejected. Browser verified downloads cover text, checkbox, radio and dropdown; qpdf/PDFium, prefix, appearance and source-preservation checks pass. Commercial producer diversity remains unverified |
 | DOCX preview | Partial | Sandboxed OOXML text/table/header/footer inspection displays in browser. LibreOffice page preview cannot run in this host; do not represent extracted text as a rendered preview |
 | DOCX constrained editor and verifier | Core implementation present; runtime workflow gated | Single-run adapter, provenance, package checks and unsupported structures have unit checks. UI disables native changes and API preflight stays draft until isolated LibreOffice visual/reflow verification is available. No verified DOCX derivative has been released |
 | Durable work queue, retries and events | Not implemented | Synchronous ingestion only |
-| 50-document acceptance corpus | Not complete | Targeted synthetic fixtures only; multiple producer corpus and expected-results inventory remain outstanding |
+| 50-document PDF acceptance corpus | Passed for current synthetic corpus | 50 expected outcomes recorded; no Adobe/Microsoft-authored form compatibility claim |
 | M4 deterministic templates and rules | Planned | Not implemented |
 | M5 AcroForm PDF editing | Partial implementation | Narrow end-to-end PDF path validated; milestone acceptance remains open |
 | M6 constrained DOCX editing | Partial implementation | Native editing remains blocked until host-isolated LibreOffice render/layout checks pass |

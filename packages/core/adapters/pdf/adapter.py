@@ -235,9 +235,15 @@ class PdfAdapter:
                     appearance = _resolve(widget.get("/AP", {}))
                     normal = _resolve(appearance.get("/N", {})) if appearance else {}
                     state_values.update(str(key).lstrip("/") for key in normal.keys() if str(key) != "/Off")
-                options = tuple(sorted(state_values))
+                # Checkbox state names are PDF appearance internals; exposing
+                # them as selectable values creates a broken user control.
+                # Preserve the sole on-state in the native locator and render
+                # a boolean control. Radio groups remain named choices.
+                options = tuple(sorted(state_values)) if is_radio else ()
                 if is_radio and not options:
                     reason = "unsupported_radio_appearance"
+                if not is_radio and len(state_values) != 1:
+                    reason = "unsupported_checkbox_appearance"
                 if flags & int(FieldFlag.READ_ONLY):
                     reason = "read_only_field"
             elif ft == "/Ch":
@@ -280,6 +286,8 @@ class PdfAdapter:
             fingerprint = _field_fingerprint(name, field_obj, widget_list)
             locator = {"field_name": name, "field_type": kind, "pages": [p for p, _ in widget_list],
                        "widgets": [{"page": p, "rect": [float(x) for x in w.get("/Rect", [])]} for p, w in widget_list]}
+            if kind == "checkbox" and len(state_values) == 1:
+                locator["on_state"] = next(iter(state_values))
             result.append(PdfTarget(f"pdf:{name}", "", name, str(page), value, fingerprint,
                                     editable=reason is None, reason=reason, label=name, field_type=kind,
                                     native_locator=locator, options=options, max_length=maxlen, font_size=font_size))
@@ -345,7 +353,9 @@ class PdfAdapter:
             name = (target.native_locator or {})["field_name"]
             if target.field_type == "checkbox":
                 # Resolve the widget's actual on-state name instead of assuming /Yes.
-                on_state = target.options[0] if target.options else "Yes"
+                on_state = (target.native_locator or {}).get("on_state")
+                if not on_state:
+                    raise PdfDocumentError("unsupported_checkbox_appearance")
                 values[name] = "/" + on_state if patch.new_value.value else "/Off"
             else:
                 values[name] = str(patch.new_value.value)

@@ -161,3 +161,63 @@ def test_docx_malformed_zip_is_rejected():
     from packages.core.adapters.docx.adapter import DocxDocumentError
     with pytest.raises(DocxDocumentError):
         DocxAdapter().inspect(b"not a word document")
+
+
+def _render_test_pages(pages: list[list[tuple[float, str]]]) -> bytes:
+    from reportlab.pdfgen import canvas
+
+    output = io.BytesIO()
+    pdf = canvas.Canvas(output, pagesize=(612, 792))
+    for page_lines in pages:
+        for y, text in page_lines:
+            pdf.drawString(40, y, text)
+        pdf.showPage()
+    pdf.save()
+    return output.getvalue()
+
+
+def _render_test_page(lines: list[tuple[float, str]]) -> bytes:
+    return _render_test_pages([lines])
+
+
+def test_docx_layout_check_rejects_unchanged_text_moved_after_target_edit():
+    import packages.core.verification.docx as verifier
+
+    compare = getattr(verifier, "_compare_rendered_layout", None)
+    assert callable(compare), "DOCX visual verification must compare rendered glyph positions"
+    source = _render_test_page([(740, "Policyholder: Ada"), (700, "Coverage: Standard")])
+    same_layout = _render_test_page([(740, "Policyholder: Amy"), (700, "Coverage: Standard")])
+    shifted = _render_test_page([(740, "Policyholder: Amy"), (680, "Coverage: Standard")])
+
+    patch = [("Policyholder: Ada", "Policyholder: Amy")]
+    assert compare(source, same_layout, patch)["errors"] == []
+    assert "outside_content_position_changed" in compare(source, shifted, patch)["errors"]
+    with_second_page = _render_test_pages([[(740, "Policyholder: Amy"), (700, "Coverage: Standard")],
+                                           [(740, "Synthetic appendix")]])
+    assert "page_count_changed" in compare(source, with_second_page, patch)["errors"]
+
+
+def test_docx_layout_check_blocks_repeated_target_text_as_ambiguous():
+    import packages.core.verification.docx as verifier
+
+    compare = getattr(verifier, "_compare_rendered_layout", None)
+    assert callable(compare), "DOCX visual verification must resolve target text unambiguously"
+    source = _render_test_page([(740, "Policyholder: Ada"), (700, "Dependent: Ada")])
+    candidate = _render_test_page([(740, "Policyholder: Amy"), (700, "Dependent: Amy")])
+
+    result = compare(source, candidate, [("Ada", "Amy")])
+    assert "ambiguous_target_render_match" in result["errors"]
+
+
+def test_docx_layout_check_blocks_replacement_that_wraps_onto_another_line():
+    import packages.core.verification.docx as verifier
+
+    compare = getattr(verifier, "_compare_rendered_layout", None)
+    assert callable(compare)
+    source = _render_test_page([(740, "Policyholder: Ada"), (700, "Coverage: Standard")])
+    wrapped = _render_test_page([(740, "Policyholder: A much longer policyholder"),
+                                 (720, "name that wraps"), (700, "Coverage: Standard")])
+
+    result = compare(source, wrapped,
+                     [("Policyholder: Ada", "Policyholder: A much longer policyholder name that wraps")])
+    assert "target_text_missing_or_wrapped" in result["errors"]

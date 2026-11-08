@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import argparse
 import io
+import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 
 from docx import Document
 from lxml import etree
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import NameObject, TextStringObject
+from pypdf.generic import (ArrayObject, ByteStringObject, DictionaryObject, NameObject,
+                           NumberObject, TextStringObject)
 from PIL import Image, ImageDraw
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
@@ -70,6 +73,30 @@ def create_xfa_pdf() -> bytes:
     return output.getvalue()
 
 
+def create_restricted_pdf(restriction: str) -> bytes:
+    writer = PdfWriter(clone_from=PdfReader(io.BytesIO(create_pdf())))
+    if restriction == "certified":
+        permissions = DictionaryObject({NameObject("/DocMDP"): writer._root_object.indirect_reference})
+        writer._root_object[NameObject("/Perms")] = writer._add_object(permissions)
+    elif restriction == "signed":
+        signature = DictionaryObject({
+            NameObject("/FT"): NameObject("/Sig"),
+            NameObject("/T"): TextStringObject("synthetic_signature"),
+            NameObject("/V"): DictionaryObject({
+                NameObject("/Type"): NameObject("/Sig"),
+                NameObject("/ByteRange"): ArrayObject([NumberObject(0), NumberObject(1),
+                                                         NumberObject(2), NumberObject(3)]),
+                NameObject("/Contents"): ByteStringObject(b"synthetic-signature-marker"),
+            }),
+        })
+        writer._root_object["/AcroForm"].get_object()["/Fields"].append(writer._add_object(signature))
+    else:
+        raise ValueError(f"unsupported synthetic restriction: {restriction}")
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
 def create_scanned_pdf() -> bytes:
     with Image.new("RGB", (900, 1200), "white") as page_image:
         draw = ImageDraw.Draw(page_image)
@@ -112,8 +139,17 @@ def main() -> None:
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     (output / "synthetic-form.pdf").write_bytes(create_pdf())
+    if not shutil.which("qpdf"):
+        raise SystemExit("qpdf is required to create the independent PDF producer fixture")
+    intermediate = output / "synthetic-form-reportlab.pdf"
+    intermediate.write_bytes(create_pdf())
+    subprocess.run(["qpdf", "--object-streams=generate", str(intermediate),
+                    str(output / "synthetic-form-qpdf.pdf")], check=True, capture_output=True)
+    intermediate.unlink()
     (output / "synthetic-encrypted.pdf").write_bytes(create_encrypted_pdf())
     (output / "synthetic-xfa.pdf").write_bytes(create_xfa_pdf())
+    (output / "synthetic-certified.pdf").write_bytes(create_restricted_pdf("certified"))
+    (output / "synthetic-signed.pdf").write_bytes(create_restricted_pdf("signed"))
     (output / "synthetic-scanned.pdf").write_bytes(create_scanned_pdf())
     (output / "synthetic-claim.docx").write_bytes(create_docx())
     (output / "synthetic-tracked-changes.docx").write_bytes(create_tracked_change_docx())

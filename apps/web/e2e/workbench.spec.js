@@ -47,6 +47,29 @@ const fixtures = [
     bytes: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-form.pdf')),
     target: 'pdf:claimant_name', oldValue: 'Ada Example', newValue: 'Ada Demo', unrelated: 'Synthetic continuation page',
   },
+  {
+    name: 'PDF qpdf object-stream verified release', filename: 'synthetic-form-qpdf.pdf', mime: 'application/pdf',
+    bytes: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-form-qpdf.pdf')),
+    target: 'pdf:claimant_name', oldValue: 'Ada Example', newValue: 'Ada Qpdf', unrelated: 'Synthetic continuation page',
+  },
+  {
+    name: 'PDF checkbox verified release', filename: 'synthetic-form-checkbox.pdf', mime: 'application/pdf',
+    bytes: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-form.pdf')),
+    target: 'pdf:consent', oldValue: 'false', newValue: 'true', nativeValueType: 'boolean',
+    unrelated: 'Synthetic continuation page',
+  },
+  {
+    name: 'PDF radio group verified release', filename: 'synthetic-form-radio.pdf', mime: 'application/pdf',
+    bytes: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-form.pdf')),
+    target: 'pdf:coverage', oldValue: 'basic', newValue: 'extended', nativeValueType: 'choice',
+    unrelated: 'Synthetic continuation page',
+  },
+  {
+    name: 'PDF dropdown verified release', filename: 'synthetic-form-dropdown.pdf', mime: 'application/pdf',
+    bytes: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-form.pdf')),
+    target: 'pdf:region', oldValue: 'CA', newValue: 'NY', nativeValueType: 'choice',
+    unrelated: 'Synthetic continuation page',
+  },
 ];
 
 async function apiCall(request, token, route, options = {}) {
@@ -147,6 +170,7 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await page.getByRole('tab', { name: 'Data corrections' }).click();
   const fieldCard = page.locator('.correction-card').filter({ hasText: fixture.oldValue });
   await fieldCard.getByLabel('Corrected value').fill(`data-${fixture.newValue}`);
+  await fieldCard.getByLabel('Correction value type').selectOption('string');
   await fieldCard.getByLabel('Correction reason').fill('Browser E2E sidecar correction');
   await fieldCard.getByRole('button', { name: 'Save data correction' }).click();
   await expect(page.getByRole('status')).toContainText(/Data correction saved separately/);
@@ -155,8 +179,13 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await page.getByLabel('Reason for document change').fill('Browser E2E native correction');
   await page.getByRole('button', { name: 'Create correction draft' }).click();
   const editCard = page.locator('.workflow-status');
-  await editCard.getByLabel('Selected target value').fill(fixture.newValue);
-  await editCard.getByLabel('Native value type').selectOption(fixture.target === 'pdf:consent' ? 'boolean' : 'string');
+  const proposedValue = editCard.getByLabel('Selected target value');
+  if (await proposedValue.evaluate((element) => element.tagName) === 'SELECT') {
+    await proposedValue.selectOption(fixture.newValue);
+  } else {
+    await proposedValue.fill(fixture.newValue);
+  }
+  await editCard.getByLabel('Native value type').selectOption(fixture.nativeValueType ?? 'string');
   await page.getByRole('button', { name: 'Add selected target patch' }).click();
   await expect(page.getByRole('status')).toContainText(/Native patch prepared/);
   await page.getByRole('button', { name: 'Preflight and freeze' }).click();
@@ -397,6 +426,22 @@ test('unsupported encrypted PDF and tracked-change DOCX remain read only in the 
   await expect(page.locator('.pdf-field-row')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Create correction draft' })).toHaveCount(0);
   await page.screenshot({ path: path.join(screenshots, 'encrypted-pdf-read-only.png'), fullPage: true });
+
+  for (const restriction of ['certified', 'signed']) {
+    await page.getByRole('button', { name: 'Documents' }).click();
+    const restrictedName = uniqueFixtureFilename(`synthetic-${restriction}.pdf`);
+    await page.getByLabel('Choose a document to upload').setInputFiles({ name: restrictedName, mimeType: 'application/pdf',
+      buffer: fs.readFileSync(path.resolve(here, `../../../.runtime/browser-fixtures/synthetic-${restriction}.pdf`)) });
+    await page.getByRole('button', { name: 'Upload securely' }).click();
+    await expect(page.getByRole('heading', { name: restrictedName })).toBeVisible();
+    await expect(page.getByText('PDF · Read only', { exact: true })).toBeVisible();
+    await expectPdfCanvasRendered(page);
+    const restrictedFields = page.locator('.pdf-field-row');
+    await expect(restrictedFields).not.toHaveCount(0);
+    for (const button of await restrictedFields.all()) await expect(button).toBeDisabled();
+    await page.getByRole('tab', { name: 'Native changes' }).click();
+    await expect(page.getByRole('button', { name: 'Create correction draft' })).toHaveCount(0);
+  }
 
   await page.getByRole('button', { name: 'Documents' }).click();
   const xfaName = uniqueFixtureFilename('synthetic-xfa.pdf');
