@@ -1,0 +1,38 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+node_modules/
+dist/
+.runtime/
+.vite/
+.DS_Store
+playwright-report/
+test-results/
+.env
+.env.*
+!.env.example
+
+# Generated evidence, local documents and downloads stay out of Git. Keep only
+# the two synthetic M0 workbook inputs required by the regression suite and
+# credential-free UI screenshots.
+/artifacts/*
+!/artifacts/m0/
+/artifacts/m0/*
+!/artifacts/m0/m0_original.xlsx
+!/artifacts/m0/m0_dependent_original.xlsx
+!/artifacts/m0/source-sha256.txt
+!/artifacts/ui-redesign/
+/artifacts/ui-redesign/*
+!/artifacts/ui-redesign/dashboard.png
+!/artifacts/ui-redesign/library.png
+!/artifacts/ui-redesign/showcase-workspace-desktop.png
+!/artifacts/ui-redesign/showcase-workspace-mobile.png
+!/artifacts/ui-redesign/showcase-review-queue-desktop.png
+!/artifacts/ui-redesign/showcase-review-queue-mobile.png
+!/artifacts/ui-redesign/reviewer-approved-desktop.png
+!/artifacts/ui-redesign/reviewer-approved-mobile.png
+!/artifacts/ui-redesign/reviewer-rejection-outcome-desktop.png
+!/artifacts/ui-redesign/verified-release-desktop.png
+!/artifacts/ui-redesign/verified-release-mobile.png
+!/artifacts/ui-redesign/incomplete-verification-desktop.png

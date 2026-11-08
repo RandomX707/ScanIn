@@ -1,0 +1,12 @@
+# M0 Limitations
+
+- **Image display size is limited in the fixture.** The PNG is a recognizable 64×64 raster, but its drawing anchor is only 1×1 pixel, so its recognizable on-sheet appearance was not verified. The user reports that all five regenerated workbooks imported in LibreOffice Calc 25.2.3.2 without PNG CRC errors and that package/image/chart/shared-string preservation passed. XLSX-6 native-open is PASS for M0. This is manually supplied evidence; Microsoft Excel was not tested.
+- **Formula results remain unverified.** The adapter does not recalculate formulas. Known or unknown dependents set recalculation-on-open and yield NOT_VERIFIED dependent checks and an INCOMPLETE outcome. An office app recalculating on open is not proof all dependencies or stored cached results are valid.
+- The fixture corpus is synthetic and small; it is not the architecture's 50-file cross-producer regression corpus.
+- No database, storage layer, audit chain, account, role, tenant or category authorization exists in standalone M0. XLSX event wiring into the database audit pipeline is deferred to M3; this is not counted as an M0 standalone engine failure.
+- Formula analysis is conservative. A1 references, ranges, cross-sheet references and range-valued defined names are handled. Ambiguous or unsupported constructs such as `INDIRECT`, `OFFSET`, structured references, external links, array formula dependencies and complex defined names remain unknown.
+- Display rendering is not independently compared by the verifier. Programmatic value/type/style checks and PNG CRC/decompression are automated. User-reported Calc import passed, but the 1×1-pixel anchor prevented visual confirmation of the recognizable image.
+- The synthetic fixture includes a DrawingML image and chart. openpyxl may warn that unsupported drawing shapes can be lost if saved; the engine uses targeted OOXML editing and checks raw package bytes instead.
+- Encrypted packages are rejected, macro-enabled workbooks are read-only, and rich-text/formula/array-formula/error cells are not editable.
+- ZIP quotas, malware scanning, sandboxing, APIs, UI, tenancy, release transactions, CSV/JSON/PDF/DOCX adapters and M1 infrastructure remain outside M0.
+- The workspace denied creation of `Channel360/.git`, so no Git repository or staged baseline was created. Setup commands are in `M0_GIT_BASELINE.md`. The adjacent INSYGHT repository is unrelated and was not modified; no commit or push was performed.
