@@ -4,7 +4,7 @@ Updated 2026-11-08. These commands target only the dedicated `channel360_test` d
 
 ## Current run evidence
 
-See [LIVE_END_TO_END_TEST_REPORT.md](LIVE_END_TO_END_TEST_REPORT.md) for the exact run summary. The live PostgreSQL suite passed 22 tests, ClamAV passed 4 checks, Playwright passed 6 workflows, the frontend build passed, and the app URLs responded on ports 5174 and 8000.
+See [LIVE_END_TO_END_TEST_REPORT.md](LIVE_END_TO_END_TEST_REPORT.md) for the exact run summary. The live PostgreSQL suite passed 22 tests, ClamAV passed 4 checks, Playwright passed 9 tests, the frontend build passed, and the app URLs responded on ports 5174 and 8000.
 
 ## Prerequisites
 
@@ -25,7 +25,7 @@ shasum -a 256 -c artifacts/m0/source-sha256.txt
 scripts/host/start_and_run_browser_e2e.sh
 ```
 
-`start_and_run_browser_e2e.sh` starts the app on port 5174, uses the explicitly named `Channel360 Browser E2E` synthetic tenant, issues short-lived identities without printing them, runs CSV/JSON/XLSX, rejection, and formula-dependent browser tests, and leaves Channel360 running on success. It does not run against the primary showcase tenant. If the API or frontend ports are already occupied, inspect them and stop only a confirmed Channel360 process before using the launcher.
+`start_and_run_browser_e2e.sh` starts the app on port 5174, uses the explicitly named `Channel360 Browser E2E` synthetic tenant, issues short-lived identities without printing them, and runs CSV/JSON/XLSX/PDF verified-release downloads, DOCX fail-closed preview, unsupported-format safety, reviewer rejection, and formula-dependent browser tests. It leaves Channel360 running on success and does not run against the primary showcase tenant. If the API or frontend ports are already occupied, inspect them and stop only a confirmed Channel360 process before using the launcher.
 
 The standalone browser action can also use an already-running app with `IDW_WEB_BASE_URL=http://127.0.0.1:5174`; it requires short-lived tokens scoped to the test tenant in the current shell. Never paste those tokens into logs, screenshots or Git.
 
