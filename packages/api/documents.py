@@ -36,6 +36,7 @@ from packages.core.verification.docx import DocxIndependentVerifier
 from packages.core.verification.independent import IndependentVerifier
 from packages.workflow.frozen_serialization import deserialize_frozen_edit_set, serialize_frozen_edit_set
 from packages.workflow.release import NativeReleaseWorkflow, WorkflowRejected, XlsxReleaseWorkflow
+from packages.workflow.release_lock import ReleaseInProgress, claim_release
 from packages.ingestion.models import ScanResult
 from packages.core.planning.planner import PlanError
 
@@ -886,6 +887,15 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
         parsed_document, parsed_edit_set = UUID(document_id), UUID(edit_set_id)
     except ValueError:
         raise APIError(404, "not_found", "The edit set was not found.") from None
+    try:
+        with claim_release(request.app.state.engine, str(parsed_edit_set)):
+            return _release_edit_set_claimed(parsed_document, parsed_edit_set, request, identity)
+    except ReleaseInProgress:
+        raise APIError(409, "release_in_progress", "A release attempt for this edit set is already running.") from None
+
+
+def _release_edit_set_claimed(parsed_document: UUID, parsed_edit_set: UUID, request: Request,
+                              identity: AuthenticatedIdentity) -> dict[str, object]:
     with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
         repo = DocumentRepository(connection, identity.tenant_id)
         edit_set = repo.get_edit_set(parsed_edit_set)
@@ -956,7 +966,10 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
         elif scan.status != "clean" or scan.sha256 != staged.sha256:
             storage.discard_staged(staged)
             staged = None
-            outcome = "BLOCKED"
+            reason_code = scan.reason_code or ("scanner_hash_mismatch" if scan.status == "clean" else "scanner_unavailable")
+            raise APIError(503, "release_scan_unavailable",
+                           "The derived file could not be confirmed clean; this frozen edit set is available for retry.",
+                           details=[{"reason_code": reason_code}])
         else:
             stored = storage.promote_derived(staged, scan, edit_set_id=parsed_edit_set)
             staged = None
