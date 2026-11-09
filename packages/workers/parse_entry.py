@@ -13,6 +13,10 @@ from packages.core.adapters.registry import AdapterRegistry
 
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_TARGETS = 2000
+MAX_TARGET_LOOKUP_IDS = 2000
+MAX_TARGET_ID_LENGTH = 512
+
+
 class ParserRejected(ValueError):
     def __init__(self, reason_code: str, selection=None, digest: str | None = None, size_bytes: int | None = None):
         super().__init__(reason_code)
@@ -22,8 +26,23 @@ class ParserRejected(ValueError):
         self.size_bytes = size_bytes
 
 
+def _bounded_target_ids(target_ids: Any) -> list[str] | None:
+    if target_ids is None:
+        return None
+    if (not isinstance(target_ids, list) or len(target_ids) > MAX_TARGET_LOOKUP_IDS
+            or any(not isinstance(item, str) or not item or len(item) > MAX_TARGET_ID_LENGTH for item in target_ids)):
+        raise ParserRejected("target_lookup_invalid")
+    return list(dict.fromkeys(target_ids))
+
+
 def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int = 100,
-                  include_targets: bool = False, include_summary_evidence: bool = False) -> dict[str, Any]:
+                  include_targets: bool = False, include_summary_evidence: bool = False,
+                  target_offset: int = 0, target_ids: list[str] | None = None) -> dict[str, Any]:
+    """Inspect one source. Targets are returned as one bounded page (``target_offset``) or, when
+    ``target_ids`` is given, as an exact lookup of at most MAX_TARGET_LOOKUP_IDS identifiers."""
+    if not isinstance(target_offset, int) or isinstance(target_offset, bool) or target_offset < 0:
+        raise ParserRejected("target_page_invalid")
+    target_ids = _bounded_target_ids(target_ids)
     digest = hashlib.sha256(data).hexdigest()
     if not data or len(data) > MAX_FILE_BYTES:
         raise ParserRejected("file_size_limit")
@@ -54,8 +73,22 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         safe_targets = [target for target in source_adapter.targets(data) if target.editable]
         rejected_targets = source_adapter.unsupported_targets(data)
         all_targets = safe_targets + rejected_targets
-        result["targets"] = [_target_dict(target) for target in all_targets[:MAX_TARGETS]]
-        result["targets_truncated"] = len(all_targets) > MAX_TARGETS
+        total = len(all_targets)
+        if target_ids is not None:
+            wanted = set(target_ids)
+            result["targets"] = [_target_dict(target) for target in all_targets if target.id in wanted]
+            result["targets_page"] = {"mode": "lookup", "offset": 0, "limit": MAX_TARGET_LOOKUP_IDS,
+                                      "total": total, "requested": len(target_ids),
+                                      "found": len(result["targets"]), "next_offset": None}
+            result["targets_truncated"] = False
+        else:
+            page = all_targets[target_offset:target_offset + MAX_TARGETS]
+            end = target_offset + len(page)
+            result["targets"] = [_target_dict(target) for target in page]
+            result["targets_page"] = {"mode": "page", "offset": target_offset, "limit": MAX_TARGETS,
+                                      "total": total, "next_offset": end if end < total else None}
+            # True when this response does not carry every target (another page exists or precedes it).
+            result["targets_truncated"] = target_offset > 0 or end < total
     if supported and profile.adapter == "pdf":
         result["details"] = _pdf_details(data, registry.pdf, include_targets=include_targets)
     elif supported and profile.adapter == "docx":
@@ -226,14 +259,18 @@ def main() -> int:
     parser.add_argument("--filename", default="")
     parser.add_argument("--targets", action="store_true")
     parser.add_argument("--summary-evidence", action="store_true")
+    parser.add_argument("--target-offset", type=int, default=0)
+    parser.add_argument("--target-ids", default=None, help="JSON list of exact target identifiers")
     args = parser.parse_args()
     try:
         path = Path(args.input)
         size = path.stat().st_size
         if size > MAX_FILE_BYTES:
             raise ParserRejected("file_size_limit")
+        target_ids = json.loads(args.target_ids) if args.target_ids is not None else None
         result = inspect_bytes(path.read_bytes(), filename=args.filename or path.name,
-                               include_targets=args.targets, include_summary_evidence=args.summary_evidence)
+                               include_targets=args.targets, include_summary_evidence=args.summary_evidence,
+                               target_offset=args.target_offset, target_ids=target_ids)
     except ParserRejected as error:
         selection = error.selection
         result = {"status": "rejected", "reason": error.reason_code,

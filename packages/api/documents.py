@@ -41,6 +41,8 @@ from packages.ingestion.models import ScanResult
 from packages.core.planning.planner import PlanError
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
+MAX_VIEW_TARGET_OFFSET = 10_000_000
+MAX_VIEW_TARGET_LOOKUP = 50
 
 
 class ManualFieldRequest(BaseModel):
@@ -322,7 +324,8 @@ def inspect_document(
         "adapter_version": report.adapter_version, "sheets": list(report.sheets),
         "features": list(report.features), "findings": list(report.findings),
         "inspection_score": report.score, "state": state, "viewing_ready": state == "ready",
-        "targets": list(report.targets), "targets_truncated": report.targets_truncated, "details": report.details,
+        "targets": list(report.targets), "targets_truncated": report.targets_truncated,
+        "targets_page": report.targets_page, "details": report.details,
     }
 
 
@@ -344,7 +347,14 @@ def list_document_versions(document_id: str, request: Request,
 
 @router.get("/{document_id}/versions/{version_id}/view")
 def view_document_version(document_id: str, version_id: str, request: Request,
+                          target_offset: int = Query(default=0, ge=0, le=MAX_VIEW_TARGET_OFFSET),
+                          target_id: list[str] = Query(default=[]),
                           identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
+    """Return one bounded page of native targets, or an exact lookup of up to MAX_VIEW_TARGET_LOOKUP ids."""
+    if len(target_id) > MAX_VIEW_TARGET_LOOKUP or any(not item or len(item) > 512 for item in target_id):
+        raise APIError(422, "target_lookup_invalid", "Request at most 50 exact target identifiers.")
+    if target_id and target_offset:
+        raise APIError(422, "target_lookup_invalid", "Use either a target page or an exact target lookup.")
     try:
         parsed_id, parsed_version_id = UUID(document_id), UUID(version_id)
     except ValueError:
@@ -363,15 +373,18 @@ def view_document_version(document_id: str, version_id: str, request: Request,
             source = storage.read_original(stored)
             filename = _filename(str(row["filename"]))
     try:
-        report = request.app.state.restricted_parser.inspect(stored.path, filename=filename, include_targets=True)
+        report = request.app.state.restricted_parser.inspect(
+            stored.path, filename=filename, include_targets=True, target_offset=target_offset,
+            target_ids=target_id or None)
     except ParserNotVerified:
         raise APIError(503, "view_not_verified", "Safe document viewing is unavailable.") from None
     if report.sha256 != row["sha256"]:
         raise APIError(409, "source_version_changed", "The requested version failed integrity validation.")
     if report.adapter not in {"csv", "json", "xlsx", "pdf", "docx"} or report.status != "inspected":
         raise APIError(415, "viewer_not_supported", "This file type has no supported read-only viewer.")
-    if report.targets_truncated:
-        raise APIError(413, "viewer_target_limit", "The document exceeds the safe viewer target limit.")
+    page = report.targets_page or {}
+    if target_offset and page.get("total") is not None and target_offset >= int(page["total"]):
+        raise APIError(416, "target_page_out_of_range", "The requested target page is beyond the document.")
     return {
         "document_id": str(parsed_id), "version_id": str(parsed_version_id),
         "parent_version_id": str(row["parent_version_id"]) if row["parent_version_id"] else None,
@@ -380,7 +393,9 @@ def view_document_version(document_id: str, version_id: str, request: Request,
         "capability": _presentation_capability(report), "adapter": report.adapter,
         "docx_verification_mode": request.app.state.settings.channel360_docx_verification_mode
         if report.adapter == "docx" else None,
-        "features": list(report.features), "targets": list(report.targets), "details": report.details,
+        "features": list(report.features), "targets": list(report.targets),
+        "targets_truncated": report.targets_truncated, "targets_page": report.targets_page,
+        "details": report.details,
         "structural_summary": ({**report.structural_summary, "source_document_id": str(parsed_id),
                                 "source_version_id": str(parsed_version_id)} if report.structural_summary else None),
     }
@@ -493,7 +508,8 @@ def create_manual_field(document_id: str, payload: ManualFieldRequest, request: 
             version_id = UUID(str(row["current_version_id"]))
             filename = _filename(str(row["filename"]))
     try:
-        report = request.app.state.restricted_parser.inspect(stored.path, filename=filename, include_targets=True)
+        report = request.app.state.restricted_parser.inspect(stored.path, filename=filename, include_targets=True,
+                                                             target_ids=[payload.target_id])
     except ParserNotVerified:
         raise APIError(503, "target_resolution_not_verified", "Safe target resolution is unavailable.") from None
     if report.sha256 != stored.sha256:
@@ -686,7 +702,8 @@ def add_edit_set_patches(document_id: str, edit_set_id: str, payload: PatchBatch
     try:
         report = request.app.state.restricted_parser.inspect(
             request.app.state.document_storage.root / str(version["storage_key"]),
-            filename=str(version.get("filename", "")) or str(edit_set["filename"]), include_targets=True)
+            filename=str(version.get("filename", "")) or str(edit_set["filename"]), include_targets=True,
+            target_ids=[item.target_id for item in payload.patches])
     except ParserNotVerified:
         raise APIError(503, "preflight_not_verified", "Restricted target resolution is unavailable.") from None
     if report.sha256 != version["sha256"]:
@@ -748,7 +765,8 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
     try:
         report = request.app.state.restricted_parser.inspect(
             request.app.state.document_storage.root / str(version["storage_key"]),
-            filename=str(edit_set["filename"]), include_targets=True)
+            filename=str(edit_set["filename"]), include_targets=True,
+            target_ids=[str(item["target_id"]) for item in stored_patches])
     except ParserNotVerified:
         raise APIError(503, "preflight_not_verified", "Restricted preflight is unavailable.") from None
     if report.sha256 != version["sha256"]:
@@ -836,7 +854,8 @@ def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
     try:
         report = request.app.state.restricted_parser.inspect(
             request.app.state.document_storage.root / str(version["storage_key"]),
-            filename=str(draft["filename"]), include_targets=True)
+            filename=str(draft["filename"]), include_targets=True,
+            target_ids=[str(patch["target_id"]) for patch in patches])
     except ParserNotVerified:
         raise APIError(503, "rebase_not_verified", "Restricted target resolution is unavailable.") from None
     if report.sha256 != version["sha256"]:

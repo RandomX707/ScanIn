@@ -49,6 +49,7 @@ class ParserReport:
     score: float = 0.0
     targets: tuple[dict[str, Any], ...] = ()
     targets_truncated: bool = False
+    targets_page: dict[str, Any] | None = None
     details: dict[str, Any] | None = None
     structural_summary: dict[str, Any] | None = None
     summary_evidence: tuple[dict[str, str], ...] = ()
@@ -61,7 +62,8 @@ class RestrictedParser:
 
     def inspect(self, source_path: str | Path, *, filename: str | None = None,
                 include_targets: bool = False, include_summary_evidence: bool = False,
-                timeout_seconds: int = 30) -> ParserReport:
+                timeout_seconds: int = 30, target_offset: int = 0,
+                target_ids: list[str] | tuple[str, ...] | None = None) -> ParserReport:
         source = Path(source_path).resolve(strict=True)
         size = source.stat().st_size
         if not source.is_file() or size > 50 * 1024 * 1024:
@@ -72,6 +74,12 @@ class RestrictedParser:
             command.append("--targets")
         if include_summary_evidence:
             command.append("--summary-evidence")
+        if isinstance(target_offset, bool) or not isinstance(target_offset, int) or target_offset < 0:
+            raise ParserNotVerified("parser_target_page_invalid")
+        if target_offset:
+            command.extend(["--target-offset", str(target_offset)])
+        if target_ids is not None:
+            command.extend(["--target-ids", json.dumps(list(target_ids), separators=(",", ":"))])
         try:
             result = self.runner.run(command, input_path=source, timeout_seconds=timeout_seconds)
         except (OSError, RestrictedWorkerFailed) as error:
@@ -92,6 +100,7 @@ class RestrictedParser:
                 sheets=tuple(payload.get("sheets", ())), features=tuple(payload.get("features", ())),
                 findings=tuple(payload.get("findings", ())), score=float(payload.get("score", 0.0)),
                 targets=tuple(payload.get("targets", ())), targets_truncated=bool(payload.get("targets_truncated", False)),
+                targets_page=payload.get("targets_page"),
                 details=payload.get("details"),
                 structural_summary=payload.get("structural_summary"),
                 summary_evidence=tuple(payload.get("summary_evidence", ())),
