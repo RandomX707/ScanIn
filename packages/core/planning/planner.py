@@ -45,8 +45,13 @@ def build_patch_plan(adapter, source: bytes, patches: list[Patch] | tuple[Patch,
     versions = {p.source_version_id for p in patches}
     if len(versions) != 1 or next(iter(versions)) != source_hash:
         raise PlanError("stale_source")
-    targets = {t.id: t for t in adapter.targets(source)}
-    unsupported = {t.id: t for t in adapter.unsupported_targets(source)}
+    lookup = getattr(adapter, "lookup_targets", None)
+    if callable(lookup):
+        # Bounded adapters resolve exactly the patched identifiers instead of listing every target.
+        targets, unsupported = lookup(source, [patch.target_id for patch in patches])
+    else:
+        targets = {t.id: t for t in adapter.targets(source)}
+        unsupported = {t.id: t for t in adapter.unsupported_targets(source)}
     seen: set[str] = set()
     dependencies: set[str] = set()
     unknown = False

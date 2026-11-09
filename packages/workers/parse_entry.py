@@ -69,20 +69,30 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         "findings": list(selection.findings),
         "score": selection.score,
     }
+    # Adapters with a bounded target API (CSV) never build the full target list: the page or the exact
+    # lookup is produced from their compact index, parsed once for this request.
+    windowed = supported and callable(getattr(source_adapter, "target_window", None))
+    all_targets: list[Any] = []
     if include_targets and supported:
-        safe_targets = [target for target in source_adapter.targets(data) if target.editable]
-        rejected_targets = source_adapter.unsupported_targets(data)
-        all_targets = safe_targets + rejected_targets
-        total = len(all_targets)
+        if windowed:
+            total = source_adapter.target_count(data)
+        else:
+            safe_targets = [target for target in source_adapter.targets(data) if target.editable]
+            rejected_targets = source_adapter.unsupported_targets(data)
+            all_targets = safe_targets + rejected_targets
+            total = len(all_targets)
         if target_ids is not None:
             wanted = set(target_ids)
-            result["targets"] = [_target_dict(target) for target in all_targets if target.id in wanted]
+            selected = (source_adapter.targets_by_id(data, target_ids) if windowed
+                        else [target for target in all_targets if target.id in wanted])
+            result["targets"] = [_target_dict(target) for target in selected]
             result["targets_page"] = {"mode": "lookup", "offset": 0, "limit": MAX_TARGET_LOOKUP_IDS,
                                       "total": total, "requested": len(target_ids),
                                       "found": len(result["targets"]), "next_offset": None}
             result["targets_truncated"] = False
         else:
-            page = all_targets[target_offset:target_offset + MAX_TARGETS]
+            page = (source_adapter.target_window(data, target_offset, MAX_TARGETS) if windowed
+                    else all_targets[target_offset:target_offset + MAX_TARGETS])
             end = target_offset + len(page)
             result["targets"] = [_target_dict(target) for target in page]
             result["targets_page"] = {"mode": "page", "offset": target_offset, "limit": MAX_TARGETS,
@@ -94,11 +104,17 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
     elif supported and profile.adapter == "docx":
         result["details"] = registry.docx.details(data, include_targets=include_targets)
     from packages.core.summaries.structural import StructuralSummaryProvider
-    summary_targets = all_targets if include_targets and supported else (
-        source_adapter.targets(data) if supported else [])
+    if profile.adapter == "csv":
+        # The CSV summary is computed from the parsed document, never from target dictionaries.
+        summary_targets: list[Any] = []
+        parsed = source_adapter.document(data) if supported else None
+    else:
+        summary_targets = all_targets if include_targets and supported else (
+            source_adapter.targets(data) if supported else [])
+        parsed = None
     result["structural_summary"] = StructuralSummaryProvider().summarize(
         source=data, adapter=profile.adapter, details=result.get("details"), targets=[_target_dict(item) for item in summary_targets],
-        sheets=list(profile.sheets))
+        sheets=list(profile.sheets), parsed=parsed)
     if include_summary_evidence and supported:
         result["summary_evidence"] = _summary_evidence(data, profile.adapter, result.get("details"), source_adapter)
     return result
