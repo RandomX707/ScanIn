@@ -36,9 +36,12 @@ class StructuralSummaryProvider:
     """Create a bounded, deterministic summary without retaining document values."""
 
     def summarize(self, *, source: bytes, adapter: str | None, details: dict[str, Any] | None,
-                  targets: list[dict[str, Any]] | None = None, sheets: list[str] | None = None) -> dict[str, Any]:
+                  targets: list[dict[str, Any]] | None = None, sheets: list[str] | None = None,
+                  parsed: Any = None) -> dict[str, Any]:
+        """``parsed`` optionally passes the CSV document already built for this same request."""
         try:
-            return self._summarize(source=source, adapter=adapter, details=details, targets=targets, sheets=sheets)
+            return self._summarize(source=source, adapter=adapter, details=details, targets=targets, sheets=sheets,
+                                   parsed=parsed)
         except (ValueError, UnicodeError, KeyError, TypeError, OSError) as error:
             # Inspection can identify a read-only/partially supported file whose format parser
             # cannot provide structured facts. Keep that honest and never turn it into a denial.
@@ -51,7 +54,8 @@ class StructuralSummaryProvider:
                     "generation_method": "structural", "evidence_references": []}
 
     def _summarize(self, *, source: bytes, adapter: str | None, details: dict[str, Any] | None,
-                   targets: list[dict[str, Any]] | None = None, sheets: list[str] | None = None) -> dict[str, Any]:
+                   targets: list[dict[str, Any]] | None = None, sheets: list[str] | None = None,
+                   parsed: Any = None) -> dict[str, Any]:
         targets = targets or []
         details = details or {}
         observed: list[dict[str, str]] = []
@@ -62,10 +66,10 @@ class StructuralSummaryProvider:
 
         if adapter == "csv":
             # Use the adapter's full parser (not the bounded target response) for correct delimited record counts.
-            from packages.core.adapters.csv_adapter.adapter import CsvAdapter
-            document = CsvAdapter()._parse(source)
-            nonempty_rows = sum(1 for row in range(1, len(document.row_lengths) + 1)
-                                if any(cell.row == row and cell.value.strip() for cell in document.cells))
+            # Every fact below comes from one pass over the compact index plus O(1) header lookups.
+            from packages.core.adapters.csv_adapter.adapter import CsvAdapter, CsvDocument
+            document = parsed if isinstance(parsed, CsvDocument) and parsed.source is source else CsvAdapter().document(source)
+            nonempty_rows = document.nonempty_row_count()
             width = max(document.row_lengths, default=0)
             headers = [(cell.value.strip() if cell else "") for col in range(1, width + 1)
                        for cell in (document.cell(1, col),)]
@@ -74,7 +78,8 @@ class StructuralSummaryProvider:
             record_word = "record" if record_count == 1 else "records"
             stats = {"record_count": record_count, "column_count": width}
             names = [(name or f"Column {index}") for index, name in enumerate(headers, 1)] if has_header else [f"Column {index}" for index in range(1, width + 1)]
-            if has_header and len(document.row_lengths) > 1 and any(length != document.row_lengths[0] for length in document.row_lengths[1:]):
+            first_length = document.row_lengths[0] if len(document.row_lengths) else 0
+            if has_header and len(document.row_lengths) > 1 and any(length != first_length for length in document.row_lengths):
                 limitations.append("Rows have different column counts; unnamed columns are labeled by position.")
             for index, name in enumerate(names, start=1):
                 if not name:
