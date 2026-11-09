@@ -228,6 +228,18 @@ def _resolve_names(formula: str, own_sheet: str, names: dict[str, str]) -> str:
     return clean
 
 
+def _unlocked_styles(parts: dict[str, tuple[zipfile.ZipInfo, bytes]]) -> set[int]:
+    if "xl/styles.xml" not in parts:
+        return set()
+    styles = _xml(parts["xl/styles.xml"][1])
+    unlocked: set[int] = set()
+    for index, xf in enumerate(styles.xpath("./m:cellXfs/m:xf", namespaces=NS)):
+        protection = xf.find(f"{{{MAIN}}}protection")
+        if protection is not None and protection.get("locked", "1").lower() in {"0", "false"}:
+            unlocked.add(index)
+    return unlocked
+
+
 class XlsxAdapter:
     name = "xlsx"
     version = "0.1.0"
@@ -302,15 +314,24 @@ class XlsxAdapter:
 
     def targets(self, source: bytes) -> list[EditTarget]:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
+        unlocked_styles = _unlocked_styles(parts)
         formula_cells = {f"{sheet}!{c.get('r')}" for sheet, c in formulas}
         result: list[EditTarget] = []
         for sheet, part in sheets.items():
             root = _xml(parts[part][1])
+            sheet_protected = root.find(f"{{{MAIN}}}sheetProtection") is not None
             for cell in root.xpath(".//m:c", namespaces=NS):
                 value, reason = _cell_value(cell, shared, rich, dates, epoch)
                 if value is None or reason:
                     continue
                 ref = cell.get("r", "")
+                style_id = int(cell.get("s", "0")) if cell.get("s", "0").isdigit() else 0
+                if sheet_protected and style_id not in unlocked_styles:
+                    reason = "protected_cell_locked"
+                validation_options, validation_unsupported = self._list_validation_options(
+                    parts, sheets, shared, rich, dates, epoch, sheet, ref, root)
+                if validation_unsupported:
+                    reason = reason or "unsupported_data_validation"
                 deps: set[str] = set()
                 if not unknown_formula:
                     for target_sheet, first, last, formula_id in refs:
@@ -324,9 +345,88 @@ class XlsxAdapter:
                             deps.add(formula_id)
                 fp = _fingerprint(cell)
                 result.append(EditTarget(f"xlsx:{sheet}!{ref}", hashlib.sha256(source).hexdigest(), sheet, ref,
-                                         value, fp, cell.get("s"), True, None,
+                                         value, fp, cell.get("s"), reason is None, reason,
                                          None if unknown_formula else tuple(sorted(deps))))
         return result
+
+    def _list_validation_options(self, parts, sheets, shared, rich, dates, epoch,
+                                 sheet_name: str, cell_ref: str, root) -> tuple[set[str] | None, bool]:
+        options: set[str] | None = None
+        unsupported = False
+        wb = _xml(parts["xl/workbook.xml"][1])
+        names = _defined_names(wb, sheets)
+        for validation in root.xpath(".//m:dataValidation", namespaces=NS):
+            if validation.get("type") != "list":
+                continue
+            applies = False
+            for area in (validation.get("sqref") or "").split():
+                try:
+                    min_col, min_row, max_col, max_row = range_boundaries(area)
+                    match = CELL_COORD.match(cell_ref)
+                    if match:
+                        col, row = _column_index(match.group(1)), int(match.group(2))
+                        applies |= min_col <= col <= max_col and min_row <= row <= max_row
+                except ValueError:
+                    continue
+            if not applies:
+                continue
+            formula = (validation.findtext(f"{{{MAIN}}}formula1") or "").strip()
+            values: set[str] | None = None
+            if len(formula) >= 2 and formula[0] == formula[-1] == '"':
+                values = set(formula[1:-1].split(","))
+            else:
+                expression = _resolve_names(formula.lstrip("="), sheet_name, names)
+                reference = CELL_REF.fullmatch(expression)
+                if reference:
+                    target_sheet = (reference.group(1).replace("''", "'") if reference.group(1)
+                                    else reference.group(2) or sheet_name).strip()
+                    target_part = sheets.get(target_sheet)
+                    if target_part:
+                        target_root = _xml(parts[target_part][1])
+                        first = CELL_COORD.match(reference.group(3))
+                        last = CELL_COORD.match(reference.group(4) or reference.group(3))
+                        if first and last:
+                            c1, c2 = _column_index(first.group(1)), _column_index(last.group(1))
+                            r1, r2 = int(first.group(2)), int(last.group(2))
+                            if c2 >= c1 and r2 >= r1 and (c2-c1+1)*(r2-r1+1) <= 1024:
+                                values = set()
+                                cell_map = {node.get("r"): node for node in target_root.xpath(".//m:c", namespaces=NS)}
+                                for row in range(r1, r2 + 1):
+                                    for col in range(c1, c2 + 1):
+                                        ref = f"{get_column_letter(col)}{row}"
+                                        item = cell_map.get(ref)
+                                        if item is None:
+                                            values = None; break
+                                        parsed, item_reason = _cell_value(item, shared, rich, dates, epoch)
+                                        if parsed is None or item_reason:
+                                            values = None; break
+                                        values.add(str(parsed.value))
+                                    if values is None:
+                                        break
+            unsupported |= not bool(values)
+            if values:
+                options = values
+        return options, unsupported
+
+    def preflight(self, source: bytes, target: EditTarget, patch: Patch) -> None:
+        if hashlib.sha256(source).hexdigest() != patch.source_version_id:
+            raise XlsxError("stale_source")
+        fresh = next((item for item in self.targets(source) if item.id == patch.target_id), None)
+        if fresh is None:
+            raise XlsxError("target_not_found")
+        if not fresh.editable:
+            raise XlsxError(fresh.reason or "not_editable")
+        if fresh.fingerprint != patch.expected_fingerprint:
+            raise XlsxError("fingerprint_mismatch")
+        parts, sheets, shared, rich, dates, epoch, *_ = self._data(source)
+        part = sheets[fresh.sheet]
+        root = _xml(parts[part][1])
+        options, unsupported = self._list_validation_options(
+            parts, sheets, shared, rich, dates, epoch, fresh.sheet, fresh.cell, root)
+        if unsupported:
+            raise XlsxError("unsupported_data_validation")
+        if options is not None and str(patch.new_value.value) not in options:
+            raise XlsxError("data_validation_value_invalid")
 
     def unsupported_targets(self, source: bytes) -> list[EditTarget]:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)

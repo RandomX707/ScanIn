@@ -99,7 +99,7 @@ def make_fixture(path: Path, *, dependent: bool = False, with_objects: bool = Tr
         chart.add_data(Reference(ws, min_col=4, min_row=2, max_row=2))
         ws.add_chart(chart, "K10")
         validation = DataValidation(type="list", formula1='"safe,unsafe"')
-        validation.add("G2")
+        validation.add("M2")
         ws.add_data_validation(validation)
         ws.conditional_formatting.add("D2", __import__("openpyxl").formatting.rule.CellIsRule(operator="greaterThan", formula=[100]))
         wb.defined_names.add(__import__("openpyxl").workbook.defined_name.DefinedName("ClaimAmount", attr_text="Claim!$D$2"))

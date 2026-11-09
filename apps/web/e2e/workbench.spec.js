@@ -39,7 +39,7 @@ const fixtures = [
   {
     name: 'XLSX verified release', filename: 'm0_original.xlsx', mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     bytes: fs.readFileSync(path.resolve(here, '../../../artifacts/m0/m0_original.xlsx')),
-    target: 'xlsx:Claim!G2', oldValue: 'constant', newValue: 'confirmed', unrelated: 'CLM-1001',
+    target: 'xlsx:Claim!G2', oldValue: 'constant', newValue: 'safe', unrelated: 'CLM-1001',
   },
   {
     name: 'PDF AcroForm verified release', filename: 'synthetic-form.pdf', mime: 'application/pdf',
