@@ -95,6 +95,17 @@ def create_macro_xlsm() -> bytes:
                         {"xl/vbaProject.bin": b"synthetic placeholder, not a macro project"})
 
 
+def create_sections_docx() -> bytes:
+    """A block recognised as two summary sections, so the summary cites the same block twice."""
+    document = Document()
+    document.add_heading("Claim information", level=1)
+    document.add_paragraph("Claim number: CLM-SYN-0001")
+    document.add_paragraph("Policy number: POL-SYN-9")
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
 def create_docx() -> bytes:
     document = Document()
     document.add_heading("Synthetic Claim Summary", level=1)
@@ -209,6 +220,7 @@ def main() -> None:
     (output / "synthetic-invoice-no-fields.pdf").write_bytes(create_text_only_pdf())
     (output / "synthetic-rich-text.xlsx").write_bytes(create_rich_text_xlsx())
     (output / "synthetic-macro.xlsm").write_bytes(create_macro_xlsm())
+    (output / "synthetic-sections.docx").write_bytes(create_sections_docx())
     (output / "synthetic-claim.docx").write_bytes(create_docx())
     (output / "synthetic-tracked-changes.docx").write_bytes(create_tracked_change_docx())
 

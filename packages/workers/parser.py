@@ -50,6 +50,7 @@ class ParserReport:
     targets: tuple[dict[str, Any], ...] = ()
     targets_truncated: bool = False
     targets_page: dict[str, Any] | None = None
+    targets_editable_total: int | None = None
     details: dict[str, Any] | None = None
     structural_summary: dict[str, Any] | None = None
     summary_evidence: tuple[dict[str, str], ...] = ()
@@ -101,6 +102,7 @@ class RestrictedParser:
                 findings=tuple(payload.get("findings", ())), score=float(payload.get("score", 0.0)),
                 targets=tuple(payload.get("targets", ())), targets_truncated=bool(payload.get("targets_truncated", False)),
                 targets_page=payload.get("targets_page"),
+                targets_editable_total=payload.get("targets_editable_total"),
                 details=payload.get("details"),
                 structural_summary=payload.get("structural_summary"),
                 summary_evidence=tuple(payload.get("summary_evidence", ())),

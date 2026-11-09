@@ -382,7 +382,8 @@ def inspect_document(
         "viewing_ready": state == "ready" and _capabilities(report)["viewable"]["available"],
         "capabilities": _capabilities(report),
         "targets": list(report.targets), "targets_truncated": report.targets_truncated,
-        "targets_page": report.targets_page, "details": report.details,
+        "targets_page": report.targets_page, "editable_target_count": getattr(report, "targets_editable_total", None),
+        "details": report.details,
     }
 
 
@@ -454,6 +455,7 @@ def view_document_version(document_id: str, version_id: str, request: Request,
         "features": list(report.features), "targets": list(report.targets),
         "capabilities": _capabilities(report),
         "targets_truncated": report.targets_truncated, "targets_page": report.targets_page,
+        "editable_target_count": getattr(report, "targets_editable_total", None),
         "details": report.details,
         "structural_summary": ({**report.structural_summary, "source_document_id": str(parsed_id),
                                 "source_version_id": str(parsed_version_id)} if report.structural_summary else None),

@@ -122,6 +122,15 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         result["details"] = registry.docx.details(data, include_targets=include_targets)
     from packages.core.summaries.structural import StructuralSummaryProvider
     _apply_document_level_editability(result, profile)
+    if include_targets and supported:
+        # Document-wide count of natively editable targets (independent of the page or lookup returned).
+        if profile.level != "editable" or not structure_available:
+            editable_total = 0
+        elif windowed:
+            editable_total = 0 if source_adapter.document(data).mixed_line_endings else total
+        else:
+            editable_total = sum(1 for target in all_targets if target.editable)
+        result["targets_editable_total"] = editable_total
     if profile.adapter == "csv":
         # The CSV summary is computed from the parsed document, never from target dictionaries.
         summary_targets: list[Any] = []

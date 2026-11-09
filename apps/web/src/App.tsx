@@ -15,7 +15,7 @@ type AIExplanation = { source_document_id: string; source_version_id: string; so
 type SummaryMode = "no-ai" | "ai" | "compare";
 type CapabilityFlag = { available: boolean; reason: string | null };
 type Capabilities = { viewable: CapabilityFlag; native_editing: CapabilityFlag; data_corrections: CapabilityFlag };
-type Inspection = { capabilities?: Capabilities; media_type: string; capability: { level: string; reasons: string[] }; adapter: string | null; features: string[]; findings: string[]; source_sha256: string; viewing_ready: boolean; targets: Target[]; targets_truncated: boolean; state: string; details?: DocDetails };
+type Inspection = { editable_target_count?: number | null; targets_page?: TargetPage | null; capabilities?: Capabilities; media_type: string; capability: { level: string; reasons: string[] }; adapter: string | null; features: string[]; findings: string[]; source_sha256: string; viewing_ready: boolean; targets: Target[]; targets_truncated: boolean; state: string; details?: DocDetails };
 type FieldEvidence = { kind?: string; source_sha256?: string; source_version_id?: string; location?: Record<string, unknown>; natively_editable?: boolean; native_reason?: string | null; context_before?: string; context_after?: string };
 type Field = { field_id: string; target_id: string; label: string; observed_value: { type: string; value: unknown }; evidence?: FieldEvidence[] };
 type Correction = { id: string; field_id: string; label: string; corrected_value: { type: string; value: unknown }; reason: string; actor_id: string; created_at: string; target_id?: string; source_sha256?: string; source_version_id?: string };
@@ -55,12 +55,12 @@ function TextAnchorPicker({ viewed, disabled, onAnchor }: { viewed: Viewed; disa
     <label className="form-label">Field label (optional)<input aria-label="Anchored field label" value={label} maxLength={255} onChange={(event) => setLabel(event.target.value)} placeholder="e.g. Insured name" disabled={disabled} /></label>
     <button className="secondary full-width" disabled={disabled || !pending} onClick={() => { if (pending) { onAnchor(pending, label.trim()); setPending(null); setLabel(""); } }}>Add selected text as a correction field</button></section>;
 }
-type Viewed = { capabilities?: Capabilities; document_id: string; version_id: string; version_kind: string; filename: string; source_sha256: string; adapter: string; docx_verification_mode?: "structural" | "structural_and_visual" | null; capability: { level: string; reasons: string[] }; targets: Target[]; targets_truncated?: boolean; targets_page?: TargetPage | null; details?: DocDetails; structural_summary: StructuralSummary | null };
+type Viewed = { editable_target_count?: number | null; capabilities?: Capabilities; document_id: string; version_id: string; version_kind: string; filename: string; source_sha256: string; adapter: string; docx_verification_mode?: "structural" | "structural_and_visual" | null; capability: { level: string; reasons: string[] }; targets: Target[]; targets_truncated?: boolean; targets_page?: TargetPage | null; details?: DocDetails; structural_summary: StructuralSummary | null };
 type TargetPage = { mode: "page" | "lookup"; offset: number; limit: number; total: number; next_offset: number | null; found?: number };
 type Version = { version_id: string; parent_version_id: string | null; kind: string; sha256: string; is_current: boolean; verification_outcome: string | null; verification_profile?: string | null; visual_checks?: string | null; download_available?: boolean; edit_set_id: string | null; created_at?: string };
 type EditSet = { edit_set_id: string; document_id?: string; filename?: string; created_by?: string; status: string; base_version_id?: string; frozen_hash?: string; outcome?: string; version_id?: string | null; download_available?: boolean; reason?: string; patches?: { target_id: string; expected_old_value: { type: string; value: unknown }; new_value: { type: string; value: unknown } }[]; changes?: { target_id: string; old: { type: string; value: unknown }; proposed: { type: string; value: unknown } }[]; verification?: { outcome: string; verification_profile?: string; structural_checks?: string; visual_checks?: string; checks: { check: string; status: string; detail: Record<string, unknown> }[] } };
 type Audit = { sequence: number; ts: string; actor_id: string; action: string; subject: string; payload: Record<string, unknown>; event_hash: string };
-type Dashboard = { metrics: { total_documents: number; awaiting_inspection: number; documents_with_corrections: number; ready_for_release: number; verified_versions: number }; recent_documents: DocumentItem[]; recent_activity: { sequence: number; ts: string; actor_id: string; action: string; subject: string }[] };
+type Dashboard = { tenant?: { id: string; name: string | null }; metrics: { total_documents: number; awaiting_inspection: number; documents_with_corrections: number; ready_for_release: number; verified_versions: number }; recent_documents: DocumentItem[]; recent_activity: { sequence: number; ts: string; actor_id: string; action: string; subject: string }[] };
 
 const API = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 const roleDetails: Record<Role, { label: string; initial: string }> = { OWNER: { label: "Workspace owner", initial: "O" } };
@@ -177,7 +177,7 @@ function DocxDocumentViewer({ details, targets, selectedTarget, onSelect, native
 }
 
 function StructuralSummaryView({ summary, versionId }: { summary: StructuralSummary; versionId: string }) {
-  return <div data-testid="structural-facts"><div className="summary-state"><span className="status-dot green" /><div><strong>{summary.apparent_document_type ?? "Document structure reviewed"}</strong><small>Deterministic summary · Read-only · Source version {versionId.slice(0, 8)}</small></div></div><p className="structural-description">{summary.description}</p>{Object.keys(summary.statistics).length > 0 && <><h3>Document structure</h3><dl className="summary-dl">{Object.entries(summary.statistics).map(([key, value]) => <Fragment key={key}><dt>{summaryStatName(key)}</dt><dd>{summaryStatValue(key, value)}</dd></Fragment>)}</dl></>}{summary.observed_fields.length > 0 && <><h3>Observed fields and sections</h3><ul className="summary-observed">{summary.observed_fields.map((item, index) => <li key={`${item.kind}-${item.name}-${index}`}><span>{item.name}</span><small>{pretty(item.kind)}</small></li>)}</ul></>}{summary.evidence_references.length > 0 && <><h3>Structural evidence</h3><ul className="summary-evidence">{summary.evidence_references.slice(0, 12).map((item) => <li key={item.reference}><span>{item.label}</span><code>{item.reference}</code></li>)}</ul></>}{summary.limitations.length > 0 && <div className="finding-box"><strong>Inspection limitations</strong>{summary.limitations.map((item) => <p key={item}>{item}</p>)}</div>}<p className="summary-footnote">This deterministic description is tied to the immutable source hash. It does not classify the document for editing or authorize changes.</p></div>;
+  return <div data-testid="structural-facts"><div className="summary-state"><span className="status-dot green" /><div><strong>{summary.apparent_document_type ?? "Document structure reviewed"}</strong><small>Deterministic summary · Read-only · Source version {versionId.slice(0, 8)}</small></div></div><p className="structural-description">{summary.description}</p>{Object.keys(summary.statistics).length > 0 && <><h3>Document structure</h3><dl className="summary-dl">{Object.entries(summary.statistics).map(([key, value]) => <Fragment key={key}><dt>{summaryStatName(key)}</dt><dd>{summaryStatValue(key, value)}</dd></Fragment>)}</dl></>}{summary.observed_fields.length > 0 && <><h3>Observed fields and sections</h3><ul className="summary-observed">{summary.observed_fields.map((item, index) => <li key={`${item.kind}-${item.name}-${index}`}><span>{item.name}</span><small>{pretty(item.kind)}</small></li>)}</ul></>}{summary.evidence_references.length > 0 && <><h3>Structural evidence</h3><ul className="summary-evidence">{summary.evidence_references.slice(0, 12).map((item, index) => <li key={`${item.reference}-${index}`}><span>{item.label}</span><code>{item.reference}</code></li>)}</ul></>}{summary.limitations.length > 0 && <div className="finding-box"><strong>Inspection limitations</strong>{summary.limitations.map((item, index) => <p key={`${index}-${item}`}>{item}</p>)}</div>}<p className="summary-footnote">This deterministic description is tied to the immutable source hash. It does not classify the document for editing or authorize changes.</p></div>;
 }
 
 function AIExplanationView({ explanation }: { explanation: AIExplanation | undefined }) {
@@ -201,6 +201,15 @@ function SummaryWorkspace({ summary, versionId, mode, setMode, explanation, onGe
   </div>;
 }
 
+const CAPABILITY_LABELS: Record<string, string> = { editable: "Editable", read_only: "Read only", limited: "Limited", rejected: "Rejected" };
+
+/** One label per capability level whatever spelling the API used (editable, Read-only, limited, rejected). */
+function capabilityLabel(level: string | undefined): string {
+  if (!level) return "Unknown";
+  const key = level.trim().toLowerCase().replace(/[-\s]+/g, "_");
+  return CAPABILITY_LABELS[key] ?? pretty(key);
+}
+
 const REASON_TEXT: Record<string, string> = {
   encrypted_pdf: "The PDF is password protected, so it cannot be opened safely.",
   encrypted_office_package: "The Office file is password protected, so it cannot be opened safely.",
@@ -211,6 +220,18 @@ const REASON_TEXT: Record<string, string> = {
   csv_row_limit_exceeded: "The CSV has more rows than can be inspected safely.",
   file_size_limit: "The file is larger than the inspection limit.",
 };
+
+/** Document-wide counts: never present the current page's count as if it covered the whole document. */
+function editableCountText(viewed: Viewed | null, inspection: Inspection | null): string {
+  const page = viewed?.targets_page ?? inspection?.targets_page ?? null;
+  const shown = viewed?.targets ?? inspection?.targets ?? [];
+  const paged = Boolean(page && page.mode === "page" && page.total > shown.length);
+  if (viewed?.adapter === "docx") return page ? `${page.total}` : `${shown.length}`;
+  const total = viewed?.editable_target_count ?? inspection?.editable_target_count;
+  if (total !== undefined && total !== null) return paged ? `${total} (of ${page!.total} values; ${shown.filter((item) => item.editable).length} on this page)` : `${total}`;
+  const onPage = shown.filter((item) => item.editable).length;
+  return paged ? `${onPage} on this page (document total unavailable)` : `${onPage}`;
+}
 
 function unavailableMessage(inspection: Inspection): string {
   const reason = inspection.capability.reasons[0] ?? inspection.capabilities?.viewable.reason ?? "viewer_not_supported";
@@ -246,7 +267,13 @@ function App() {
   const [activeSheet, setActiveSheet] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
+  type NoticeKind = "auto" | "error" | "warning";
+  const [notice, setNotice] = useState<{ text: string; kind: NoticeKind }>({ text: "", kind: "auto" });
+  const message = notice.text;
+  // Outcome messages are classified from their wording; failures and validation problems are always
+  // shown as errors so they can never carry the success check mark.
+  const setMessage = useCallback((text: string, kind: NoticeKind = "auto") => setNotice({ text, kind }), []);
+  const showError = useCallback((text: string) => setNotice({ text, kind: "error" }), []);
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [stateFilter, setStateFilter] = useState("all");
@@ -281,12 +308,14 @@ function App() {
   const loadDashboard = useCallback(async () => {
     if (!token) return;
     const response = await request("/api/dashboard/summary");
-    setDashboard(await response.json() as Dashboard);
+    const loaded = await response.json() as Dashboard; setDashboard(loaded);
+    // The tenant name comes from the authenticated, tenant-scoped API, so it survives page reloads.
+    if (loaded.tenant?.name) setTenantName(loaded.tenant.name);
   }, [request, token]);
 
   useEffect(() => {
     if (!token) return;
-    void Promise.all([loadDocuments(), loadDashboard()]).catch((error: Error) => setMessage(error.message));
+    void Promise.all([loadDocuments(), loadDashboard()]).catch((error: Error) => showError(error.message));
   }, [token, loadDocuments, loadDashboard]);
 
   useEffect(() => { const target = viewed?.targets.find((item) => item.id === selectedTarget); if (target) { setPatchType(target.value.type); setPatchValue(String(target.value.value ?? "")); } }, [selectedTarget, viewed]);
@@ -300,7 +329,7 @@ function App() {
       sessionStorage.setItem("channel360.demo.session", session.access_token);
       sessionStorage.setItem("channel360.demo.role", "OWNER");
       setToken(session.access_token); setRole(session.role); setTenantName(session.tenant_name); setPage("overview");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "Sign-in failed."); }
+    } catch (error) { showError(error instanceof Error ? error.message : "Sign-in failed."); }
     finally { setBusy(false); }
   }
 
@@ -314,7 +343,7 @@ function App() {
         const inspectResponse = await request(`/api/documents/${item.id}/inspect?include_targets=true`, { method: "POST" });
         const checked = await inspectResponse.json() as Inspection; setInspection(checked);
         readyItem = { ...item, ingestion_state: checked.state }; setSelected(readyItem);
-        if (!checked.viewing_ready) { setUnavailable(checked); setMessage(unavailableMessage(checked)); return; }
+        if (!checked.viewing_ready) { setUnavailable(checked); setMessage(unavailableMessage(checked), checked.capability.level === "rejected" ? "error" : "warning"); return; }
       }
       const versionId = readyItem.current_version_id;
       if (!versionId) throw new Error("A registered source version is not available yet.");
@@ -322,7 +351,7 @@ function App() {
       if (viewProbe.status === 415) {
         // Inspected safely but no viewer exists (for example a legacy .doc): show why instead of an error.
         const checked = await (await request(`/api/documents/${item.id}/inspect`, { method: "POST" })).json() as Inspection;
-        setInspection(checked); setUnavailable(checked); setMessage(unavailableMessage(checked)); return;
+        setInspection(checked); setUnavailable(checked); setMessage(unavailableMessage(checked), checked.capability.level === "rejected" ? "error" : "warning"); return;
       }
       const [viewR, fieldsR, correctionsR, versionsR, editsR, auditR] = await Promise.all([
         viewProbe.ok ? Promise.resolve(viewProbe) : request(`/api/documents/${item.id}/versions/${versionId}/view`), request(`/api/documents/${item.id}/fields`), request(`/api/documents/${item.id}/corrections`), request(`/api/documents/${item.id}/versions`), request(`/api/documents/${item.id}/edit-sets`), request(`/api/documents/${item.id}/audit`),
@@ -336,7 +365,7 @@ function App() {
       setVersions((await versionsR.json() as { items: Version[] }).items); const editItems = (await editsR.json() as { items: EditSet[] }).items; setEditSet(editItems.sort((a, b) => editPriority(a.status) - editPriority(b.status))[0] ?? null); setAudit((await auditR.json() as { items: Audit[] }).items);
       setActiveSheet(nextView.targets[0]?.sheet || "CSV");
       setMessage("Source opened in read-only inspection. The original file is unchanged.");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "The document could not be opened safely."); }
+    } catch (error) { showError(error instanceof Error ? error.message : "The document could not be opened safely."); }
     finally { setBusy(false); }
   }
 
@@ -348,7 +377,7 @@ function App() {
       const next = await response.json() as Viewed;
       setViewed(next); setSelectedTarget(null);
       if (!next.targets.some((target) => (target.sheet || "CSV") === activeSheet)) setActiveSheet(next.targets[0]?.sheet || "CSV");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "The target page could not be loaded."); }
+    } catch (error) { showError(error instanceof Error ? error.message : "The target page could not be loaded."); }
     finally { setBusy(false); }
   }
 
@@ -360,11 +389,11 @@ function App() {
     try {
       const response = await request(`/api/documents/${viewed.document_id}/versions/${viewed.version_id}/view?target_id=${encodeURIComponent(targetId)}`);
       const found = (await response.json() as Viewed).targets.find((target) => target.id === targetId);
-      if (!found) { setMessage(`Cell ${raw} could not be found in this document.`); return; }
+      if (!found) { showError(`Cell ${raw} could not be found in this document.`); return; }
       setViewed((current) => current && current.version_id === viewed.version_id ? { ...current, targets: [...current.targets.filter((target) => target.id !== found.id), found] } : current);
       setActiveSheet(found.sheet || "CSV"); setSelectedTarget(found.id);
       setMessage(`Showing ${found.id}${found.editable ? "" : ` · read only (${pretty(found.reason ?? "unsupported")})`}.`);
-    } catch (error) { setMessage(error instanceof Error ? error.message : "The cell lookup could not be completed."); }
+    } catch (error) { showError(error instanceof Error ? error.message : "The cell lookup could not be completed."); }
   }
 
   const aiCacheKey = viewed ? `${viewed.document_id}:${viewed.version_id}:${viewed.source_sha256}` : "";
@@ -395,14 +424,14 @@ function App() {
       setMessage(`${file.name} uploaded and scanned. Inspection is required before viewing.`); setFile(null); await Promise.all([loadDocuments(), loadDashboard()]);
       const fresh = await request("/api/documents?limit=100"); const result = await fresh.json() as { items: DocumentItem[] };
       const newItem = result.items.find((item) => item.id === created.document_id); if (newItem) await selectDocument(newItem);
-    } catch (error) { setMessage(error instanceof Error ? error.message : "Upload could not be completed."); }
+    } catch (error) { showError(error instanceof Error ? error.message : "Upload could not be completed."); }
     finally { setBusy(false); }
   }
 
   async function addField(target: Target) {
     if (!selected || !canProcess) return;
     try { const response = await request(`/api/documents/${selected.id}/fields`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target_id: target.id, fingerprint: target.fingerprint }) }); const field = await response.json() as Field; setFields((old) => [...old, field]); setMessage("Field added to the correction workspace. Source bytes remain unchanged."); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "Field could not be added."); }
+    catch (error) { showError(error instanceof Error ? error.message : "Field could not be added."); }
   }
 
   async function addTextField(anchor: TextAnchor, label: string) {
@@ -411,57 +440,57 @@ function App() {
       const response = await request(`/api/documents/${selected.id}/fields`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text_anchor: { source_version_id: viewed.version_id, ...anchor }, ...(label ? { label } : {}) }) });
       const field = await response.json() as Field; setFields((old) => [...old, field]);
       setMessage("Selected text added as a correction field. The server confirmed it against the source; source bytes remain unchanged.");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "The selected text could not be anchored."); }
+    } catch (error) { showError(error instanceof Error ? error.message : "The selected text could not be anchored."); }
   }
 
   async function saveDataCorrection(field: Field) {
     if (!selected || !canProcess) return;
     const reason = dataReasons[field.field_id] ?? ""; const raw = dataValues[field.field_id] ?? ""; const type = dataTypes[field.field_id] ?? field.observed_value.type;
-    if (!reason.trim()) { setMessage("Add a reason before saving this correction."); return; }
+    if (!reason.trim()) { showError("Add a reason before saving this correction."); return; }
     let value: unknown = raw;
-    if (type === "integer" && !/^-?(0|[1-9]\d*)$/.test(raw)) { setMessage("Enter a whole number."); return; }
-    if (type === "decimal" && !/^-?(0|[1-9]\d*)(\.\d+)?$/.test(raw)) { setMessage("Enter a valid decimal number."); return; }
-    if (type === "boolean") { if (!["true", "false"].includes(raw.toLowerCase())) { setMessage("Enter true or false."); return; } value = raw.toLowerCase() === "true"; }
+    if (type === "integer" && !/^-?(0|[1-9]\d*)$/.test(raw)) { showError("Enter a whole number."); return; }
+    if (type === "decimal" && !/^-?(0|[1-9]\d*)(\.\d+)?$/.test(raw)) { showError("Enter a valid decimal number."); return; }
+    if (type === "boolean") { if (!["true", "false"].includes(raw.toLowerCase())) { showError("Enter true or false."); return; } value = raw.toLowerCase() === "true"; }
     if (type === "null") value = null;
     try { const response = await request(`/api/documents/${selected.id}/fields/${field.field_id}/corrections`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ corrected_value: { type, value }, reason }) }); const created = await response.json() as Correction; setCorrections((old) => [...old, { ...created, label: field.label }]); setDataValues((old) => ({ ...old, [field.field_id]: "" })); setMessage("Data correction saved separately. It does not alter the source document."); await Promise.all([loadDashboard(), loadDocuments()]); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "Correction could not be saved."); }
+    catch (error) { showError(error instanceof Error ? error.message : "Correction could not be saved."); }
   }
 
   async function classify() {
     if (!selected || role !== "OWNER") return;
     try { await request(`/api/documents/${selected.id}/category`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ category }) }); setSelected({ ...selected, document_category: category }); setMessage("Document category saved. Classification does not override document safety restrictions."); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "Category update was rejected."); }
+    catch (error) { showError(error instanceof Error ? error.message : "Category update was rejected."); }
   }
 
   async function createDraft() {
-    if (!selected || !nativeReason.trim() || !canProcess) { setMessage("Enter a reason before creating the native correction draft."); return; }
+    if (!selected || !nativeReason.trim() || !canProcess) { showError("Enter a reason before creating the native correction draft."); return; }
     try { const response = await request(`/api/documents/${selected.id}/edit-sets`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: nativeReason }) }); const created = await response.json() as EditSet; setEditSet({ ...created, patches: [] }); setMessage("Native correction draft created. The source remains immutable."); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "Draft could not be created."); }
+    catch (error) { showError(error instanceof Error ? error.message : "Draft could not be created."); }
   }
 
   async function addNativePatch() {
     if (!selected || !editSet || !viewed || !selectedTarget || !canProcess) return;
-    const target = viewed.targets.find((entry) => entry.id === selectedTarget); if (!target?.editable) { setMessage("Select an editable source value first."); return; }
+    const target = viewed.targets.find((entry) => entry.id === selectedTarget); if (!target?.editable) { showError("Select an editable source value first."); return; }
     let value: unknown = patchValue;
-    if (patchType === "integer") { if (!/^-?(0|[1-9]\d*)$/.test(patchValue)) { setMessage("Enter a whole number."); return; } value = patchValue; }
-    if (patchType === "decimal") { if (!/^-?(0|[1-9]\d*)(\.\d+)?$/.test(patchValue)) { setMessage("Enter a valid decimal number."); return; } value = patchValue; }
-    if (patchType === "boolean") { if (!["true", "false"].includes(patchValue.toLowerCase())) { setMessage("Enter true or false."); return; } value = patchValue.toLowerCase() === "true"; }
+    if (patchType === "integer") { if (!/^-?(0|[1-9]\d*)$/.test(patchValue)) { showError("Enter a whole number."); return; } value = patchValue; }
+    if (patchType === "decimal") { if (!/^-?(0|[1-9]\d*)(\.\d+)?$/.test(patchValue)) { showError("Enter a valid decimal number."); return; } value = patchValue; }
+    if (patchType === "boolean") { if (!["true", "false"].includes(patchValue.toLowerCase())) { showError("Enter true or false."); return; } value = patchValue.toLowerCase() === "true"; }
     if (patchType === "choice") value = patchValue;
     if (patchType === "null") value = null;
     try { await request(`/api/documents/${selected.id}/edit-sets/${editSet.edit_set_id}/patches`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ patches: [{ target_id: target.id, fingerprint: target.fingerprint, new_value: { type: patchType, value } }] }) }); setEditSet({ ...editSet, patches: [...(editSet.patches ?? []), { target_id: target.id, expected_old_value: target.value, new_value: { type: patchType, value } }] }); setMessage(`Native patch prepared for ${target.id}.`); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "Patch could not be saved."); }
+    catch (error) { showError(error instanceof Error ? error.message : "Patch could not be saved."); }
   }
 
   async function preflight() {
     if (!selected || !editSet || !canProcess) return;
     try { const response = await request(`/api/documents/${selected.id}/edit-sets/${editSet.edit_set_id}/preflight`, { method: "POST" }); const result = await response.json() as EditSet; setEditSet({ ...editSet, ...result }); setMessage(`Preflight complete: ${pretty(result.status)}. The edit plan is frozen and ready for independent verification.`); await loadDashboard(); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "Preflight failed."); }
+    catch (error) { showError(error instanceof Error ? error.message : "Preflight failed."); }
   }
 
   async function release() {
     if (!selected || !editSet || !canProcess) return;
     try { const response = await request(`/api/documents/${selected.id}/edit-sets/${editSet.edit_set_id}/release`, { method: "POST" }); const result = await response.json() as EditSet; const isReleased = result.outcome === "VERIFIED" || result.outcome === "STRUCTURALLY_VERIFIED"; const status = isReleased ? "released" : result.outcome === "BLOCKED" ? "failed" : "incomplete"; setEditSet({ ...editSet, ...result, status }); setSelected({ ...selected, current_version_id: result.version_id ?? selected.current_version_id }); setMessage(result.outcome === "STRUCTURALLY_VERIFIED" ? "Structurally verified and released. Visual layout was not checked; the corrected DOCX is available in version history." : result.outcome === "VERIFIED" ? "Verified and released. The corrected document is available in version history." : `Verification ${result.outcome?.toLowerCase() ?? "unavailable"}. No verified download is available.`); const versionsResponse = await request(`/api/documents/${selected.id}/versions`); setVersions((await versionsResponse.json() as { items: Version[] }).items); const auditResponse = await request(`/api/documents/${selected.id}/audit`); setAudit((await auditResponse.json() as { items: Audit[] }).items); await Promise.all([loadDocuments(), loadDashboard()]); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "Release was blocked."); }
+    catch (error) { showError(error instanceof Error ? error.message : "Release was blocked."); }
   }
 
   function confirmPendingAction() {
@@ -473,13 +502,13 @@ function App() {
   async function downloadVersion(version: Version) {
     if (!selected) return;
     try { const response = await request(`/api/documents/${selected.id}/versions/${version.version_id}/download`); const blob = await response.blob(); const href = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = href; anchor.download = selected.filename; anchor.click(); URL.revokeObjectURL(href); setMessage("Authorized version download started."); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "This version is not available for download."); }
+    catch (error) { showError(error instanceof Error ? error.message : "This version is not available for download."); }
   }
 
   async function downloadOriginal() {
     if (!selected) return;
     try { const response = await request(`/api/documents/${selected.id}/original`); const blob = await response.blob(); const href = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = href; anchor.download = selected.filename; anchor.click(); URL.revokeObjectURL(href); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "Original download is unavailable."); }
+    catch (error) { showError(error instanceof Error ? error.message : "Original download is unavailable."); }
   }
 
   const filteredDocuments = useMemo(() => documents.filter((item) => item.filename.toLowerCase().includes(search.toLowerCase()) && (typeFilter === "all" || item.filename.toLowerCase().endsWith(`.${typeFilter}`)) && (stateFilter === "all" || item.ingestion_state === stateFilter)).sort((a, b) => sort === "filename" ? a.filename.localeCompare(b.filename) : sort === "ingestion_state" ? a.ingestion_state.localeCompare(b.ingestion_state) : new Date(b.created_at).getTime() - new Date(a.created_at).getTime()), [documents, search, stateFilter, sort, typeFilter]);
@@ -491,7 +520,7 @@ function App() {
     return Object.entries(rows).sort(([a], [b]) => Number(a) - Number(b)).map(([row, entries]) => ({ row, entries }));
   }, [activeSheet, viewed]);
   const messageText = message.toLowerCase();
-  const messageTone = messageText.includes("incomplete") ? "warning-mark" : /could not|failed|blocked|rejected/.test(messageText) ? "error-mark" : "";
+  const messageTone = notice.kind === "error" ? "error-mark" : notice.kind === "warning" ? "warning-mark" : messageText.includes("incomplete") ? "warning-mark" : /could not|failed|blocked|rejected/.test(messageText) ? "error-mark" : "";
   const messageMark = messageTone ? "!" : "✓";
 
   if (!token || !role) return <main className="login-shell"><section className="login-brand"><div className="brand-mark large">C</div><span>CHANNEL360</span><h1>Document operations,<br />with a clear chain of custody.</h1><p>A secure document workbench for inspection, correction and verified release. Original files remain immutable.</p><div className="login-security"><Icon name="shield" /> Local development session · server-issued and short-lived</div></section><section className="login-panel"><div className="login-top"><span>LOCAL WORKSPACE</span><span className="env-dot" /> Development environment</div><div className="login-form"><span className="eyebrow">Welcome to Channel360</span><h2>Sign in to Channel360</h2><p>Enter the local workbench as its authenticated owner. Your session is issued by the API; no signing key is stored in the browser.</p><button className="primary wide" onClick={() => void signIn()} disabled={busy}>{busy ? <><span className="spinner" /> Issuing secure session…</> : "Enter workspace"}</button>{message && <p className="feedback error" role="status">{message}</p>}<p className="login-foot">This local sign-in is available only when explicitly enabled by the server.</p></div><span className="login-version">Channel360 · Insurance document operations</span></section></main>;
@@ -513,7 +542,7 @@ function App() {
         {page === "workspace" && selected && <><div className="workspace-heading"><button className="back-link" onClick={() => { setPage("documents"); setSelected(null); }}>← Document library</button><div className="workspace-title"><div className="file-badge">{selected.filename.split(".").pop()?.toUpperCase().slice(0, 4)}</div><div><span className="eyebrow">DOCUMENT WORKSPACE</span><h1>{selected.filename}</h1><div className="title-meta"><Status value={selected.ingestion_state} /><span>{pretty(selected.document_category ?? "unknown")} category</span><span>Added {date(selected.created_at)}</span></div></div><div className="workspace-head-actions"><button className="secondary" onClick={() => void downloadOriginal()}>Download original</button></div></div></div>
           <div className="workspace-layout"><section className="surface viewer-panel"><div className="viewer-toolbar"><div><h2>Source document</h2><p>{viewed ? `${viewed.adapter.toUpperCase()} · ${viewed.capability.level === "editable" ? "Native editing supported" : "Read only"}` : "Private source · inspection required"}</p></div><span className="immutable-badge"><Icon name="shield" /> Original protected</span></div>{busy && !viewed ? <div className="loading-state"><span className="spinner" /> Preparing safe preview…</div> : viewed ? <><div className="source-info"><span>Version <b>{viewed.version_id.slice(0, 8)}</b></span><code title={viewed.source_sha256}>SHA-256 {viewed.source_sha256.slice(0, 18)}…</code></div>{viewed.adapter === "pdf" ? <PdfDocumentViewer data={pdfBytes} details={viewed.details} targets={viewed.targets} selectedTarget={selectedTarget} onSelect={setSelectedTarget} /> : viewed.adapter === "docx" ? <DocxDocumentViewer details={viewed.details} targets={viewed.targets} selectedTarget={selectedTarget} onSelect={setSelectedTarget} nativeEditingAvailable={nativeSupported} /> : viewed.adapter === "json" ? <div className="json-tree" role="listbox" aria-label="JSON values">{viewed.targets.map((target) => <button key={target.id} role="option" aria-selected={selectedTarget === target.id} className={`json-node ${selectedTarget === target.id ? "selected" : ""} ${target.editable ? "" : "read-only-target"}`} data-editable={target.editable ? "true" : "false"} onClick={() => setSelectedTarget(target.id)}><span className="json-key">{target.cell || "/"}</span><span className="json-value-text">{String(target.value.value)}</span><small>{target.value.type}{!target.editable ? ` · ${target.reason ?? "read only"}` : ""}</small></button>)}</div> : <>{viewed.targets_page && (viewed.targets_page.total > viewed.targets_page.limit || viewed.targets_page.offset > 0) && <div className="target-pager" role="navigation" aria-label="Target pages"><span>Values {viewed.targets_page.offset + 1}–{viewed.targets_page.offset + viewed.targets.length} of {viewed.targets_page.total}</span><button className="secondary small-button" disabled={busy || viewed.targets_page.offset === 0} onClick={() => void loadTargetPage((viewed.targets_page?.offset ?? 0) - (viewed.targets_page?.limit ?? 0))}>Previous</button><button className="secondary small-button" disabled={busy || viewed.targets_page.next_offset === null} onClick={() => { const next = viewed.targets_page?.next_offset; if (next != null) void loadTargetPage(next); }}>Next</button></div>}<form className="target-lookup" onSubmit={(event) => { event.preventDefault(); void findTarget(); }}><label className="form-label">Go to cell<input aria-label="Go to cell" placeholder={viewed.adapter === "csv" ? "row:column, e.g. 105:5" : "Sheet!A1, e.g. Claims!E105"} value={targetLookup} onChange={(event) => setTargetLookup(event.target.value)} maxLength={500} /></label><button className="secondary small-button" type="submit">Find</button></form><div className="sheet-tabs" role="tablist" aria-label="Workbook sheets">{sheets.map((sheet) => <button role="tab" aria-selected={activeSheet === sheet} className={activeSheet === sheet ? "active" : ""} key={sheet} onClick={() => setActiveSheet(sheet)}>{sheet}</button>)}</div><div className="grid-container"><table className="source-grid"><thead><tr><th className="row-number">#</th>{[...new Set(gridRows.flatMap(({ entries }) => entries.map((entry) => cellPosition(entry, viewed.adapter)?.column).filter((column): column is number => column !== undefined)))].sort((a, b) => a - b).map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{gridRows.map(({ row, entries }) => <tr key={row}><th className="row-number">{row}</th>{[...new Set(entries.map((entry) => cellPosition(entry, viewed.adapter)?.column).filter((column): column is number => column !== undefined))].sort((a, b) => a - b).map((column) => { const target = entries.find((entry) => cellPosition(entry, viewed.adapter)?.column === column); return <td key={column}>{target && <button className={`grid-value ${selectedTarget === target.id ? "selected" : ""} ${target.editable ? "" : "read-only-target"}`} title={`${target.id} · ${target.value.type}${target.editable ? "" : ` · read only (${pretty(target.reason ?? "unsupported")}) · data corrections only`}`} data-editable={target.editable ? "true" : "false"} onClick={() => setSelectedTarget(target.id)}>{target.value.value === null || target.value.value === undefined ? <span className="empty-value">—</span> : String(target.value.value)}</button>}</td>; })}</tr>)}</tbody></table></div></>}{selectedTarget && <div className="selected-source"><span>Selected value</span><strong>{selectedTarget}</strong>{viewed.targets.find((entry) => entry.id === selectedTarget)?.editable === false && <span className="read-only-chip">Read only · data corrections only</span>}{!fields.some((field) => field.target_id === selectedTarget) && <button className="text-button" onClick={() => { const target = viewed.targets.find((entry) => entry.id === selectedTarget); if (target) void addField(target); }}>Add to data corrections →</button>}</div>}</> : <div className="preview-unavailable"><Icon name="file" /><h3>Safe preview is unavailable</h3>{unavailable ? <p className="unavailable-reason" role="status"><strong>{unavailable.capability.level === "rejected" ? "Rejected during safe inspection: " : "No safe viewer: "}{pretty(unavailable.capability.reasons[0] ?? "viewer_not_supported")}</strong> <code>{unavailable.capability.reasons[0] ?? "viewer_not_supported"}</code><br />{REASON_TEXT[unavailable.capability.reasons[0] ?? ""] ?? "No supported viewer is available for this file."}</p> : null}<p>This file remains stored privately. The current viewer supports structured data, PDF and Word text preview. No unsupported preview or editing controls are offered.</p>{selected.ingestion_state !== "ready" && <button className="primary" onClick={() => void selectDocument(selected)}>Inspect safely</button>}</div>}</section>
             <aside className="surface inspector-panel"><div className="inspector-head"><div><span className="eyebrow">WORKING PANEL</span><h2>Document controls</h2></div><Status value={selected.ingestion_state} /></div><div className="inspector-tabs" role="tablist" aria-label="Document tools">{([["inspect", "Inspect"], ["summary", "Summary"], ["data", "Data corrections"], ["native", "Native changes"], ["history", "History"]] as const).map(([tab, title]) => <button role="tab" aria-selected={activeTab === tab} className={activeTab === tab ? "active" : ""} key={tab} onClick={() => setActiveTab(tab)}>{title}</button>)}</div>
-              {activeTab === "inspect" && <div className="inspector-body"><h3>Inspection summary</h3>{inspection || viewed ? <><div className="summary-state"><span className="status-dot green" /><div><strong>Safe inspection complete</strong><small>Read-only inspection · Original preserved</small></div></div><dl className="summary-dl"><dt>Format</dt><dd>{inspection?.media_type ?? viewed?.adapter}</dd><dt>Capability</dt><dd>{inspection?.capability.level ?? viewed?.capability.level}</dd><dt>{viewed?.adapter === "docx" ? "Text targets" : "Editable values"}</dt><dd>{viewed?.adapter === "docx" ? viewed.targets.length : viewed?.targets.filter((item) => item.editable).length ?? inspection?.targets.filter((item) => item.editable).length ?? 0}</dd><dt>Source fingerprint</dt><dd className="hash-value">{viewed?.source_sha256 ?? inspection?.source_sha256}</dd></dl>{(viewed?.capabilities ?? inspection?.capabilities) && <dl className="summary-dl capability-list" aria-label="Document capabilities">{([["viewable", "Viewable"], ["native_editing", "Native editing"], ["data_corrections", "Data corrections"]] as const).map(([key, title]) => { const flag = (viewed?.capabilities ?? inspection?.capabilities)![key]; return <Fragment key={key}><dt>{title}</dt><dd data-capability={key} data-available={flag.available ? "true" : "false"}>{flag.available ? "Available" : `Unavailable · ${pretty(flag.reason ?? "not supported")}`}</dd></Fragment>; })}</dl>}{encodingNotice}{inspection?.findings?.length ? <div className="finding-box"><strong>Inspection notes</strong>{inspection.findings.map((finding) => <p key={finding}>{finding}</p>)}</div> : null}<button className="secondary full-width" onClick={() => void selectDocument(selected)}>Refresh inspection</button></> : <Empty icon="shield" title="Inspection not run" text="Inspect the document to safely extract its structure." action={<button className="primary" onClick={() => void selectDocument(selected)}>Inspect safely</button>} />}</div>}
+              {activeTab === "inspect" && <div className="inspector-body"><h3>Inspection summary</h3>{inspection || viewed ? <><div className="summary-state"><span className="status-dot green" /><div><strong>Safe inspection complete</strong><small>Read-only inspection · Original preserved</small></div></div><dl className="summary-dl"><dt>Format</dt><dd>{inspection?.media_type ?? viewed?.adapter}</dd><dt>Capability</dt><dd data-testid="capability-label">{capabilityLabel(viewed?.capability.level ?? inspection?.capability.level)}</dd><dt>{viewed?.adapter === "docx" ? "Text targets" : "Editable values"}</dt><dd data-testid="editable-count">{editableCountText(viewed, inspection)}</dd><dt>Source fingerprint</dt><dd className="hash-value">{viewed?.source_sha256 ?? inspection?.source_sha256}</dd></dl>{(viewed?.capabilities ?? inspection?.capabilities) && <dl className="summary-dl capability-list" aria-label="Document capabilities">{([["viewable", "Viewable"], ["native_editing", "Native editing"], ["data_corrections", "Data corrections"]] as const).map(([key, title]) => { const flag = (viewed?.capabilities ?? inspection?.capabilities)![key]; return <Fragment key={key}><dt>{title}</dt><dd data-capability={key} data-available={flag.available ? "true" : "false"}>{flag.available ? "Available" : `Unavailable · ${pretty(flag.reason ?? "not supported")}`}</dd></Fragment>; })}</dl>}{encodingNotice}{inspection?.findings?.length ? <div className="finding-box"><strong>Inspection notes</strong>{inspection.findings.map((finding) => <p key={finding}>{finding}</p>)}</div> : null}<button className="secondary full-width" onClick={() => void selectDocument(selected)}>Refresh inspection</button></> : <Empty icon="shield" title="Inspection not run" text="Inspect the document to safely extract its structure." action={<button className="primary" onClick={() => void selectDocument(selected)}>Inspect safely</button>} />}</div>}
               {activeTab === "summary" && <SummaryWorkspace summary={viewed?.structural_summary ?? null} versionId={viewed?.version_id} mode={summaryMode} setMode={setSummaryMode} explanation={aiExplanation} onGenerate={() => void generateAiExplanation()} loading={aiBusy} error={aiError} busy={busy} />}
               {activeTab === "data" && <div className="inspector-body"><div className="tab-intro"><h3>Data corrections</h3><p>Record a corrected value and reason as an auditable sidecar. The original file never changes and no new version is created; native-editing restrictions such as signatures or protection still apply to the file itself.</p></div>{viewed && <TextAnchorPicker viewed={viewed} disabled={!canProcess} onAnchor={(anchor, label) => void addTextField(anchor, label)} />}{fields.length ? fields.map((field) => <article className="correction-card" key={field.field_id}><div className="correction-title"><strong>{field.label || field.target_id}</strong><code>{field.target_id}</code>{field.evidence?.[0]?.kind === "text_selection" ? <small className="field-provenance">Text anchor · source {field.evidence[0].source_sha256?.slice(0, 12)}…</small> : field.evidence?.[0]?.natively_editable === false ? <small className="field-provenance">Read-only source value · sidecar only</small> : null}</div><div className="value-compare"><span><small>Observed</small><b>{String(field.observed_value.value)}</b></span><span className="arrow">→</span><label><small>Corrected value</small><input aria-label="Corrected value" value={dataValues[field.field_id] ?? ""} onChange={(event) => setDataValues({ ...dataValues, [field.field_id]: event.target.value })} disabled={!canProcess} /></label></div><label className="form-label">Value type<select aria-label="Correction value type" value={dataTypes[field.field_id] ?? field.observed_value.type} onChange={(event) => setDataTypes({ ...dataTypes, [field.field_id]: event.target.value })} disabled={!canProcess}>{["string", "integer", "decimal", "boolean", "date", "datetime", "null"].map((item) => <option key={item} value={item}>{pretty(item)}</option>)}</select></label><label className="form-label">Reason<textarea aria-label="Correction reason" placeholder="Explain why this data needs correction" value={dataReasons[field.field_id] ?? ""} onChange={(event) => setDataReasons({ ...dataReasons, [field.field_id]: event.target.value })} disabled={!canProcess} /></label><button className="primary full-width" onClick={() => void saveDataCorrection(field)}>Save data correction</button></article>) : <Empty icon="file" title="No correction fields" text="Select a value in the source viewer, or select extracted text above, then add it here to record a data correction." />}{corrections.length > 0 && <><h3 className="subsection-title">Correction history</h3>{corrections.map((correction) => <div className="correction-history-row" key={correction.id}><strong>{correction.label}</strong><span>{String(correction.corrected_value.value)}</span><small>{correction.reason} · {correction.actor_id} · {date(correction.created_at)}</small>{correction.source_sha256 && <small className="field-provenance">{correction.target_id} · source {correction.source_sha256.slice(0, 12)}…</small>}</div>)}</>}</div>}
               {activeTab === "native" && <div className="inspector-body"><div className="tab-intro"><h3>Native document correction</h3><p>Correct supported source content in a new derived version. Channel360 freezes your edit plan, independently verifies the output and scans it before release.</p></div>{encodingNotice}{viewed?.adapter === "docx" && <p className="notice" role="status">{viewed.docx_verification_mode === "structural_and_visual" ? "Strict profile: structural and visual verification are required. If isolated rendering is unavailable, release is blocked." : "Structural profile: content and package integrity are checked. Visual layout is not checked."}</p>}<div className="classification-box"><label className="form-label">Document category<select value={category} onChange={(event) => setCategory(event.target.value)}><option value="unknown">Unknown</option><option value="insurer-authored">Insurer authored</option><option value="customer-form">Customer form</option><option value="third-party-issued">Third party issued</option><option value="signed-legal">Signed legal</option></select></label><button className="secondary" onClick={() => void classify()} disabled={selected.document_category === category}>Save classification</button></div>{selected.document_category !== "insurer-authored" && <p className="notice">Native correction is available only for documents classified as insurer-authored. Classification does not override signature, protection, format or target restrictions.</p>}{editSet && <div className="workflow-status"><span className="eyebrow">CORRECTION PLAN</span><strong>{editSet.status === "incomplete" ? "Verification incomplete" : pretty(editSet.status)}</strong>{editSet.frozen_hash && <code>Plan {editSet.frozen_hash.slice(0, 16)}…</code>}{(editSet.changes ?? editSet.patches?.map((patch) => ({ target_id: patch.target_id, old: patch.expected_old_value, proposed: patch.new_value })))?.map((change) => <div className="diff-row" key={change.target_id}><code>{change.target_id}</code><span>{String(change.old.value)}</span><b>→</b><strong>{String(change.proposed.value)}</strong></div>)}{editSet.status === "draft" && nativeSupported && <><label className="form-label">Reason for document change<textarea value={nativeReason} onChange={(event) => setNativeReason(event.target.value)} placeholder="Describe why this source correction is needed" /></label>{!editSet.patches && <button className="primary" onClick={() => void createDraft()}>Create correction draft</button>}{editSet.patches && <><label className="form-label">Selected target value{viewed.targets.find((item) => item.id === selectedTarget)?.options?.length ? <select aria-label="Selected target value" value={patchValue} onChange={(event) => setPatchValue(event.target.value)}>{viewed.targets.find((item) => item.id === selectedTarget)?.options?.map((option) => <option key={option} value={option}>{option}</option>)}</select> : viewed.targets.find((item) => item.id === selectedTarget)?.value.type === "boolean" ? <select aria-label="Selected target value" value={patchValue} onChange={(event) => setPatchValue(event.target.value)}><option value="true">Checked</option><option value="false">Unchecked</option></select> : <input aria-label="Selected target value" value={patchValue} onChange={(event) => setPatchValue(event.target.value)} maxLength={viewed.targets.find((item) => item.id === selectedTarget)?.max_length ?? undefined} />}</label><label className="form-label">Value type<select aria-label="Native value type" value={patchType} onChange={(event) => setPatchType(event.target.value)}>{["string", "integer", "decimal", "boolean", "choice", "null"].map((item) => <option key={item} value={item}>{pretty(item)}</option>)}</select></label>{selectedTarget && viewed.targets.find((item) => item.id === selectedTarget)?.editable === false && <p className="notice" role="status">The selected value is read only ({pretty(viewed.targets.find((item) => item.id === selectedTarget)?.reason ?? "unsupported")}). It can be recorded as a data correction but not changed in the file.</p>}<button className="secondary" onClick={() => void addNativePatch()} disabled={!selectedTarget || viewed.targets.find((item) => item.id === selectedTarget)?.editable !== true}>Add selected target patch</button><button className="primary" onClick={() => void preflight()} disabled={!editSet.patches.length}>Validate changes</button></>}</>}{editSet.status === "ready_for_release" && nativeSupported && <button className="primary" onClick={() => setConfirmation({ kind: "release" })}>Verify and Release</button>}{editSet.verification && <div className={`verification-result ${(editSet.verification.outcome === "VERIFIED" || editSet.verification.outcome === "STRUCTURALLY_VERIFIED") ? "success" : editSet.verification.outcome === "INCOMPLETE" ? "incomplete" : "blocked"}`}><strong>{editSet.verification.outcome === "STRUCTURALLY_VERIFIED" ? "Structural verification: Passed" : `Independent verification: ${editSet.verification.outcome}`}</strong>{editSet.verification.outcome === "STRUCTURALLY_VERIFIED" && <p className="verification-caveat"><strong>Visual verification: Not performed</strong><br />This corrected Word document passed structural and content integrity checks. Its visual layout has not been independently compared with the original.</p>}{editSet.verification.verification_profile === "structural_and_visual" && <p className="verification-caveat"><strong>Structural verification: {editSet.verification.structural_checks === "PASS" ? "Passed" : "Not passed"}</strong><br /><strong>Visual verification: {editSet.verification.visual_checks === "PASS" ? "Passed" : editSet.verification.visual_checks === "FAIL" ? "Failed" : "Not verified"}</strong></p>}{editSet.version_id && editSet.download_available && <button className="primary" onClick={() => { const version = versions.find((item) => item.version_id === editSet.version_id); if (version) void downloadVersion(version); }}>{editSet.verification.outcome === "STRUCTURALLY_VERIFIED" ? "Download structurally verified DOCX" : "Download verified document"}</button>}<pre>{JSON.stringify(editSet.verification, null, 2)}</pre></div>}</div>}{(!editSet || ["released", "failed", "rejected", "submitted", "approved"].includes(editSet.status)) && <div className="workflow-empty">{editSet && ["submitted", "approved"].includes(editSet.status) && <p className="notice" role="status">This legacy edit set is retained as history and cannot authorize a release. Create a fresh draft to validate changes against the current source version.</p>}<span className="workflow-step active">1</span><div><strong>Classify the source</strong><p>Set the document category; existing policy restrictions still apply.</p></div><span className="workflow-step">2</span><div><strong>Prepare and validate</strong><p>Select supported targets, record the reason and freeze a tamper-evident edit plan.</p></div><span className="workflow-step">3</span><div><strong>Verify and release</strong><p>Independent format-specific checks and malware scanning must pass before download.</p></div>{canProcess && nativeSupported && selected.document_category === "insurer-authored" && <><label className="form-label">Reason for document change<textarea value={nativeReason} onChange={(event) => setNativeReason(event.target.value)} placeholder="Describe the source correction" /></label><button className="primary" onClick={() => void createDraft()}>Create correction draft</button></>}</div>}</div>}
