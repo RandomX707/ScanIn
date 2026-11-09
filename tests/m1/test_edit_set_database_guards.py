@@ -11,7 +11,7 @@ from packages.db.tenant import tenant_transaction
 pytestmark = pytest.mark.postgres
 
 
-def test_edit_sets_start_draft_and_patches_freeze_after_submission(postgres_engines, tenant_pair):
+def test_edit_sets_freeze_for_owner_release_without_creating_review_records(postgres_engines, tenant_pair):
     owner, app = postgres_engines
     tenant = tenant_pair[0]
     document_id, version_id, file_id, edit_set_id, patch_id = (uuid4() for _ in range(5))
@@ -36,7 +36,7 @@ def test_edit_sets_start_draft_and_patches_freeze_after_submission(postgres_engi
     with app.connect() as connection, tenant_transaction(connection, tenant):
         connection.execute(text("""INSERT INTO edit_sets
             (id,tenant_id,document_id,base_version_id,created_by,reason)
-            VALUES (:id,:tenant,:doc,:version,'processor','approved correction')"""),
+            VALUES (:id,:tenant,:doc,:version,'channel360-demo-owner','owner correction')"""),
             {"id": edit_set_id, "tenant": tenant, "doc": document_id, "version": version_id})
         connection.execute(text("""INSERT INTO patches
             (id,tenant_id,edit_set_id,target_id,expected_old_value,expected_fingerprint,new_value)
@@ -44,23 +44,26 @@ def test_edit_sets_start_draft_and_patches_freeze_after_submission(postgres_engi
             {"id": patch_id, "tenant": tenant, "edit": edit_set_id,
              "old": '{"type":"string","value":"old"}', "fingerprint": "1" * 64,
              "new": '{"type":"string","value":"new"}'})
-        connection.execute(text("""UPDATE edit_sets SET status='submitted',frozen_hash=:hash,
+        connection.execute(text("""UPDATE edit_sets SET status='ready_for_release',frozen_hash=:hash,
             patch_plan=CAST(:plan AS jsonb),adapter='xlsx',adapter_version='test'
             WHERE tenant_id=:tenant AND id=:id"""),
             {"hash": "2" * 64, "plan": '{"plan_sha256":"test"}', "tenant": tenant, "id": edit_set_id})
 
-    # The edit author cannot approve their own frozen plan.
-    from packages.registry.documents import DocumentRepository
-    with app.connect() as connection:
-        with pytest.raises(ValueError, match="reviewer_must_differ_from_author"):
-            with tenant_transaction(connection, tenant):
-                DocumentRepository(connection, tenant).review_edit_set(
-                    edit_set_id, decision="approved", reviewer_id="processor", frozen_hash="2" * 64)
-
-    # A distinct reviewer can approve; the plan metadata remains frozen.
     with app.connect() as connection, tenant_transaction(connection, tenant):
-        DocumentRepository(connection, tenant).review_edit_set(
-            edit_set_id, decision="approved", reviewer_id="reviewer", frozen_hash="2" * 64)
+        status, frozen_hash, reviews = connection.execute(text("""SELECT e.status,e.frozen_hash,
+            (SELECT count(*) FROM reviews r WHERE r.tenant_id=e.tenant_id AND r.edit_set_id=e.id)
+            FROM edit_sets e WHERE e.tenant_id=:tenant AND e.id=:edit"""),
+            {"tenant": tenant, "edit": edit_set_id}).one()
+        assert status == "ready_for_release"
+        assert frozen_hash.strip() == "2" * 64
+        assert reviews == 0
+
+    # The owner-release state machine has no transition that creates an approval.
+    with app.connect() as connection:
+        with pytest.raises(DBAPIError):
+            with tenant_transaction(connection, tenant):
+                connection.execute(text("UPDATE edit_sets SET status='approved' WHERE tenant_id=:tenant AND id=:id"),
+                                   {"tenant": tenant, "id": edit_set_id})
 
     with app.connect() as connection:
         with pytest.raises(DBAPIError):

@@ -29,7 +29,7 @@ def _freeze(source: bytes, patch: Patch):
         document_id="doc-1",
         base_version_id=hashlib.sha256(source).hexdigest(),
         actor_id="reviewer-1",
-        role="reviewer",
+        role="OWNER",
         authorized_category="insurer-authored",
         reason="Correct the approved policy limit",
         patches=(patch,),
@@ -42,7 +42,7 @@ def test_verified_xlsx_release_exposes_only_independently_verified_bytes(tmp_pat
     patch = _patch(source, "G2", TypedValue("string", "approved value"))
     frozen = XlsxReleaseWorkflow().freeze(
         source=source, document_id="doc-1", base_version_id="version-uuid-1", actor_id="reviewer-1",
-        role="reviewer", authorized_category="insurer-authored", reason="Correct the approved policy limit",
+        role="OWNER", authorized_category="insurer-authored", reason="Correct the approved policy limit",
         patches=(patch,),
     )
     result = XlsxReleaseWorkflow().release(source=source, edit_set=frozen)
@@ -77,7 +77,7 @@ def test_category_policy_denies_third_party_and_unknown_documents(tmp_path):
     workflow = XlsxReleaseWorkflow()
     with pytest.raises(WorkflowRejected, match="authorized_insurer_document"):
         workflow.freeze(source=source, document_id="doc", base_version_id=hashlib.sha256(source).hexdigest(),
-                        actor_id="processor", role="processor", authorized_category="third-party-issued",
+                        actor_id="processor", role="OWNER", authorized_category="third-party-issued",
                         reason="Correction", patches=(_patch(source, "G2", TypedValue("string", "x")),))
 
 

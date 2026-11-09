@@ -8,9 +8,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 const api = process.env.IDW_API_BASE_URL || 'http://127.0.0.1:8000';
-const processor = required('IDW_DEMO_PROCESSOR_TOKEN');
-const administrator = required('IDW_DEMO_ADMIN_TOKEN');
-const reviewer = required('IDW_DEMO_REVIEWER_TOKEN');
+const owner = required('IDW_DEMO_OWNER_TOKEN');
 const otherTenant = required('IDW_DEMO_OTHER_TENANT_TOKEN');
 
 function required(name) {
@@ -88,20 +86,21 @@ async function apiCall(request, token, route, options = {}) {
   return response;
 }
 
-async function connect(page, role, filename) {
-  if (await page.getByRole('heading', { name: 'Choose your demo identity' }).count() === 0) {
-    await page.getByRole('button', { name: 'Switch identity' }).click();
+async function connect(page) {
+  // Exercise backend/UI workflows against the explicitly isolated E2E tenant.
+  // The dedicated sign-in test separately exercises the configured local-demo
+  // issuer; this keeps repeated synthetic records out of the showcase tenant.
+  const needsTestIdentity = await page.evaluate((token) =>
+    sessionStorage.getItem('channel360.demo.session') !== token, owner);
+  if (needsTestIdentity) {
+    await page.evaluate((token) => {
+      sessionStorage.setItem('channel360.demo.session', token);
+      sessionStorage.setItem('channel360.demo.role', 'OWNER');
+    }, owner);
+    await page.reload();
   }
-  const roleName = { processor: 'Document processor', reviewer: 'Independent reviewer', administrator: 'Workspace administrator' }[role];
-  await page.getByRole('button', { name: new RegExp(roleName) }).click();
-  await page.getByRole('button', { name: 'Enter workspace' }).click();
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();
-  if (filename) {
-    await page.getByRole('button', { name: 'Documents' }).click();
-    await page.getByRole('textbox', { name: 'Search documents' }).fill(filename);
-    await page.getByRole('button', { name: `Open ${filename}` }).click();
-    await expect(page.getByText('Source document', { exact: true })).toBeVisible();
-  }
+  await expect(page.locator('.sidebar-user').getByText('Workspace owner', { exact: true })).toBeVisible();
 }
 
 async function selectTarget(page, targetId, adapter, oldValue = 'Policyholder: Ada Example') {
@@ -144,7 +143,7 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   fixture = { ...fixture, filename: uniqueFixtureFilename(fixture.filename) };
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/');
-  await connect(page, 'processor');
+  await connect(page);
   await page.getByRole('button', { name: 'Documents' }).click();
   await page.getByLabel('Choose a document to upload').setInputFiles({ name: fixture.filename, mimeType: fixture.mime, buffer: fixture.bytes });
   await page.getByRole('button', { name: 'Upload securely' }).click();
@@ -153,9 +152,9 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   const adapter = fixture.mime === 'application/json' ? 'json' : fixture.mime === 'text/csv' ? 'csv' : fixture.mime === 'application/pdf' ? 'pdf' : fixture.mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ? 'docx' : 'xlsx';
   await expect(page.getByRole('tab', { name: 'Summary' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByTestId('structural-summary')).toContainText('Deterministic summary');
-  const summaryList = await (await apiCall(request, processor, '/api/documents')).json();
+  const summaryList = await (await apiCall(request, owner, '/api/documents')).json();
   const summaryDocument = summaryList.items.find((item) => item.filename === fixture.filename);
-  const summaryResponse = await apiCall(request, processor, `/api/documents/${summaryDocument.id}/versions/${summaryDocument.current_version_id}/view`);
+  const summaryResponse = await apiCall(request, owner, `/api/documents/${summaryDocument.id}/versions/${summaryDocument.current_version_id}/view`);
   const summaryView = await summaryResponse.json();
   expect(summaryView.structural_summary.source_sha256).toBe(crypto.createHash('sha256').update(fixture.bytes).digest('hex'));
   expect(summaryView.structural_summary.source_document_id).toBe(summaryView.document_id);
@@ -182,7 +181,7 @@ async function verifiedRoundTrip({ page, request }, fixture) {
     await page.screenshot({ path: path.join(evidenceDir, 'docx-structural-preview-selection.png'), fullPage: true });
   }
 
-  const listResponse = await apiCall(request, processor, '/api/documents');
+  const listResponse = await apiCall(request, owner, '/api/documents');
   const docList = await listResponse.json();
   const uploaded = docList.items.find((item) => item.filename === fixture.filename);
   expect(uploaded, 'uploaded document is persisted').toBeTruthy();
@@ -190,14 +189,15 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   const originalVersion = uploaded.current_version_id;
   const originalSha = crypto.createHash('sha256').update(fixture.bytes).digest('hex');
 
-  // Category is administrative metadata. A distinct admin identity records it;
-  // the processor still needs a separately authorized processor permission.
-  await connect(page, 'administrator', fixture.filename);
+  await connect(page);
   await page.getByRole('tab', { name: 'Native changes' }).click();
   await page.getByLabel('Document category').selectOption('insurer-authored');
-  await page.getByRole('button', { name: 'Set category (administrator only)' }).click();
+  await page.getByRole('button', { name: 'Save classification' }).click();
   await expect(page.getByText('Insurer-Authored category')).toBeVisible();
-  await connect(page, 'processor', fixture.filename);
+  const classificationShots = path.resolve(here, '../../../artifacts/ui-redesign');
+  fs.mkdirSync(classificationShots, { recursive: true });
+  await page.screenshot({ path: path.join(classificationShots, 'single-owner-classification.png'), fullPage: true });
+  await connect(page);
 
   await selectTarget(page, fixture.target, adapter, fixture.oldValue);
   await page.getByRole('button', { name: /Add to data corrections/ }).click();
@@ -224,54 +224,39 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await editCard.getByLabel('Native value type').selectOption(fixture.nativeValueType ?? 'string');
   await page.getByRole('button', { name: 'Add selected target patch' }).click();
   await expect(page.locator('.toast')).toContainText(/Native patch prepared/);
-  await page.getByRole('button', { name: 'Preflight and freeze' }).click();
-  await expect(page.locator('.toast')).toContainText(/Preflight complete: submitted/);
+  await page.getByRole('button', { name: 'Validate changes' }).click();
+  await expect(page.locator('.toast')).toContainText(/Preflight complete: Ready for release/i);
+  await page.screenshot({ path: path.join(screenshots, 'owner-validation-ready.png'), fullPage: true });
+  await page.getByRole('button', { name: 'Dismiss notification' }).click();
   if (adapter === 'docx') await page.screenshot({ path: path.join(screenshots, 'docx-structural-draft.png'), fullPage: true });
   await page.evaluate(() => window.scrollTo(0, 0));
-  await page.getByRole('button', { name: 'Dismiss notification' }).click();
   await page.screenshot({ path: path.join(screenshots, 'native-correction-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.screenshot({ path: path.join(screenshots, 'native-correction-mobile.png') });
   await page.setViewportSize({ width: 1440, height: 1000 });
 
-  const staleDraftResponse = await apiCall(request, processor, `/api/documents/${documentId}/edit-sets`, {
+  const staleDraftResponse = await apiCall(request, owner, `/api/documents/${documentId}/edit-sets`, {
     method: 'POST', data: { reason: 'Stale-version rejection fixture' },
   });
   expect(staleDraftResponse.ok()).toBeTruthy();
   const staleDraft = await staleDraftResponse.json();
 
-  // PostgreSQL integration coverage independently verifies self-review is rejected.
-  const editSets = await (await apiCall(request, processor, `/api/documents/${documentId}/edit-sets`)).json();
-  const submitted = editSets.items.find((item) => item.status === 'submitted');
-  expect(submitted).toBeTruthy();
+  // The owner workflow has no human-review transition; PostgreSQL integration
+  // coverage verifies the ready-for-release state is explicit and approval-free.
+  const editSets = await (await apiCall(request, owner, `/api/documents/${documentId}/edit-sets`)).json();
+  const ready = editSets.items.find((item) => item.status === 'ready_for_release');
+  expect(ready).toBeTruthy();
 
   const crossTenant = await apiCall(request, otherTenant, `/api/documents/${documentId}/versions`);
   expect(crossTenant.status()).toBe(404);
 
-  await connect(page, 'reviewer');
-  await page.getByRole('button', { name: 'Review queue' }).click();
-  await expect(page.locator('.approval-card').filter({ hasText: fixture.filename })).toBeVisible();
-  if (adapter === 'docx') await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/docx-structural-review-queue-desktop.png'), fullPage: true });
-  fs.mkdirSync(path.resolve(here, '../../../artifacts/ui-redesign'), { recursive: true });
-  await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/approval-queue-desktop.png'), fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/approval-queue-mobile.png') });
-  if (adapter === 'docx') await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/docx-structural-review-queue-mobile.png'), fullPage: true });
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.locator('.approval-card').filter({ hasText: fixture.filename }).getByRole('button', { name: 'Approve change' }).click();
-  await page.getByRole('button', { name: 'Confirm approval' }).click();
-  await expect(page.locator('.toast')).toContainText(/approved/);
-  await expect(page.locator('.approval-card').filter({ hasText: fixture.filename })).toHaveCount(0);
-  await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/reviewer-approved-desktop.png'), fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/reviewer-approved-mobile.png') });
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  await connect(page, 'processor', fixture.filename);
+  await connect(page);
   await page.getByRole('tab', { name: 'Native changes' }).click();
-  await page.getByRole('button', { name: 'Apply, verify and release' }).click();
-  await page.getByRole('button', { name: 'Confirm release' }).click();
-  await expect(page.locator('.toast')).toContainText(/verification passed/, { timeout: 30_000 });
+  await page.getByRole('button', { name: 'Verify and Release' }).click();
+  await page.screenshot({ path: path.join(screenshots, 'owner-verify-release-confirmation.png'), fullPage: true });
+  await page.getByRole('dialog').getByRole('button', { name: 'Verify and Release' }).click();
+  await expect(page.locator('.toast')).toContainText(/verified and released|structurally verified and released/i, { timeout: 30_000 });
   const verification = page.locator('.verification-result');
   const expectedOutcome = adapter === 'docx' ? 'STRUCTURALLY_VERIFIED' : 'VERIFIED';
   await expect(verification).toContainText(expectedOutcome);
@@ -296,26 +281,26 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/verified-release-mobile.png') });
   await page.setViewportSize({ width: 1440, height: 1000 });
 
-  const releaseResponse = await apiCall(request, processor, `/api/documents/${documentId}/edit-sets/${submitted.edit_set_id}/release`, { method: 'POST' });
+  const releaseResponse = await apiCall(request, owner, `/api/documents/${documentId}/edit-sets/${ready.edit_set_id}/release`, { method: 'POST' });
   expect(releaseResponse.ok()).toBeTruthy();
   const release = await releaseResponse.json();
   expect(release.idempotent).toBeTruthy();
   expect(release.outcome).toBe(expectedOutcome);
   expect(release.download_available).toBeTruthy();
   const derivedVersion = release.version_id;
-  const stalePreflight = await apiCall(request, processor, `/api/documents/${documentId}/edit-sets/${staleDraft.edit_set_id}/preflight`, { method: 'POST' });
+  const stalePreflight = await apiCall(request, owner, `/api/documents/${documentId}/edit-sets/${staleDraft.edit_set_id}/preflight`, { method: 'POST' });
   expect(stalePreflight.status()).toBe(409);
   expect((await stalePreflight.json()).code).toBe('stale_base_version');
-  const download = await apiCall(request, processor, `/api/documents/${documentId}/versions/${derivedVersion}/download`);
+  const download = await apiCall(request, owner, `/api/documents/${documentId}/versions/${derivedVersion}/download`);
   const derivedBytes = await readBytes(download);
   const output = path.resolve(here, '../../../artifacts/host-integration', `${adapter}-verified-derived${adapter === 'xlsx' ? '.xlsx' : `.${adapter}`}`);
   fs.mkdirSync(path.dirname(output), { recursive: true });
   fs.writeFileSync(output, derivedBytes);
 
-  const originalResponse = await apiCall(request, processor, `/api/documents/${documentId}/original`);
+  const originalResponse = await apiCall(request, owner, `/api/documents/${documentId}/original`);
   const originalBytes = await readBytes(originalResponse);
   expect(crypto.createHash('sha256').update(originalBytes).digest('hex')).toBe(originalSha);
-  const view = await (await apiCall(request, processor, `/api/documents/${documentId}/versions/${derivedVersion}/view`)).json();
+  const view = await (await apiCall(request, owner, `/api/documents/${documentId}/versions/${derivedVersion}/view`)).json();
   const target = view.targets.find((item) => item.id === fixture.target);
   expect(String(target.value.value)).toBe(fixture.newValue);
   if (adapter === 'csv') {
@@ -337,19 +322,21 @@ async function verifiedRoundTrip({ page, request }, fixture) {
     expect(reopened).toBe('FOUND');
     expect(uiVerification.checks.every((check) => check.status === 'PASS' || (!check.critical && check.status === 'NOT_VERIFIED'))).toBeTruthy();
   }
-  const history = await (await apiCall(request, processor, `/api/documents/${documentId}/versions`)).json();
+  const history = await (await apiCall(request, owner, `/api/documents/${documentId}/versions`)).json();
   expect(history.items.some((item) => item.version_id === originalVersion && item.sha256 === originalSha)).toBeTruthy();
   expect(history.items.some((item) => item.version_id === derivedVersion && item.verification_outcome === expectedOutcome && item.download_available)).toBeTruthy();
-  const audit = await (await apiCall(request, processor, `/api/documents/${documentId}/audit`)).json();
+  const audit = await (await apiCall(request, owner, `/api/documents/${documentId}/audit`)).json();
   expect(audit.items.length).toBeGreaterThan(0);
 
   // A stale patch attempt after the edit set is frozen must not mutate it.
-  const mutation = await apiCall(request, processor, `/api/documents/${documentId}/edit-sets/${submitted.edit_set_id}/patches`, {
+  const mutation = await apiCall(request, owner, `/api/documents/${documentId}/edit-sets/${ready.edit_set_id}/patches`, {
     method: 'PUT', data: { patches: [] },
   });
   expect([400, 409, 422]).toContain(mutation.status());
 
   await page.getByRole('tab', { name: 'History' }).click();
+  await expect(page.getByText('Owner authorized verified release', { exact: true })).toBeVisible();
+  await page.screenshot({ path: path.join(screenshots, 'owner-audit-version-history.png'), fullPage: true });
   const versionArticle = page.locator('.version-card').filter({ hasText: 'Derived version' });
   const [browserDownload] = await Promise.all([
     page.waitForEvent('download'),
@@ -373,14 +360,23 @@ for (const fixture of fixtures) {
   });
 }
 
-test('local demo sign-in, navigation, upload and document inspection', async ({ page }) => {
+test('single owner sign-in has no role switching or reviewer workspace', async ({ page }) => {
   await page.goto('/');
-  await connect(page, 'processor');
+  await expect(page.getByRole('heading', { name: 'Sign in to Channel360' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /processor|reviewer|administrator/i })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Enter workspace' }).click();
+  await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Review queue' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Switch identity' })).toHaveCount(0);
+  await expect(page.locator('.sidebar-user').getByText('Workspace owner', { exact: true })).toBeVisible();
   const screenshots = path.resolve(here, '../../../artifacts/ui-redesign');
   fs.mkdirSync(screenshots, { recursive: true });
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible();
   await page.screenshot({ path: path.join(screenshots, 'dashboard.png'), fullPage: true });
 
+  // Keep all generated records out of the configured showcase tenant.
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  await connect(page);
   await page.getByRole('button', { name: 'Documents' }).click();
   await expect(page.getByRole('heading', { name: 'Document library' })).toBeVisible();
   await page.screenshot({ path: path.join(screenshots, 'library.png') });
@@ -405,8 +401,8 @@ test('local demo sign-in, navigation, upload and document inspection', async ({ 
   await expect(page.getByTestId('structural-summary')).toContainText('top-level object');
   await expect(page.locator('.source-info code')).not.toHaveText(firstSummaryHash);
   await page.screenshot({ path: path.join(screenshots, 'summary-json-switch.png'), fullPage: true });
-  await page.getByRole('button', { name: 'Switch identity' }).click();
-  await expect(page.getByRole('heading', { name: 'Choose your demo identity' })).toBeVisible();
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  await expect(page.getByRole('heading', { name: 'Sign in to Channel360' })).toBeVisible();
   await expect(page.locator('.toast')).toHaveCount(0);
 });
 
@@ -416,7 +412,7 @@ test('Summary defaults to No AI and explicit AI generation is cached and compara
     calls += 1;
     const requestUrl = new URL(route.request().url());
     const match = requestUrl.pathname.match(/\/api\/documents\/([^/]+)\/versions\/([^/]+)\/ai-summary$/);
-    const view = await (await apiCall(request, processor,
+    const view = await (await apiCall(request, owner,
       `/api/documents/${match[1]}/versions/${match[2]}/view`)).json();
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
       source_document_id: view.document_id, source_version_id: view.version_id, source_sha256: view.source_sha256,
@@ -428,7 +424,7 @@ test('Summary defaults to No AI and explicit AI generation is cached and compara
     }) });
   });
   await page.goto('/');
-  await connect(page, 'processor');
+  await connect(page);
   await page.getByRole('button', { name: 'Documents' }).click();
   const filename = `channel360-ai-summary-${crypto.randomUUID()}.csv`;
   await page.getByLabel('Choose a document to upload').setInputFiles({ name: filename, mimeType: 'text/csv',
@@ -491,7 +487,7 @@ test('No AI summary remains usable after provider credential and outage errors',
     await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify(providerFailure) });
   });
   await page.goto('/');
-  await connect(page, 'processor');
+  await connect(page);
   await page.getByRole('button', { name: 'Documents' }).click();
   const filename = `channel360-ai-failure-${crypto.randomUUID()}.csv`;
   await page.getByLabel('Choose a document to upload').setInputFiles({ name: filename, mimeType: 'text/csv',
@@ -517,7 +513,7 @@ test('unsupported encrypted PDF and tracked-change DOCX remain read only in the 
   const screenshots = path.resolve(here, '../../../artifacts/ui-redesign');
   fs.mkdirSync(screenshots, { recursive: true });
   await page.goto('/');
-  await connect(page, 'processor');
+  await connect(page);
   await page.getByRole('button', { name: 'Documents' }).click();
   const encryptedName = uniqueFixtureFilename('synthetic-encrypted.pdf');
   await page.getByLabel('Choose a document to upload').setInputFiles({ name: encryptedName, mimeType: 'application/pdf',
@@ -584,107 +580,67 @@ test('unsupported encrypted PDF and tracked-change DOCX remain read only in the 
   await page.screenshot({ path: path.join(screenshots, 'tracked-docx-read-only.png'), fullPage: true });
 });
 
-test('independent reviewer can reject a submitted change', async ({ page, request }) => {
-  const documentList = await (await apiCall(request, processor, '/api/documents')).json();
-  const eligible = documentList.items.filter((item) => item.document_category === 'insurer-authored' && item.ingestion_state === 'ready');
-  let submittedDocument;
-  let submittedEdit;
-  for (const item of eligible) {
-    const currentView = await apiCall(request, processor, `/api/documents/${item.id}/versions/${item.current_version_id}/view`);
-    if (!currentView.ok()) continue;
-    const viewed = await currentView.json();
-    const target = viewed.targets.find((candidate) => candidate.editable && candidate.value.type === 'string');
-    if (!target) continue;
-    const draftResponse = await apiCall(request, processor, `/api/documents/${item.id}/edit-sets`, {
-      method: 'POST', data: { reason: 'Synthetic reviewer rejection workflow' },
-    });
-    if (!draftResponse.ok()) continue;
-    const draft = await draftResponse.json();
-    const patch = await apiCall(request, processor, `/api/documents/${item.id}/edit-sets/${draft.edit_set_id}/patches`, {
-      method: 'PUT', data: { patches: [{ target_id: target.id, fingerprint: target.fingerprint, new_value: { type: 'string', value: 'Synthetic rejected proposal' } }] },
-    });
-    if (!patch.ok()) continue;
-    const preflight = await apiCall(request, processor, `/api/documents/${item.id}/edit-sets/${draft.edit_set_id}/preflight`, { method: 'POST' });
-    if (!preflight.ok()) continue;
-    submittedDocument = item;
-    submittedEdit = draft;
-    break;
-  }
-  expect(submittedDocument, 'a supported synthetic document is available for reviewer rejection').toBeTruthy();
-  expect(submittedEdit).toBeTruthy();
-
+test('human review queue and approve/reject API are retired', async ({ page, request }) => {
   await page.goto('/');
-  await connect(page, 'reviewer');
-  await page.getByRole('button', { name: 'Review queue' }).click();
-  const card = page.locator('.approval-card').filter({ hasText: submittedDocument.filename });
-  await expect(card).toBeVisible();
-  const screenshots = path.resolve(here, '../../../artifacts/ui-redesign');
-  fs.mkdirSync(screenshots, { recursive: true });
-  await page.screenshot({ path: path.join(screenshots, 'reviewer-rejection-desktop.png'), fullPage: true });
-  await card.getByRole('button', { name: 'Reject' }).click();
-  await expect(page.getByRole('dialog')).toContainText('Your independent reviewer decision will be recorded');
-  await page.getByRole('button', { name: 'Confirm rejection' }).click();
-  await expect(page.locator('.toast')).toContainText(/rejected/);
-  await expect(card).toHaveCount(0);
-  await page.screenshot({ path: path.join(screenshots, 'reviewer-rejection-outcome-desktop.png'), fullPage: true });
-  await expect(card).toHaveCount(0);
+  await connect(page);
+  await expect(page.getByRole('button', { name: /review queue/i })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /approve|reject/i })).toHaveCount(0);
+  const retired = await apiCall(request, owner,
+    `/api/documents/${crypto.randomUUID()}/edit-sets/${crypto.randomUUID()}/review`,
+    { method: 'POST', data: { decision: 'approved' } });
+  expect(retired.status()).toBe(404);
 });
 
 test('formula-dependent XLSX release is incomplete and cannot be downloaded', async ({ page, request }) => {
   const formulaFilename = uniqueFixtureFilename('formula-dependent.xlsx');
   const source = fs.readFileSync(path.resolve(here, '../../../artifacts/m0/m0_dependent_original.xlsx'));
-  const uploadedResponse = await apiCall(request, processor, `/api/documents?filename=${encodeURIComponent(formulaFilename)}`, {
+  const uploadedResponse = await apiCall(request, owner, `/api/documents?filename=${encodeURIComponent(formulaFilename)}`, {
     method: 'PUT', data: source,
     headers: { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
   });
   expect(uploadedResponse.ok()).toBeTruthy();
   const uploaded = await uploadedResponse.json();
-  const inspect = await apiCall(request, processor, `/api/documents/${uploaded.document_id}/inspect?include_targets=true`, { method: 'POST' });
+  const inspect = await apiCall(request, owner, `/api/documents/${uploaded.document_id}/inspect?include_targets=true`, { method: 'POST' });
   expect(inspect.ok()).toBeTruthy();
-  const view = await (await apiCall(request, processor, `/api/documents/${uploaded.document_id}/versions/${uploaded.version_id}/view`)).json();
+  const view = await (await apiCall(request, owner, `/api/documents/${uploaded.document_id}/versions/${uploaded.version_id}/view`)).json();
   const target = view.targets.find((item) => item.id === 'xlsx:Claim!D2');
   expect(target.value.value).toBe(125.5);
-  const category = await apiCall(request, administrator, `/api/documents/${uploaded.document_id}/category`, {
+  const category = await apiCall(request, owner, `/api/documents/${uploaded.document_id}/category`, {
     method: 'PUT', data: { category: 'insurer-authored' },
   });
   expect(category.ok()).toBeTruthy();
-  const draftResponse = await apiCall(request, processor, `/api/documents/${uploaded.document_id}/edit-sets`, {
+  const draftResponse = await apiCall(request, owner, `/api/documents/${uploaded.document_id}/edit-sets`, {
     method: 'POST', data: { reason: 'Exercise formula dependency reporting' },
   });
   expect(draftResponse.ok()).toBeTruthy();
   const draft = await draftResponse.json();
-  const patch = await apiCall(request, processor, `/api/documents/${uploaded.document_id}/edit-sets/${draft.edit_set_id}/patches`, {
+  const patch = await apiCall(request, owner, `/api/documents/${uploaded.document_id}/edit-sets/${draft.edit_set_id}/patches`, {
     method: 'PUT', data: { patches: [{ target_id: target.id, fingerprint: target.fingerprint, new_value: { type: 'decimal', value: 126.5 } }] },
   });
   expect(patch.ok()).toBeTruthy();
-  const preflight = await apiCall(request, processor, `/api/documents/${uploaded.document_id}/edit-sets/${draft.edit_set_id}/preflight`, { method: 'POST' });
+  const preflight = await apiCall(request, owner, `/api/documents/${uploaded.document_id}/edit-sets/${draft.edit_set_id}/preflight`, { method: 'POST' });
   expect(preflight.ok()).toBeTruthy();
   const frozen = await preflight.json();
   expect(frozen.dependencies_unknown).toBeTruthy();
   expect(frozen.dependents).toContain('Totals!A1');
   expect(frozen.dependents).toContain('Claim!H2');
   await page.goto('/');
-  await connect(page, 'reviewer');
-  await page.getByRole('button', { name: 'Review queue' }).click();
-  const approvalCard = page.locator('.approval-card').filter({ hasText: formulaFilename });
-  await expect(approvalCard).toBeVisible();
-  await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/formula-approval-desktop.png'), fullPage: true });
-  await approvalCard.getByRole('button', { name: 'Approve change' }).click();
-  await page.getByRole('button', { name: 'Confirm approval' }).click();
-  await expect(page.locator('.toast')).toContainText(/approved/);
-  await connect(page, 'processor', formulaFilename);
+  await connect(page);
+  await page.getByRole('button', { name: 'Documents' }).click();
+  await page.getByRole('textbox', { name: 'Search documents' }).fill(formulaFilename);
+  await page.getByRole('button', { name: `Open ${formulaFilename}` }).click();
   await page.getByRole('tab', { name: 'Native changes' }).click();
-  await page.getByRole('button', { name: 'Apply, verify and release' }).click();
-  await page.getByRole('button', { name: 'Confirm release' }).click();
+  await page.getByRole('button', { name: 'Verify and Release' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Verify and Release' }).click();
   await expect(page.locator('.toast')).toContainText(/Verification incomplete/i, { timeout: 30_000 });
   await expect(page.locator('.verification-result')).toContainText('INCOMPLETE');
   await expect(page.locator('.workflow-status')).toContainText('Verification incomplete');
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/incomplete-verification-desktop.png'), fullPage: true });
-  const releaseResponse = await apiCall(request, processor, `/api/documents/${uploaded.document_id}/edit-sets/${draft.edit_set_id}/release`, { method: 'POST' });
+  const releaseResponse = await apiCall(request, owner, `/api/documents/${uploaded.document_id}/edit-sets/${draft.edit_set_id}/release`, { method: 'POST' });
   expect(releaseResponse.ok()).toBeTruthy();
   const release = await releaseResponse.json();
   expect(release.outcome).toBe('INCOMPLETE');
   expect(release.download_available).toBeFalsy();
-  const download = await apiCall(request, processor, `/api/documents/${uploaded.document_id}/versions/${release.version_id}/download`);
+  const download = await apiCall(request, owner, `/api/documents/${uploaded.document_id}/versions/${release.version_id}/download`);
   expect(download.status()).toBe(409);
 });

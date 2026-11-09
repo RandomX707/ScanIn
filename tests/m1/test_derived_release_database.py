@@ -17,7 +17,7 @@ pytestmark = pytest.mark.postgres
     ("VERIFIED", "csv", None),
     ("STRUCTURALLY_VERIFIED", "docx", "structural"),
 ])
-def test_approved_release_lineage_retry_and_fk_safe_cleanup(postgres_engines, tenant_pair, tmp_path,
+def test_owner_release_lineage_retry_and_fk_safe_cleanup(postgres_engines, tenant_pair, tmp_path,
                                                             outcome, adapter, profile):
     owner, app = postgres_engines
     tenant = tenant_pair[0]
@@ -40,13 +40,10 @@ def test_approved_release_lineage_retry_and_fk_safe_cleanup(postgres_engines, te
         repo.set_document_category(document, category="insurer-authored", actor_id="admin")
         repo.create_edit_set(edit_set_id=edit_set, document_id=document,
             base_version_id=original_version.version_id, category="insurer-authored",
-            actor_id="processor", reason="integration persistence proof")
+            actor_id="channel360-demo-owner", reason="integration persistence proof")
     with app.connect() as connection, tenant_transaction(connection, tenant):
         DocumentRepository(connection, tenant).freeze_edit_set(edit_set, frozen_hash="a" * 64,
-            plan={"test_marker": "repository-persistence-only"}, adapter="csv", adapter_version="test", actor_id="processor")
-    with app.connect() as connection, tenant_transaction(connection, tenant):
-        DocumentRepository(connection, tenant).review_edit_set(edit_set, decision="approved",
-            reviewer_id="reviewer", frozen_hash="a" * 64)
+            plan={"test_marker": "repository-persistence-only"}, adapter="csv", adapter_version="test", actor_id="channel360-demo-owner")
 
     derived = b"policy,value\nP-100,new\n"
     derived_hash = hashlib.sha256(derived).hexdigest()
@@ -63,15 +60,15 @@ def test_approved_release_lineage_retry_and_fk_safe_cleanup(postgres_engines, te
             with pytest.raises(ValueError, match="candidate_outcome_not_releasable"):
                 DocumentRepository(connection, tenant).commit_derived_release(edit_set_id=edit_set,
                     stored=derived_stored, outcome=outcome, adapter=adapter,
-                    adapter_version="test", manifest=invalid_manifest, actor_id="processor")
+                    adapter_version="test", manifest=invalid_manifest, actor_id="channel360-demo-owner")
     with app.connect() as connection, tenant_transaction(connection, tenant):
         repo = DocumentRepository(connection, tenant)
         first_version = repo.commit_derived_release(edit_set_id=edit_set, stored=derived_stored,
-            outcome=outcome, adapter=adapter, adapter_version="test", manifest=manifest, actor_id="processor")
+            outcome=outcome, adapter=adapter, adapter_version="test", manifest=manifest, actor_id="channel360-demo-owner")
     with app.connect() as connection, tenant_transaction(connection, tenant):
         repo = DocumentRepository(connection, tenant)
         second_version = repo.commit_derived_release(edit_set_id=edit_set, stored=derived_stored,
-            outcome=outcome, adapter=adapter, adapter_version="test", manifest=manifest, actor_id="processor")
+            outcome=outcome, adapter=adapter, adapter_version="test", manifest=manifest, actor_id="channel360-demo-owner")
         assert first_version == second_version
         assert repo.get_original(document)["sha256"].strip() == original_hash
         assert repo.get(document)["sha256"].strip() == derived_hash
@@ -82,5 +79,10 @@ def test_approved_release_lineage_retry_and_fk_safe_cleanup(postgres_engines, te
         assert derived_version["download_available"] is True
         if profile:
             assert derived_version["verification_profile"] == profile
-    # tenant_pair teardown then exercises FK-safe cleanup of this approved edit
-    # set, its review/manifest, and the derived version linked back to the set.
+        owner_release = next(item for item in repo.list_document_audit(document)
+                             if item["action"] == "document.release_authorized_by_owner")
+        assert owner_release["actor_id"] == "channel360-demo-owner"
+        assert owner_release["payload"]["tenant_id"] == str(tenant)
+        assert owner_release["payload"]["edit_set_id"] == str(edit_set)
+        assert owner_release["payload"]["verification_outcome"] == outcome
+    # Tenant teardown exercises FK-safe cleanup while immutable triggers stay enabled outside test cleanup.

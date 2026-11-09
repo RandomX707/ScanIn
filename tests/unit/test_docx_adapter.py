@@ -81,7 +81,7 @@ def test_docx_structural_release_never_attempts_rendering(monkeypatch):
     monkeypatch.setattr(verifier, "render_docx_pdf", forbidden_render)
     workflow = NativeReleaseWorkflow(adapter, verifier.DocxIndependentVerifier(mode="structural"))
     frozen = workflow.freeze(source=source, document_id="synthetic-doc", base_version_id=hashlib.sha256(source).hexdigest(),
-        actor_id="processor", role="processor", authorized_category="insurer-authored",
+        actor_id="processor", role="OWNER", authorized_category="insurer-authored",
         reason="Synthetic correction", patches=[patch], edit_set_id="structural-release")
     result = workflow.release(source=source, edit_set=frozen)
     assert result.status == "STRUCTURALLY_VERIFIED"

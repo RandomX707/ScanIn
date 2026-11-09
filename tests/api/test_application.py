@@ -100,7 +100,7 @@ def test_readiness_requires_a_separate_worker_database_credential(tmp_path):
 def test_authenticated_tenant_comes_from_signed_token_not_client_header():
     settings = _settings()
     tenant_id = uuid4()
-    token = create_development_token(settings, subject="dev-user", tenant_id=tenant_id, role="processor")
+    token = create_development_token(settings, subject="dev-user", tenant_id=tenant_id, role="OWNER")
     with TestClient(_test_app(settings)) as client:
         response = client.get(
             "/test/identity",
@@ -110,7 +110,7 @@ def test_authenticated_tenant_comes_from_signed_token_not_client_header():
     assert response.json() == {
         "subject": "dev-user",
         "tenant_id": str(tenant_id),
-        "role": "processor",
+        "role": "OWNER",
     }
 
 
@@ -150,34 +150,34 @@ def test_local_demo_identity_is_issued_only_when_explicitly_enabled():
     tenant_id = uuid4()
     settings = _settings(environment="local", local_demo_auth_enabled=True, local_demo_tenant_id=tenant_id)
     with TestClient(_test_app(settings), client=("127.0.0.1", 55440)) as client:
-        session = client.post("/api/local-demo/session", json={"role": "processor"})
+        session = client.post("/api/local-demo/session", json={})
         assert session.status_code == 200
         body = session.json()
-        assert body["role"] == "processor"
+        assert body["role"] == "OWNER"
         assert body["tenant_id"] == str(tenant_id)
         assert body["expires_in"] <= 3600
         identity = client.get("/test/identity", headers={"Authorization": f"Bearer {body['access_token']}"})
         assert identity.status_code == 200
-        assert identity.json() == {"subject": "channel360-demo-processor", "tenant_id": str(tenant_id), "role": "processor"}
+        assert identity.json() == {"subject": "channel360-demo-owner", "tenant_id": str(tenant_id), "role": "OWNER"}
 
 
 def test_local_demo_identity_endpoint_is_unavailable_by_default():
     with TestClient(_test_app(_settings()), client=("127.0.0.1", 55440)) as client:
-        response = client.post("/api/local-demo/session", json={"role": "processor"})
+        response = client.post("/api/local-demo/session", json={})
     assert response.status_code == 404
 
 
 def test_local_demo_identity_rejects_unconfigured_roles():
     settings = _settings(environment="local", local_demo_auth_enabled=True, local_demo_tenant_id=uuid4())
     with TestClient(_test_app(settings), client=("127.0.0.1", 55440)) as client:
-        response = client.post("/api/local-demo/session", json={"role": "root"})
+        response = client.post("/api/local-demo/session", json={"role": "administrator"})
     assert response.status_code == 422
 
 
 def test_local_demo_identity_is_loopback_only():
     settings = _settings(environment="local", local_demo_auth_enabled=True, local_demo_tenant_id=uuid4())
     with TestClient(_test_app(settings), client=("192.0.2.10", 55440)) as client:
-        response = client.post("/api/local-demo/session", json={"role": "reviewer"})
+        response = client.post("/api/local-demo/session", json={})
     assert response.status_code == 404
 
 
@@ -188,14 +188,14 @@ def test_local_demo_identity_requires_explicit_local_environment_and_tenant():
 
 def test_invalid_signature_and_unknown_role_are_rejected():
     settings = _settings()
-    valid = create_development_token(settings, subject="dev-user", tenant_id=uuid4(), role="processor")
+    valid = create_development_token(settings, subject="dev-user", tenant_id=uuid4(), role="OWNER")
     forged = valid[:-1] + ("a" if valid[-1] != "a" else "b")
     with TestClient(_test_app(settings)) as client:
         invalid_signature = client.get("/test/identity", headers={"Authorization": f"Bearer {forged}"})
-        unknown_role_token = create_development_token(
-            settings, subject="dev-user", tenant_id=uuid4(), role="root"
+        legacy_role_token = create_development_token(
+            settings, subject="dev-user", tenant_id=uuid4(), role="processor"
         )
-        unknown_role = client.get("/test/identity", headers={"Authorization": f"Bearer {unknown_role_token}"})
+        unknown_role = client.get("/test/identity", headers={"Authorization": f"Bearer {legacy_role_token}"})
     assert invalid_signature.status_code == 401
     assert unknown_role.status_code == 401
 
@@ -255,7 +255,7 @@ def test_decimal_and_large_integer_data_corrections_keep_exact_values():
 
 def test_error_and_request_logs_do_not_include_document_content_or_credentials(caplog):
     settings = _settings()
-    token = create_development_token(settings, subject="dev-user", tenant_id=uuid4(), role="processor")
+    token = create_development_token(settings, subject="dev-user", tenant_id=uuid4(), role="OWNER")
     with TestClient(_test_app(settings)) as client:
         client.post(
             "/test/validation?access_token=query-secret",
@@ -297,19 +297,19 @@ def test_manual_field_and_data_correction_routes_require_identity(tmp_path):
     assert field.status_code == correction.status_code == listing.status_code == 401
 
 
-def test_reviewer_cannot_create_a_manual_data_field(tmp_path):
+def test_legacy_role_token_is_not_an_owner_identity(tmp_path):
     settings = _settings(storage_root=str(tmp_path / "storage"))
     token = create_development_token(settings, subject="reviewer", tenant_id=uuid4(), role="reviewer")
     with TestClient(_test_app(settings)) as client:
         response = client.post(f"/api/documents/{uuid4()}/fields", json={"target_id": "csv:2:1", "fingerprint": "a" * 64},
                                headers={"Authorization": f"Bearer {token}"})
-    assert response.status_code == 403
-    assert response.json()["code"] == "role_not_permitted"
+    assert response.status_code == 401
+    assert response.json()["code"] == "invalid_identity"
 
 
 def test_upload_limit_is_enforced_before_ingestion(tmp_path):
     settings = _settings(storage_root=str(tmp_path / "storage"), max_upload_bytes=2)
-    token = create_development_token(settings, subject="dev-user", tenant_id=uuid4(), role="processor")
+    token = create_development_token(settings, subject="dev-user", tenant_id=uuid4(), role="OWNER")
     with TestClient(_test_app(settings)) as client:
         response = client.put(
             "/api/documents?filename=policy.xlsx",
@@ -323,7 +323,7 @@ def test_upload_limit_is_enforced_before_ingestion(tmp_path):
 
 def test_upload_filename_is_reduced_to_a_basename_before_storage(tmp_path):
     settings = _settings(storage_root=str(tmp_path / "storage"))
-    token = create_development_token(settings, subject="dev-user", tenant_id=uuid4(), role="processor")
+    token = create_development_token(settings, subject="dev-user", tenant_id=uuid4(), role="OWNER")
     with TestClient(_test_app(settings)) as client:
         response = client.put(
             "/api/documents?filename=..%2Fsecret%2Fpolicy.xlsx",

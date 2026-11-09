@@ -25,7 +25,7 @@ def main() -> int:
     content = ("claim_number,policyholder,loss_date\n"
                "SYNTHETIC-ONLY-001,Example Person,2026-01-15\n").encode("utf-8")
     with httpx.Client(base_url=base, timeout=30, trust_env=False, follow_redirects=False) as client:
-        session = client.post("/api/local-demo/session", json={"role": "processor"})
+        session = client.post("/api/local-demo/session", json={})
         if not session.is_success:
             raise SystemExit(f"Local demo identity unavailable (HTTP {session.status_code}).")
         identity = session.json()

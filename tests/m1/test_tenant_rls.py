@@ -104,6 +104,17 @@ def test_all_tenant_tables_have_forced_using_and_check_rls(postgres_engines):
         assert expected <= set(forced)
 
 
+def test_application_role_can_read_but_cannot_write_historical_reviews(postgres_engines):
+    _, app = postgres_engines
+    with app.connect() as connection:
+        privileges = connection.execute(text("""SELECT
+            has_table_privilege(current_user,'reviews','SELECT'),
+            has_table_privilege(current_user,'reviews','INSERT'),
+            has_table_privilege(current_user,'reviews','UPDATE'),
+            has_table_privilege(current_user,'reviews','DELETE')""")).one()
+    assert tuple(privileges) == (True, False, False, False)
+
+
 def test_missing_authenticated_tenant_context_has_no_access(postgres_engines, tenant_pair):
     _, app = postgres_engines
     with app.connect() as connection:

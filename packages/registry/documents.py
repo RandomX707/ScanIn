@@ -92,7 +92,7 @@ class DocumentRepository:
             (SELECT count(DISTINCT f.document_id) FROM data_corrections c
                 JOIN fields f ON f.tenant_id=c.tenant_id AND f.id=c.field_id
                 WHERE c.tenant_id=:tenant) AS documents_with_corrections,
-            (SELECT count(*) FROM edit_sets WHERE tenant_id=:tenant AND status='submitted') AS pending_approvals,
+            (SELECT count(*) FROM edit_sets WHERE tenant_id=:tenant AND status='ready_for_release') AS ready_for_release,
             (SELECT count(*) FROM verification_manifests WHERE tenant_id=:tenant AND outcome IN ('VERIFIED','STRUCTURALLY_VERIFIED')) AS verified_versions"""),
             {"tenant": self.tenant_id}).mappings().one()
         activity = self.connection.execute(text("""SELECT sequence,ts,actor_id,action,subject
@@ -238,7 +238,7 @@ class DocumentRepository:
 
     def freeze_edit_set(self, edit_set_id: UUID, *, frozen_hash: str, plan: dict[str, object],
                         adapter: str, adapter_version: str, actor_id: str) -> None:
-        result = self.connection.execute(text("""UPDATE edit_sets SET status='submitted',frozen_hash=:hash,
+        result = self.connection.execute(text("""UPDATE edit_sets SET status='ready_for_release',frozen_hash=:hash,
             patch_plan=CAST(:plan AS jsonb),adapter=:adapter,adapter_version=:version,updated_at=now()
             WHERE tenant_id=:tenant AND id=:id AND status='draft' RETURNING id"""),
             {"tenant": self.tenant_id, "id": edit_set_id, "hash": frozen_hash,
@@ -246,34 +246,13 @@ class DocumentRepository:
              "adapter": adapter, "version": adapter_version})
         if result.scalar_one_or_none() is None:
             raise ValueError("edit_set_not_draft")
-        append_event(connection=self.connection, actor_id=actor_id, action="edit_set.frozen_and_submitted",
+        append_event(connection=self.connection, actor_id=actor_id, action="edit_set.ready_for_release",
                      subject=str(edit_set_id), payload={"frozen_hash": frozen_hash, "adapter": adapter})
-
-    def review_edit_set(self, edit_set_id: UUID, *, decision: str, reviewer_id: str,
-                        frozen_hash: str, note: str = "") -> None:
-        row = self.connection.execute(text("""SELECT status,created_by,frozen_hash FROM edit_sets
-            WHERE tenant_id=:tenant AND id=:id FOR UPDATE"""),
-            {"tenant": self.tenant_id, "id": edit_set_id}).one_or_none()
-        if row is None or row[0] != "submitted" or str(row[2]).strip() != frozen_hash:
-            raise ValueError("edit_set_review_precondition_failed")
-        if row[1] == reviewer_id:
-            raise ValueError("reviewer_must_differ_from_author")
-        if decision not in {"approved", "rejected"}:
-            raise ValueError("invalid_review_decision")
-        self.connection.execute(text("""INSERT INTO reviews
-            (tenant_id,edit_set_id,edit_set_hash,reviewer_id,decision,note)
-            VALUES (:tenant,:edit,:hash,:reviewer,:decision,:note)"""),
-            {"tenant": self.tenant_id, "edit": edit_set_id, "hash": frozen_hash,
-             "reviewer": reviewer_id, "decision": decision, "note": note.strip() or None})
-        self.connection.execute(text("UPDATE edit_sets SET status=:status,updated_at=now() WHERE tenant_id=:tenant AND id=:id"),
-                                {"status": decision, "tenant": self.tenant_id, "id": edit_set_id})
-        append_event(connection=self.connection, actor_id=reviewer_id, action=f"edit_set.{decision}",
-                     subject=str(edit_set_id), payload={"frozen_hash": frozen_hash})
 
     def commit_derived_release(self, *, edit_set_id: UUID, stored: StoredFile,
                                outcome: str, adapter: str, adapter_version: str,
                                manifest: dict[str, object], actor_id: str) -> UUID:
-        """Atomically attach a verifier report and a derived version to an approved edit set."""
+        """Atomically attach a verifier report and derived version to an owner-authorized plan."""
         structural_docx = (outcome == "STRUCTURALLY_VERIFIED" and adapter == "docx" and
                            manifest.get("verification_profile") == "structural" and
                            manifest.get("structural_checks") == "PASS" and
@@ -292,8 +271,8 @@ class DocumentRepository:
         status, released_version_id, document_id, base_version_id, current_version_id, filename = row
         if status == "released" and released_version_id is not None:
             return released_version_id
-        if status != "approved":
-            raise ValueError("edit_set_not_approved")
+        if status != "ready_for_release":
+            raise ValueError("edit_set_not_ready_for_release")
         if base_version_id != current_version_id:
             raise ValueError("stale_base_version")
         if stored.document_id != document_id:
@@ -324,12 +303,21 @@ class DocumentRepository:
         if updated is None:
             raise ValueError("stale_base_version")
         self.connection.execute(text("""UPDATE edit_sets SET status='released',released_version_id=:version,updated_at=now()
-            WHERE tenant_id=:tenant AND id=:edit_set AND status='approved'"""),
+            WHERE tenant_id=:tenant AND id=:edit_set AND status='ready_for_release'"""),
             {"version": version_id, "tenant": self.tenant_id, "edit_set": edit_set_id})
         append_event(connection=self.connection, actor_id=actor_id, action="document.derived_version_released",
                      subject=str(document_id), payload={"edit_set_id": str(edit_set_id),
                      "version_id": str(version_id), "source_sha256": str(manifest["source_sha256"]),
                      "output_sha256": stored.sha256, "outcome": outcome})
+        authorization = self.connection.execute(text("""SELECT frozen_hash,base_version_id FROM edit_sets
+            WHERE tenant_id=:tenant AND id=:edit_set"""),
+            {"tenant": self.tenant_id, "edit_set": edit_set_id}).one()
+        append_event(connection=self.connection, actor_id=actor_id, action="document.release_authorized_by_owner",
+                     subject=str(document_id), payload={"tenant_id": str(self.tenant_id),
+                     "document_id": str(document_id), "edit_set_id": str(edit_set_id),
+                     "frozen_plan_hash": str(authorization[0]).strip(),
+                     "source_version_id": str(authorization[1]), "verification_outcome": outcome,
+                     "version_id": str(version_id)})
         return version_id
 
     def record_blocked_release(self, *, edit_set_id: UUID, outcome: str, adapter: str,
@@ -340,8 +328,8 @@ class DocumentRepository:
         status = self.connection.execute(text("""SELECT status FROM edit_sets
             WHERE tenant_id=:tenant AND id=:edit_set FOR UPDATE"""),
             {"tenant": self.tenant_id, "edit_set": edit_set_id}).scalar_one_or_none()
-        if status != "approved":
-            raise ValueError("edit_set_not_approved")
+        if status != "ready_for_release":
+            raise ValueError("edit_set_not_ready_for_release")
         self.connection.execute(text("""INSERT INTO verification_manifests
             (tenant_id,edit_set_id,source_sha256,output_sha256,outcome,adapter,adapter_version,manifest)
             VALUES (:tenant,:edit,:source,NULL,'BLOCKED',:adapter,:version,CAST(:manifest AS jsonb))"""),

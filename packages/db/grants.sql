@@ -30,7 +30,11 @@ GRANT SELECT, INSERT, UPDATE ON fields TO :"application_role";
 GRANT SELECT, INSERT ON data_corrections TO :"application_role";
 GRANT SELECT, INSERT, UPDATE ON edit_sets TO :"application_role";
 GRANT SELECT, INSERT, UPDATE, DELETE ON patches TO :"application_role";
-GRANT SELECT, INSERT ON reviews, verification_manifests TO :"application_role";
+-- Historical review rows are retained as evidence but new approvals are not
+-- part of the single-owner workflow. Keep them readable and non-writable.
+GRANT SELECT ON reviews TO :"application_role";
+REVOKE INSERT, UPDATE, DELETE ON reviews FROM :"application_role";
+GRANT SELECT, INSERT ON verification_manifests TO :"application_role";
 -- The trusted orchestration worker may advance only the ingestion state. It
 -- never receives owner, superuser, or RLS-bypass attributes.
 GRANT SELECT ON documents, files, document_versions TO :"worker_role";

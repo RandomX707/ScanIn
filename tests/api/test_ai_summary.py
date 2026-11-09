@@ -57,7 +57,7 @@ def test_ai_summary_resolves_tenant_source_and_returns_provider_result(monkeypat
                     "model": "synthetic", "explanation": "Synthetic claim record.", "key_points": [],
                     "evidence_references": [], "limitations": []}
     app.state.llm_provider = Provider()
-    token = create_development_token(settings, subject="processor", tenant_id=tenant_id, role="processor")
+    token = create_development_token(settings, subject="processor", tenant_id=tenant_id, role="OWNER")
     with TestClient(app) as client:
         response = client.post(f"/api/documents/{document_id}/versions/{version_id}/ai-summary",
                                headers={"Authorization": f"Bearer {token}"})
@@ -97,7 +97,7 @@ def test_ai_summary_cross_tenant_or_missing_version_is_not_found(monkeypatch, tm
     monkeypatch.setattr(documents, "DocumentRepository", Repo)
     monkeypatch.setattr(documents, "api_tenant_transaction", lambda connection, identity: nullcontext(connection))
     app.state.engine = Engine()
-    token = create_development_token(settings, subject="processor", tenant_id=tenant_id, role="processor")
+    token = create_development_token(settings, subject="processor", tenant_id=tenant_id, role="OWNER")
     with TestClient(app) as client:
         response = client.post(f"/api/documents/{uuid4()}/versions/{uuid4()}/ai-summary",
                                headers={"Authorization": f"Bearer {token}"})

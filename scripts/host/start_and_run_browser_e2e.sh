@@ -45,11 +45,8 @@ issue_token() {
   env -u PGPASSFILE .venv/bin/python scripts/issue_dev_token.py --tenant-id "$tenant" \
     --subject "$subject" --role "$role" --expires-in-seconds 3600
 }
-export IDW_DEMO_PROCESSOR_TOKEN=$(issue_token channel360-e2e-processor processor)
-export IDW_DEMO_ADMIN_TOKEN=$(issue_token channel360-e2e-admin administrator)
-export IDW_DEMO_REVIEWER_TOKEN=$(issue_token channel360-e2e-reviewer reviewer)
-export IDW_DEMO_SELF_REVIEW_TOKEN=$(issue_token channel360-e2e-processor reviewer)
-export IDW_DEMO_OTHER_TENANT_TOKEN=$(issue_token channel360-e2e-other-tenant processor \
+export IDW_DEMO_OWNER_TOKEN=$(issue_token channel360-e2e-owner OWNER)
+export IDW_DEMO_OTHER_TENANT_TOKEN=$(issue_token channel360-e2e-other-tenant OWNER \
   22222222-2222-4222-8222-222222222222)
 
 env -u PGPASSFILE -u IDW_DEVELOPMENT_AUTH_SECRET scripts/host/validate_channel360_e2e.sh browser

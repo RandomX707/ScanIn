@@ -18,7 +18,7 @@ def _frozen():
     patch = Patch(target.version_id, target.id, target.value, target.fingerprint, TypedValue("decimal", Decimal("130.25")))
     return NativeReleaseWorkflow(CsvAdapter(), CsvIndependentVerifier()).freeze(
         source=source, document_id="doc", base_version_id="version", actor_id="processor",
-        role="processor", authorized_category="insurer-authored", reason="Corrected amount", patches=[patch])
+        role="OWNER", authorized_category="insurer-authored", reason="Corrected amount", patches=[patch])
 
 
 def test_frozen_edit_set_round_trips_with_identical_hashes():

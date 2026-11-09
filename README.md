@@ -1,12 +1,12 @@
 # Channel360 — Insurance Document Workbench
 
-Channel360 is a local-first insurance document workbench for inspecting source files, recording data corrections, reviewing proposed native document changes, and releasing only independently verified derivatives. The repository remains named **ScanIn**; the application and product are called Channel360.
+Channel360 is a **single-user document workbench for secure inspection, classification, correction, AI-assisted explanation and verified document release**. One authenticated owner operates the document workflow. The repository remains named **ScanIn**; the application and product are called Channel360.
 
 > **Project status:** a validated development prototype, not production-ready software. It has no production identity provider, durable background queue, deployment hardening, or M4–M7 capabilities. Use synthetic documents and a dedicated test database.
 
 ## Why it exists
 
-Insurance teams receive structured records in different formats and need to correct them without losing the original, mixing tenant data, or approving their own changes. Channel360 keeps uploaded originals immutable, records sidecar corrections separately, freezes native edit plans for independent review, and exposes a derived file only after independent verification succeeds.
+Insurance teams receive records in different formats and need to inspect and correct them without losing the original or mixing tenant data. Channel360 keeps uploaded originals immutable, records data corrections as sidecars, freezes native edit plans, and exposes a derived file only after independent automated verification succeeds. Human approval is not part of the standard workflow.
 
 ## Current capabilities
 
@@ -14,11 +14,11 @@ Insurance teams receive structured records in different formats and need to corr
 - Malware scanning before document registration; scanner errors fail closed.
 - Immutable source versions, SHA-256 lineage, audit-chain events and version history.
 - CSV, JSON and XLSX inspection and native correction workflows.
-- A deterministic, source-version-bound Document Summary tab for CSV, JSON, XLSX, PDF and DOCX. Summaries describe observed structure, report limitations, and do not classify documents for editing or alter review/release permissions.
+- A deterministic, source-version-bound Document Summary tab for CSV, JSON, XLSX, PDF and DOCX. Summaries describe observed structure, report limitations, and do not classify documents or alter release permissions.
 - Separate data-correction records and native document edit plans.
-- Administrator classification, processor preflight, independent reviewer approval or rejection, and independent release verification.
+- Owner classification and preflight, followed by independent automated verification and malware scanning before release. Category and format restrictions remain enforced.
 - Download access is restricted to fully `VERIFIED` derivatives or DOCX-only `STRUCTURALLY_VERIFIED` derivatives whose server-side manifest records the structural profile; `INCOMPLETE` and `BLOCKED` files remain unavailable.
-- Local-demo sign-in with server-issued short-lived identities for processor, reviewer and administrator roles. The endpoint is restricted to explicitly configured local development mode and loopback clients.
+- Local-demo sign-in issues one server-signed `OWNER` identity, only when explicitly configured for loopback local development. Production deployments continue to require the configured identity provider.
 - Read-only inspection support for some other formats; editing is not implied by upload acceptance.
 
 ### Supported formats
@@ -28,11 +28,11 @@ Insurance teams receive structured records in different formats and need to corr
 | CSV | Inspect, correct selected values, independently verify and download a verified derivative |
 | JSON | Inspect, correct supported values, independently verify and download a verified derivative |
 | XLSX | Inspect supported workbook targets and apply constrained edits; uncertain formula dependencies remain incomplete and nondownloadable |
-| PDF | Browser PDF.js multi-page viewer and AcroForm discovery; unsigned supported text, checkbox, radio and choice fields use the normal approval flow and are released only after qpdf and PDFium verification. Signed, certified, XFA, encrypted and scanned files are read-only or rejected as appropriate. |
-| DOCX | Safe OOXML text/table/header/footer inspection plus constrained single-run edits in the body, tables, headers and footers. The default structural profile verifies exact target intent, fingerprints, provenance, package readability and preservation, then releases as `STRUCTURALLY_VERIFIED` after approval and ClamAV scanning. Visual layout is explicitly not checked. An optional server-selected `structural_and_visual` profile still requires the isolated LibreOffice/PDFium path and blocks if it cannot run. |
+| PDF | Browser PDF.js multi-page viewer and AcroForm discovery; unsigned supported text, checkbox, radio and choice fields are independently verified with qpdf and PDFium before release. Signed, certified, XFA, encrypted and scanned files are read-only or rejected as appropriate. |
+| DOCX | Safe OOXML text/table/header/footer inspection plus constrained single-run edits in the body, tables, headers and footers. The default structural profile verifies exact target intent, fingerprints, provenance, package readability and preservation, then releases as `STRUCTURALLY_VERIFIED` after ClamAV scanning. Visual layout is explicitly not checked. An optional server-selected `structural_and_visual` profile requires isolated LibreOffice/PDFium and blocks if it cannot run. |
 | Other accepted formats | Read-only or unavailable preview depending on format and adapter; upload acceptance does not imply editing support |
 
-The Summary tab defaults to a deterministic structural summary generated by the existing restricted parser. An optional **AI** mode can be configured for an OpenAI-compatible HTTPS endpoint. AI is requested only after a user clicks **Generate AI Explanation**; switching tabs or opening Compare never sends a request. The browser never receives the provider key. AI explanations are informational and do not affect editing, authorization, review, verification or download decisions.
+The Summary tab defaults to a deterministic structural summary generated by the existing restricted parser. An optional **AI** mode can be configured for an OpenAI-compatible HTTPS endpoint. AI is requested only after the owner clicks **Generate AI Explanation**; switching tabs or opening Compare never sends a request. The browser never receives the provider key. AI explanations are informational and do not affect editing, authorization, verification or download decisions.
 
 DOCX verification is configured only on the server with `CHANNEL360_DOCX_VERIFICATION_MODE=structural` (default) or `structural_and_visual`. Put overrides in the ignored local `.env`; never add profile controls to browser requests. Structural release explicitly records that visual checks were not performed. The strict profile blocks when isolated rendering is unavailable.
 
@@ -66,9 +66,9 @@ These screenshots use synthetic demo records and contain no session credentials.
 | PDF summary and page viewer | ![PDF summary](artifacts/ui-redesign/summary-pdf.png) | — |
 | DOCX structural summary | ![DOCX summary with read-only extracted text](artifacts/ui-redesign/summary-docx.png) | — |
 | DOCX structural correction | ![DOCX extracted text and editable target](artifacts/ui-redesign/docx-structural-preview-selection.png) ![Frozen correction draft](artifacts/ui-redesign/docx-structural-draft.png) | ![Structural result with visual check explicitly not performed](artifacts/ui-redesign/docx-structural-verification-desktop.png) ![Structural result on a narrow screen](artifacts/ui-redesign/docx-structural-verification-mobile.png) |
-| DOCX reviewer and download | ![DOCX correction in the independent reviewer queue](artifacts/ui-redesign/docx-structural-review-queue-desktop.png) ![DOCX download authorization](artifacts/ui-redesign/docx-structural-download-desktop.png) | ![DOCX reviewer queue on a narrow screen](artifacts/ui-redesign/docx-structural-review-queue-mobile.png) |
-| Native correction | ![Native correction workspace](artifacts/ui-redesign/showcase-workspace-desktop.png) | ![Native correction workspace on a narrow screen](artifacts/ui-redesign/showcase-workspace-mobile.png) |
-| Reviewer queue | ![Reviewer approval queue](artifacts/ui-redesign/showcase-review-queue-desktop.png) | ![Reviewer queue on a narrow screen](artifacts/ui-redesign/showcase-review-queue-mobile.png) |
+| Owner classification and native correction | ![Owner classified document](artifacts/ui-redesign/single-owner-classification.png) ![Owner correction workspace](artifacts/ui-redesign/native-correction-desktop.png) | ![Native correction workspace on a narrow screen](artifacts/ui-redesign/native-correction-mobile.png) |
+| Owner validation and release | ![Frozen plan validated and ready for release](artifacts/ui-redesign/owner-validation-ready.png) ![Owner confirms verify and release](artifacts/ui-redesign/owner-verify-release-confirmation.png) | — |
+| DOCX structural release | ![DOCX structural verification and download](artifacts/ui-redesign/docx-structural-download-desktop.png) ![Owner audit and version history](artifacts/ui-redesign/owner-audit-version-history.png) | ![Structural result on a narrow screen](artifacts/ui-redesign/docx-structural-verification-mobile.png) |
 | PDF AcroForm workspace | ![PDF page, form targets and frozen correction](artifacts/ui-redesign/native-correction-desktop.png) | ![PDF workspace at 390 pixels](artifacts/ui-redesign/native-correction-mobile.png) |
 | Historical pre-profile DOCX read-only workspace | ![Earlier DOCX extracted-text view before structural releases were enabled](artifacts/ui-redesign/docx-workspace-desktop.png) | ![Earlier DOCX view at 390 pixels](artifacts/ui-redesign/docx-workspace-mobile.png) |
 | Historical pre-profile verification boundary | ![Earlier DOCX native-change block before structural profile support](artifacts/ui-redesign/docx-blocked-verification-desktop.png) | ![Earlier block at 390 pixels](artifacts/ui-redesign/docx-blocked-verification-mobile.png) |
@@ -91,7 +91,7 @@ FastAPI ── PostgreSQL (tenant RLS, immutable metadata, audit)
 private local document storage (development)
 ```
 
-The repository is a modular monolith. PostgreSQL is authoritative for tenant-scoped metadata, approval state, version lineage and audit. The local filesystem adapter is for development only. Upload/inspection currently runs synchronously; Redis/Valkey jobs, retry handling and event streaming are not implemented.
+The repository is a modular monolith. PostgreSQL is authoritative for tenant-scoped metadata, owner-authorized release state, version lineage and audit. Historical review rows remain readable but are not part of the active API workflow. The local filesystem adapter is for development only. Upload/inspection currently runs synchronously; Redis/Valkey jobs, retry handling and event streaming are not implemented.
 
 ## Technology
 
@@ -187,16 +187,16 @@ The Python suite may skip PostgreSQL-marked tests when no database is available.
 | --- | --- |
 | M0 — standalone XLSX correction and verification | Accepted for its standalone scope; formula-dependent outputs intentionally remain incomplete |
 | M1 — application, tenancy, storage, inspection and scanning | Core paths implemented and live PostgreSQL, ClamAV and browser integration exercised. Overall M1 remains partial: durable queue/events, full acceptance corpus and OS-level parser isolation evidence are outstanding |
-| M2 — data corrections, native edit/review/release | CSV, JSON and XLSX persisted workflows exercised; approval separation and verified-only downloads enforced. Product still requires production identity, deployment and operational hardening |
-| M3 — XLSX application integration | Exercised through the persisted review/release path; independent verification preserves incomplete formula-dependent behavior |
+| M2 — data corrections and native edit/release | Supported formats use owner-authorized frozen plans, independent verification, malware scanning, immutable source history and verified-only download. Product still requires production identity, deployment and operational hardening |
+| M3 — XLSX application integration | Exercised through the owner-authorized verification/release path; independent verification preserves incomplete formula-dependent behavior |
 | M4 — templates, deterministic rules and structural summaries | Planned, not implemented |
 | M5 — supported AcroForm PDF editing | Synthetic acceptance subset passes: 50 corpus outcomes and browser verified downloads for text, checkbox, radio and dropdown. External producer diversity (including Adobe/Microsoft-authored forms) remains unverified. |
-| M6 — constrained DOCX editing | Structural-profile edit, approval, independent verification and download are supported without LibreOffice; the strict visual profile remains NOT_VERIFIED on this host because its isolated LibreOffice renderer is unavailable. Structural release does not prove unchanged pagination, line wrapping, font rendering or appearance across Word processors. |
+| M6 — constrained DOCX editing | Structural-profile edit, owner release, independent verification and download are supported without LibreOffice; the strict visual profile remains NOT_VERIFIED on this host because its isolated LibreOffice renderer is unavailable. Structural release does not prove unchanged pagination, line wrapping, font rendering or appearance across Word processors. |
 | M7 — optional OCR/Docling/LLM providers | Planned, not implemented |
 
 Additional limitations include synchronous ingestion, development-only local identities and filesystem storage, sampled (not kernel-enforced) 2 GiB macOS parser RSS monitoring, and an unverified OS-level network boundary on some host configurations. The strict DOCX visual profile blocks if isolated rendering is unavailable. Do not use real policyholder data or treat this prototype as production-ready.
 
-For offline, diagnostic-only comparison of original and candidate DOCX packages, see [DOCX Offline Candidate Diagnostics](docs/DOCX_OFFLINE_DIAGNOSTICS.md). The diagnostic CLI never approves or releases a document; application release uses its own mandatory structural verifier and approval workflow.
+For offline, diagnostic-only comparison of original and candidate DOCX packages, see [DOCX Offline Candidate Diagnostics](docs/DOCX_OFFLINE_DIAGNOSTICS.md). The diagnostic CLI never releases a document; application release uses its own mandatory structural verifier and owner-authorized release transition.
 
 ## License
 

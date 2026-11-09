@@ -26,6 +26,10 @@ test-results/
 /artifacts/ui-redesign/*
 !/artifacts/ui-redesign/dashboard.png
 !/artifacts/ui-redesign/library.png
+!/artifacts/ui-redesign/single-owner-classification.png
+!/artifacts/ui-redesign/owner-validation-ready.png
+!/artifacts/ui-redesign/owner-verify-release-confirmation.png
+!/artifacts/ui-redesign/owner-audit-version-history.png
 !/artifacts/ui-redesign/approval-queue-desktop.png
 !/artifacts/ui-redesign/approval-queue-mobile.png
 !/artifacts/ui-redesign/native-correction-desktop.png

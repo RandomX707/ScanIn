@@ -12,7 +12,7 @@ from packages.core.models.contracts import Patch, PatchPlan, TypedValue, VerifyR
 from packages.core.planning.planner import PlanError, build_patch_plan, calculate_plan_sha256
 from packages.core.verification.independent import IndependentVerifier
 
-Role = Literal["processor", "reviewer", "administrator"]
+Role = Literal["OWNER"]
 Category = Literal["insurer-authored", "customer-form", "third-party-issued", "signed-legal", "unknown"]
 
 
@@ -60,8 +60,8 @@ class ReleaseResult:
 class NativeReleaseWorkflow:
     """M2 policy/preflight/apply/independent-verification core for native files.
 
-    Persistence, approval records, audit transactions and derived-object commit
-    are supplied by the later API/database integration layer. This pure service
+    Persistence, owner-authorized release audit transactions and derived-object
+    commit are supplied by the API/database integration layer. This pure service
     never mutates its input and exposes bytes only when tenant policy explicitly
     permits an incomplete derivative; its default allows VERIFIED only.
     """
@@ -73,7 +73,7 @@ class NativeReleaseWorkflow:
     def freeze(self, *, source: bytes, document_id: str, base_version_id: str, actor_id: str,
                role: Role, authorized_category: Category, reason: str, patches: tuple[Patch, ...] | list[Patch],
                edit_set_id: str | None = None) -> FrozenEditSet:
-        if role not in {"processor", "reviewer", "administrator"}:
+        if role != "OWNER":
             raise WorkflowRejected("role_not_permitted")
         if not document_id or not base_version_id or not actor_id:
             raise WorkflowRejected("edit_set_identity_required")

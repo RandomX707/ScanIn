@@ -76,15 +76,9 @@ class PatchBatchRequest(BaseModel):
     patches: list[PatchInput] = Field(min_length=1, max_length=200)
 
 
-class ReviewRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    decision: str = Field(pattern=r"^(approved|rejected)$")
-    note: str = Field(default="", max_length=2000)
-
-
-def _require_processor(identity: AuthenticatedIdentity) -> None:
-    if identity.role not in {"processor", "administrator"}:
-        raise APIError(403, "role_not_permitted", "A processor role is required for this correction.")
+def _require_owner(identity: AuthenticatedIdentity) -> None:
+    if identity.role != "OWNER":
+        raise APIError(403, "owner_required", "An authenticated owner identity is required.")
 
 
 def _typed_correction(value: dict[str, Any], *, allow_metadata: bool = False) -> TypedValue:
@@ -478,7 +472,7 @@ def generate_ai_summary(document_id: str, version_id: str, request: Request,
 def create_manual_field(document_id: str, payload: ManualFieldRequest, request: Request,
                         identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
     """Bind a user-selected field to a current, parser-discovered native target."""
-    _require_processor(identity)
+    _require_owner(identity)
     try:
         parsed_id = UUID(document_id)
     except ValueError:
@@ -543,7 +537,7 @@ def list_manual_fields(document_id: str, request: Request,
 @router.post("/{document_id}/fields/{field_id}/corrections")
 def create_data_correction(document_id: str, field_id: str, payload: DataCorrectionRequest, request: Request,
                            identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    _require_processor(identity)
+    _require_owner(identity)
     try:
         parsed_document, parsed_field = UUID(document_id), UUID(field_id)
     except ValueError:
@@ -590,8 +584,7 @@ def export_data_corrections(document_id: str, request: Request,
 @router.put("/{document_id}/category")
 def classify_document(document_id: str, payload: CategoryRequest, request: Request,
                       identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    if identity.role != "administrator":
-        raise APIError(403, "administrator_required", "Only an administrator can authorize a document category.")
+    _require_owner(identity)
     try:
         parsed_id = UUID(document_id)
         with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
@@ -609,7 +602,7 @@ def classify_document(document_id: str, payload: CategoryRequest, request: Reque
 @router.post("/{document_id}/edit-sets")
 def create_edit_set_draft(document_id: str, payload: EditSetDraftRequest, request: Request,
                           identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    _require_processor(identity)
+    _require_owner(identity)
     try:
         parsed_id = UUID(document_id)
     except ValueError:
@@ -622,7 +615,7 @@ def create_edit_set_draft(document_id: str, payload: EditSetDraftRequest, reques
             if document is None:
                 raise APIError(404, "not_found", "The requested document was not found.")
             if document["document_category"] != "insurer-authored":
-                raise APIError(403, "document_category_not_authorized", "Only an administrator-classified insurer-authored document can be changed.")
+                raise APIError(403, "document_category_not_authorized", "Only a document classified as insurer-authored can be changed.")
             if document["ingestion_state"] != "ready" or document["current_version_id"] is None:
                 raise APIError(409, "document_not_ready", "Safe inspection must finish before creating edits.")
             repo.create_edit_set(edit_set_id=edit_set_id, document_id=parsed_id,
@@ -673,7 +666,7 @@ def list_document_audit(document_id: str, request: Request,
 @router.put("/{document_id}/edit-sets/{edit_set_id}/patches")
 def add_edit_set_patches(document_id: str, edit_set_id: str, payload: PatchBatchRequest, request: Request,
                          identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    _require_processor(identity)
+    _require_owner(identity)
     try:
         parsed_id, parsed_edit_id = UUID(document_id), UUID(edit_set_id)
     except ValueError:
@@ -730,7 +723,7 @@ def add_edit_set_patches(document_id: str, edit_set_id: str, payload: PatchBatch
 @router.post("/{document_id}/edit-sets/{edit_set_id}/preflight")
 def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
                        identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    _require_processor(identity)
+    _require_owner(identity)
     try:
         parsed_id, parsed_edit_id = UUID(document_id), UUID(edit_set_id)
     except ValueError:
@@ -806,19 +799,18 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
         raise
     except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
         raise APIError(409, "freeze_conflict", "The plan could not be frozen because the draft changed.") from None
-    return {"edit_set_id": str(parsed_edit_id), "status": "submitted", "frozen_hash": frozen.frozen_sha256,
+    return {"edit_set_id": str(parsed_edit_id), "status": "ready_for_release", "frozen_hash": frozen.frozen_sha256,
             "plan_sha256": frozen.plan.plan_sha256,
             "changes": [{"target_id": patch.target_id, "old": patch.expected_old_value.canonical(),
                          "proposed": patch.new_value.canonical()} for patch in frozen.plan.patches],
             "dependents": list(frozen.plan.dependents), "dependencies_unknown": frozen.plan.dependencies_unknown,
-            "approval_required": True,
             "verification_profile": docx_mode if report.adapter == "docx" else None}
 
 
 @router.post("/{document_id}/edit-sets/{edit_set_id}/rebase")
 def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
                     identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    _require_processor(identity)
+    _require_owner(identity)
     try:
         parsed_id, parsed_edit_id = UUID(document_id), UUID(edit_set_id)
     except ValueError:
@@ -885,39 +877,11 @@ def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
             "base_version_id": str(new_version_id), "status": "draft", "patches": len(rebased)}
 
 
-@router.post("/{document_id}/edit-sets/{edit_set_id}/review")
-def review_edit_set(document_id: str, edit_set_id: str, payload: ReviewRequest, request: Request,
-                    identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    if identity.role not in {"reviewer", "administrator"}:
-        raise APIError(403, "reviewer_role_required", "Only a reviewer or administrator may decide this edit set.")
-    try:
-        parsed_id, parsed_edit_id = UUID(document_id), UUID(edit_set_id)
-    except ValueError:
-        raise APIError(404, "not_found", "The edit set was not found.") from None
-    try:
-        with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
-            repo = DocumentRepository(connection, identity.tenant_id)
-            edit_set = repo.get_edit_set(parsed_edit_id)
-            if edit_set is None or edit_set["document_id"] != parsed_id:
-                raise APIError(404, "not_found", "The edit set was not found.")
-            repo.review_edit_set(parsed_edit_id, decision=payload.decision, reviewer_id=identity.subject,
-                                 frozen_hash=str(edit_set["frozen_hash"]).strip(), note=payload.note)
-    except APIError:
-        raise
-    except ValueError as error:
-        code = "reviewer_must_differ_from_author" if str(error) == "reviewer_must_differ_from_author" else "review_precondition_failed"
-        raise APIError(409, code, "This edit set cannot be reviewed in its current state.") from None
-    except (SQLAlchemyError, RuntimeError, PermissionError):
-        raise APIError(503, "review_unavailable", "The review decision could not be recorded.") from None
-    return {"edit_set_id": str(parsed_edit_id), "status": payload.decision, "reviewer_id": identity.subject}
-
-
 @router.post("/{document_id}/edit-sets/{edit_set_id}/release")
 def release_edit_set(document_id: str, edit_set_id: str, request: Request,
                      identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    """Apply an approved frozen plan, independently verify it, scan it, then atomically register it."""
-    if identity.role not in {"processor", "administrator"}:
-        raise APIError(403, "role_not_permitted", "A processor role is required to release this correction.")
+    """Apply an owner-authorized frozen plan, verify and scan it before registration."""
+    _require_owner(identity)
     try:
         parsed_document, parsed_edit_set = UUID(document_id), UUID(edit_set_id)
     except ValueError:
@@ -933,8 +897,8 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
             return {"edit_set_id": str(parsed_edit_set), "version_id": str(edit_set["released_version_id"]),
                     "outcome": (released or {}).get("verification_outcome", "INCOMPLETE"),
                     "download_available": bool((released or {}).get("download_available")), "idempotent": True}
-        if edit_set["status"] != "approved":
-            raise APIError(409, "approval_required", "A reviewer must approve the frozen edit set before release.")
+        if edit_set["status"] != "ready_for_release":
+            raise APIError(409, "edit_set_not_ready_for_release", "Preflight and freeze this edit set before release.")
         if str(edit_set["current_version_id"]) != str(edit_set["base_version_id"]):
             raise APIError(409, "stale_base_version", "The document changed after this edit set was created.")
         frozen_payload = edit_set.get("patch_plan")
