@@ -193,6 +193,90 @@ def _column_index(text: str) -> int:
     return out
 
 
+def _covers(first: str, last: str, cell: str) -> bool:
+    a, b, x = CELL_COORD.match(first), CELL_COORD.match(last), CELL_COORD.match(cell)
+    if not (a and b and x):
+        return False
+    col, row = _column_index(x.group(1)), int(x.group(2))
+    low_col, high_col = sorted((_column_index(a.group(1)), _column_index(b.group(1))))
+    low_row, high_row = sorted((int(a.group(2)), int(b.group(2))))
+    return low_col <= col <= high_col and low_row <= row <= high_row
+
+
+def _column_letters(index: int) -> str:
+    letters = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def _shift_reference(token: str, row_delta: int, col_delta: int) -> str | None:
+    """Move a relative A1 reference as Excel does for shared formulas; $-anchored parts stay fixed."""
+    match = re.fullmatch(r"(\$?)([A-Z]{1,3})(\$?)([1-9][0-9]*)", token, re.I)
+    if not match:
+        return None
+    col = _column_index(match.group(2)) + (0 if match.group(1) else col_delta)
+    row = int(match.group(4)) + (0 if match.group(3) else row_delta)
+    if not (1 <= col <= 16384 and 1 <= row <= 1048576):
+        return None
+    return f"{match.group(1)}{_column_letters(col)}{match.group(3)}{row}"
+
+
+def _translate_shared_formula(master_text: str, master_ref: str, cell_ref: str) -> str | None:
+    """Text of a shared-formula child derived from its master; None when it cannot be translated safely."""
+    master, child = CELL_COORD.match(master_ref), CELL_COORD.match(cell_ref)
+    if not (master and child):
+        return None
+    row_delta = int(child.group(2)) - int(master.group(2))
+    col_delta = _column_index(child.group(1)) - _column_index(master.group(1))
+    failed = False
+
+    def shift(match: re.Match) -> str:
+        nonlocal failed
+        prefix = match.group(0)[:match.start(3) - match.start(0)]
+        first = _shift_reference(match.group(3), row_delta, col_delta)
+        last = _shift_reference(match.group(4), row_delta, col_delta) if match.group(4) else None
+        if first is None or (match.group(4) and last is None):
+            failed = True
+            return match.group(0)
+        return prefix + first + (f":{last}" if last else "")
+
+    translated = CELL_REF.sub(shift, master_text)
+    return None if failed else translated
+
+
+class _FormulaGraph:
+    """Reverse dependency graph over supported formula references (all sheets).
+
+    ``dependents_of(sheet, cell)`` returns every formula cell that depends on the cell directly or
+    through other formulas (breadth-first, visited set, so cycles terminate). No formula is evaluated.
+    """
+
+    def __init__(self, refs: list[tuple[str, str, str, str]]):
+        self.refs = refs
+        self._direct: dict[tuple[str, str], frozenset[str]] = {}
+
+    def direct(self, sheet: str, cell: str) -> frozenset[str]:
+        key = (sheet, cell.replace("$", "").upper())
+        if key not in self._direct:
+            self._direct[key] = frozenset(formula_id for target_sheet, first, last, formula_id in self.refs
+                                          if target_sheet == sheet and _covers(first, last, key[1]))
+        return self._direct[key]
+
+    def dependents_of(self, sheet: str, cell: str) -> set[str]:
+        seen: set[str] = set()
+        queue = list(self.direct(sheet, cell))
+        while queue:
+            formula_id = queue.pop(0)
+            if formula_id in seen:
+                continue
+            seen.add(formula_id)
+            formula_sheet, formula_cell = formula_id.rsplit("!", 1)
+            queue.extend(item for item in self.direct(formula_sheet, formula_cell) if item not in seen)
+        return seen
+
+
 def _formula_references(formula: str, own_sheet: str) -> tuple[list[tuple[str, str, str]], bool]:
     clean = re.sub(r'"(?:[^"]|"")*"', '""', formula)
     if UNSAFE_FORMULA.search(clean):
@@ -319,15 +403,34 @@ class XlsxAdapter:
         unknown_formula = False
         refs: list[tuple[str, str, str, str]] = []
         name_map = _defined_names(wb, sheets)
+        masters: dict[tuple[str, str], tuple[str, str]] = {}
         for sheet, c in formulas:
             f = c.find(f"{{{MAIN}}}f")
-            parsed, unknown = _formula_references(_resolve_names(f.text or "", sheet, name_map), sheet)
+            if f.get("t") == "shared" and f.get("si") is not None and (f.text or "").strip():
+                masters[(sheet, f.get("si"))] = (c.get("r", ""), f.text or "")
+        for sheet, c in formulas:
+            f = c.find(f"{{{MAIN}}}f")
+            formula_text = f.text or ""
+            if f.get("t") == "shared" and not formula_text.strip():
+                # Shared-formula children carry no text: derive it from the group's master. If that
+                # is impossible the workbook's dependencies are unknown (never silently empty).
+                master = masters.get((sheet, f.get("si") or ""))
+                translated = _translate_shared_formula(master[1], master[0], c.get("r", "")) if master else None
+                if translated is None:
+                    unknown_formula = True
+                    continue
+                formula_text = translated
+            parsed, unknown = _formula_references(_resolve_names(formula_text, sheet, name_map), sheet)
+            if any(target_sheet not in sheets for target_sheet, _, _ in parsed):
+                unknown = True  # reference to a sheet that does not exist in this workbook
             unknown_formula |= unknown
-            refs.extend((target_sheet, first, last, f"{sheet}!{c.get('r')}") for target_sheet, first, last in parsed)
+            refs.extend((target_sheet, first.replace("$", "").upper(), last.replace("$", "").upper(),
+                         f"{sheet}!{c.get('r')}") for target_sheet, first, last in parsed)
         return parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula
 
     def targets(self, source: bytes) -> list[EditTarget]:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
+        graph = _FormulaGraph(refs)
         unlocked_styles = _unlocked_styles(parts)
         formula_cells = {f"{sheet}!{c.get('r')}" for sheet, c in formulas}
         result: list[EditTarget] = []
@@ -346,17 +449,7 @@ class XlsxAdapter:
                     parts, sheets, shared, rich, dates, epoch, sheet, ref, root)
                 if validation_unsupported:
                     reason = reason or "unsupported_data_validation"
-                deps: set[str] = set()
-                if not unknown_formula:
-                    for target_sheet, first, last, formula_id in refs:
-                        if target_sheet != sheet:
-                            continue
-                        a, b = CELL_COORD.match(first), CELL_COORD.match(last)
-                        x = CELL_COORD.match(ref)
-                        if not (a and b and x): continue
-                        col, row = _column_index(x.group(1)), int(x.group(2))
-                        if _column_index(a.group(1)) <= col <= _column_index(b.group(1)) and int(a.group(2)) <= row <= int(b.group(2)):
-                            deps.add(formula_id)
+                deps: set[str] = graph.dependents_of(sheet, ref) if not unknown_formula else set()
                 fp = _fingerprint(cell)
                 result.append(EditTarget(f"xlsx:{sheet}!{ref}", hashlib.sha256(source).hexdigest(), sheet, ref,
                                          value, fp, cell.get("s"), reason is None, reason,
@@ -501,18 +594,8 @@ class XlsxAdapter:
 
     def formula_dependents(self, source: bytes, target: EditTarget) -> tuple[tuple[str, ...], bool]:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
-        deps: set[str] = set()
-        for target_sheet, first, last, formula_id in refs:
-            if target_sheet != target.sheet:
-                continue
-            a, b = CELL_COORD.match(first), CELL_COORD.match(last)
-            cell = CELL_COORD.match(target.cell)
-            if not (a and b and cell):
-                continue
-            col, row = _column_index(cell.group(1)), int(cell.group(2))
-            if (_column_index(a.group(1)) <= col <= _column_index(b.group(1))
-                    and int(a.group(2)) <= row <= int(b.group(2))):
-                deps.add(formula_id)
+        # Transitive: every formula affected directly or through other formulas, across sheets.
+        deps: set[str] = _FormulaGraph(refs).dependents_of(target.sheet, target.cell)
         array_unknown = False
         for formula_sheet, formula_cell in formulas:
             formula = formula_cell.find(f"{{{MAIN}}}f")
