@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import Connection, text
 
-from packages.audit.chain import append_event
+from packages.audit.chain import append_event, append_events
 from packages.db.tenant import require_tenant_context
 from packages.storage.local import StoredFile
 
@@ -309,19 +309,19 @@ class DocumentRepository:
         self.connection.execute(text("""UPDATE edit_sets SET status='released',released_version_id=:version,updated_at=now()
             WHERE tenant_id=:tenant AND id=:edit_set AND status='ready_for_release'"""),
             {"version": version_id, "tenant": self.tenant_id, "edit_set": edit_set_id})
-        append_event(connection=self.connection, actor_id=actor_id, action="document.derived_version_released",
-                     subject=str(document_id), payload={"edit_set_id": str(edit_set_id),
-                     "version_id": str(version_id), "source_sha256": str(manifest["source_sha256"]),
-                     "output_sha256": stored.sha256, "outcome": outcome})
         authorization = self.connection.execute(text("""SELECT frozen_hash,base_version_id FROM edit_sets
             WHERE tenant_id=:tenant AND id=:edit_set"""),
             {"tenant": self.tenant_id, "edit_set": edit_set_id}).one()
-        append_event(connection=self.connection, actor_id=actor_id, action="document.release_authorized_by_owner",
-                     subject=str(document_id), payload={"tenant_id": str(self.tenant_id),
-                     "document_id": str(document_id), "edit_set_id": str(edit_set_id),
-                     "frozen_plan_hash": str(authorization[0]).strip(),
-                     "source_version_id": str(authorization[1]), "verification_outcome": outcome,
-                     "version_id": str(version_id)})
+        append_events(connection=self.connection, actor_id=actor_id, events=(
+            ("document.derived_version_released", str(document_id), {"edit_set_id": str(edit_set_id),
+             "version_id": str(version_id), "source_sha256": str(manifest["source_sha256"]),
+             "output_sha256": stored.sha256, "outcome": outcome}),
+            ("document.release_authorized_by_owner", str(document_id), {"tenant_id": str(self.tenant_id),
+             "document_id": str(document_id), "edit_set_id": str(edit_set_id),
+             "frozen_plan_hash": str(authorization[0]).strip(),
+             "source_version_id": str(authorization[1]), "verification_outcome": outcome,
+             "version_id": str(version_id)}),
+        ))
         return version_id
 
     def record_blocked_release(self, *, edit_set_id: UUID, outcome: str, adapter: str,

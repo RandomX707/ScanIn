@@ -4,10 +4,10 @@ from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import DBAPIError
 
-from packages.audit.chain import HMACDevelopmentSigner, append_event, signed_daily_digest, verify_chain
+from packages.audit.chain import HMACDevelopmentSigner, append_event, append_events, signed_daily_digest, verify_chain
 from packages.db.tenant import tenant_transaction
 
 pytestmark = pytest.mark.postgres
@@ -26,6 +26,44 @@ def test_concurrent_writers_are_serialized_and_chain_is_contiguous(postgres_engi
     assert sorted(sequences) == list(range(1, count + 1))
     with app.connect() as connection, tenant_transaction(connection, tenant):
         assert verify_chain(connection, tenant) == (True, None)
+
+
+def test_concurrent_multi_event_writers_lock_audit_head_once(postgres_engines, tenant_pair):
+    _, app = postgres_engines
+    tenant = tenant_pair[0]
+    head_lock_statements = []
+
+    def count_head_lock(connection, cursor, statement, parameters, context, executemany):
+        normalized = " ".join(statement.lower().split())
+        if ("select audit_sequence, audit_head_hash from tenants" in normalized
+                and ("for no key update" in normalized or "for update" in normalized)):
+            head_lock_statements.append(normalized)
+
+    event.listen(app, "before_cursor_execute", count_head_lock)
+    try:
+        def write_pair(index: int) -> tuple[int, int]:
+            with app.connect() as connection, tenant_transaction(connection, tenant):
+                # Model row locks normally taken by tenant foreign-key checks
+                # earlier in a release transaction before the audit head moves.
+                connection.execute(text("SELECT id FROM tenants WHERE id=:tenant FOR KEY SHARE"),
+                                   {"tenant": tenant}).one()
+                written = append_events(connection, actor_id="test", events=(
+                    ("document.derived_version_released", f"document:{index}", {"index": index}),
+                    ("document.release_authorized_by_owner", f"document:{index}", {"index": index}),
+                ))
+                assert len(written) == 2
+                return written[0].sequence, written[1].sequence
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            sequences = [number for pair in pool.map(write_pair, range(12)) for number in pair]
+        assert sorted(sequences) == list(range(1, 25))
+        # Two chained events from one release share a single tenant-head lock,
+        # preventing lock-queue self-deadlocks while other writers wait.
+        assert len(head_lock_statements) == 12
+        with app.connect() as connection, tenant_transaction(connection, tenant):
+            assert verify_chain(connection, tenant) == (True, None)
+    finally:
+        event.remove(app, "before_cursor_execute", count_head_lock)
 
 
 def test_event_update_and_delete_are_denied_to_application_role(postgres_engines, tenant_pair):
