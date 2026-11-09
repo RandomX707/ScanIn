@@ -150,4 +150,3 @@ def test_resource_limits_reject_with_stable_reason_codes(monkeypatch):
     profile = CsvAdapter().inspect(b"a\nb\nc\nd\n")
     assert (profile.level, profile.reasons) == ("rejected", ("csv_row_limit_exceeded",))
     assert MAX_CSV_ROWS >= 1_000_000 and MAX_CSV_CELLS >= 2_000_000
-
