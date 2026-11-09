@@ -347,25 +347,28 @@ class DocumentRepository:
 
     def create_manual_field(self, *, document_id: UUID, version_id: UUID, target_id: str,
                             fingerprint: str, label: str, observed_value: dict[str, object],
-                            actor_id: str) -> UUID:
+                            actor_id: str, evidence: list[dict[str, object]] | None = None) -> UUID:
         if not target_id or not fingerprint or len(fingerprint) != 64 or not label.strip():
             raise ValueError("invalid_manual_field")
         result = self.connection.execute(text("""INSERT INTO fields
             (tenant_id,document_id,version_id,label,source,observed_value,target_id,
-             target_fingerprint,created_by)
+             target_fingerprint,evidence,created_by)
             SELECT :tenant,:document,:version,:label,'manual',CAST(:observed AS jsonb),:target,
-                   :fingerprint,:actor
+                   :fingerprint,CAST(:evidence AS jsonb),:actor
             WHERE EXISTS (SELECT 1 FROM documents WHERE tenant_id=:tenant AND id=:document
                           AND current_version_id=:version)
             RETURNING id"""),
             {"tenant": self.tenant_id, "document": document_id, "version": version_id,
              "label": label[:255], "observed": json.dumps(observed_value, sort_keys=True),
-             "target": target_id, "fingerprint": fingerprint, "actor": actor_id})
+             "target": target_id, "fingerprint": fingerprint, "actor": actor_id,
+             "evidence": json.dumps(evidence or [], sort_keys=True)})
         field_id = result.scalar_one_or_none()
         if field_id is None:
             raise ValueError("document_version_changed")
         append_event(connection=self.connection, actor_id=actor_id, action="field.manual_created",
-                     subject=str(field_id), payload={"document_id": str(document_id), "target_id": target_id})
+                     subject=str(field_id), payload={"document_id": str(document_id), "target_id": target_id,
+                                                     "version_id": str(version_id), "target_fingerprint": fingerprint,
+                                                     "anchor_kind": (evidence or [{}])[0].get("kind")})
         return field_id
 
     def list_fields(self, document_id: UUID) -> list[dict[str, object]]:
@@ -396,9 +399,11 @@ class DocumentRepository:
 
     def list_data_corrections(self, document_id: UUID) -> list[dict[str, object]]:
         rows = self.connection.execute(text("""SELECT c.id,c.field_id,c.source_version_id,c.corrected_value,
-            c.reason,c.actor_id,c.created_at,f.label,f.observed_value
+            c.reason,c.actor_id,c.created_at,f.label,f.observed_value,f.target_id,f.target_fingerprint,
+            f.evidence,f.document_id,v.sha256 AS source_sha256
             FROM data_corrections AS c JOIN fields AS f
               ON f.tenant_id=c.tenant_id AND f.id=c.field_id
+            JOIN document_versions AS v ON v.tenant_id=c.tenant_id AND v.id=c.source_version_id
             WHERE c.tenant_id=:tenant AND f.document_id=:document
             ORDER BY c.created_at,c.id"""),
             {"tenant": self.tenant_id, "document": document_id}).mappings()

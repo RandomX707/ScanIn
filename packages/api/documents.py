@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import io
 import json
@@ -42,13 +43,30 @@ from packages.core.planning.planner import PlanError
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 MAX_VIEW_TARGET_OFFSET = 10_000_000
+MAX_TEXT_ANCHOR_CHARS = 500
+TEXT_ANCHOR_CONTEXT_CHARS = 40
 MAX_VIEW_TARGET_LOOKUP = 50
 
 
-class ManualFieldRequest(BaseModel):
+class TextAnchorRequest(BaseModel):
+    """A user selection inside text the server extracted from one immutable source version."""
     model_config = ConfigDict(extra="forbid")
-    target_id: str = Field(min_length=1, max_length=500)
-    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_version_id: UUID
+    kind: str = Field(pattern=r"^(pdf_page|docx_block)$")
+    page: int | None = Field(default=None, ge=1, le=100_000)
+    block_id: str | None = Field(default=None, min_length=1, max_length=300)
+    start: int = Field(ge=0, le=1_000_000)
+    end: int = Field(ge=1, le=1_000_000)
+    text: str = Field(min_length=1, max_length=MAX_TEXT_ANCHOR_CHARS)
+
+
+class ManualFieldRequest(BaseModel):
+    """Exactly one source: a parser-discovered target (editable or not) or a validated text anchor."""
+    model_config = ConfigDict(extra="forbid")
+    target_id: str | None = Field(default=None, min_length=1, max_length=500)
+    fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    text_anchor: TextAnchorRequest | None = None
+    label: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class DataCorrectionRequest(BaseModel):
@@ -487,12 +505,21 @@ def generate_ai_summary(document_id: str, version_id: str, request: Request,
 @router.post("/{document_id}/fields")
 def create_manual_field(document_id: str, payload: ManualFieldRequest, request: Request,
                         identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    """Bind a user-selected field to a current, parser-discovered native target."""
+    """Register a sidecar data-correction field bound to safely inspected source content.
+
+    A field is either a parser-discovered target (native editability is irrelevant: corrections never
+    touch the file) or a text anchor that the server re-extracts and checks against the immutable
+    source. The observed value always comes from the server's own extraction, never from the client.
+    """
     _require_owner(identity)
     try:
         parsed_id = UUID(document_id)
     except ValueError:
         raise APIError(404, "not_found", "The requested document was not found.") from None
+    by_target = payload.target_id is not None or payload.fingerprint is not None
+    if by_target == (payload.text_anchor is not None) or (by_target and (payload.target_id is None or payload.fingerprint is None)):
+        raise APIError(422, "field_source_invalid",
+                       "Provide either target_id and fingerprint, or one text_anchor.")
     storage: ImmutableLocalStorage = request.app.state.document_storage
     with request.app.state.engine.connect() as connection:
         with api_tenant_transaction(connection, identity):
@@ -507,17 +534,35 @@ def create_manual_field(document_id: str, payload: ManualFieldRequest, request: 
             storage.read_original(stored)
             version_id = UUID(str(row["current_version_id"]))
             filename = _filename(str(row["filename"]))
+    anchor = payload.text_anchor
+    if anchor is not None and anchor.source_version_id != version_id:
+        raise APIError(409, "stale_source_version", "The selection was made on a version that is no longer current.")
     try:
-        report = request.app.state.restricted_parser.inspect(stored.path, filename=filename, include_targets=True,
-                                                             target_ids=[payload.target_id])
+        report = request.app.state.restricted_parser.inspect(
+            stored.path, filename=filename, include_targets=anchor is None,
+            target_ids=[payload.target_id] if anchor is None else None)
     except ParserNotVerified:
         raise APIError(503, "target_resolution_not_verified", "Safe target resolution is unavailable.") from None
     if report.sha256 != stored.sha256:
         raise APIError(409, "source_version_changed", "The source version changed during target resolution.")
-    target = next((item for item in report.targets if item.get("id") == payload.target_id), None)
-    if target is None or target.get("editable") is not True or target.get("fingerprint") != payload.fingerprint:
-        raise APIError(409, "target_not_editable_or_stale", "The selected field is unsupported or no longer current.")
-    label = str(target.get("label") or payload.target_id)
+    if report.status != "inspected" or report.adapter not in {"csv", "json", "xlsx", "pdf", "docx"}:
+        raise APIError(409, "document_not_viewable", "This document has no safe viewer, so no field can be anchored in it.")
+    base_evidence = {"source_sha256": report.sha256, "source_version_id": str(version_id), "adapter": report.adapter,
+                     "adapter_version": report.adapter_version}
+    if anchor is None:
+        target = next((item for item in report.targets if item.get("id") == payload.target_id), None)
+        if target is None or target.get("fingerprint") != payload.fingerprint:
+            raise APIError(409, "target_not_found_or_stale", "The selected value is not present in the current source version.")
+        target_id, fingerprint, observed = str(payload.target_id), str(payload.fingerprint), target["value"]
+        label = payload.label or str(target.get("label") or payload.target_id)
+        evidence = {**base_evidence, "kind": "native_target", "target_id": target_id,
+                    "natively_editable": target.get("editable") is True, "native_reason": target.get("reason")}
+    else:
+        target_id, observed, label, evidence = _resolve_text_anchor(report, anchor, payload.label, base_evidence)
+        fingerprint = hashlib.sha256(json.dumps(
+            {"source_sha256": report.sha256, "anchor": target_id, "text": observed["value"]},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        evidence["text_sha256"] = hashlib.sha256(str(observed["value"]).encode()).hexdigest()
     try:
         with request.app.state.engine.connect() as connection:
             with api_tenant_transaction(connection, identity):
@@ -526,12 +571,62 @@ def create_manual_field(document_id: str, payload: ManualFieldRequest, request: 
                 if current is None or str(current.get("current_version_id")) != str(version_id) or current.get("sha256") != stored.sha256:
                     raise APIError(409, "source_version_changed", "The source version changed during target resolution.")
                 field_id = repo.create_manual_field(document_id=parsed_id, version_id=version_id,
-                    target_id=payload.target_id, fingerprint=payload.fingerprint, label=label,
-                    observed_value=target["value"], actor_id=identity.subject)
+                    target_id=target_id, fingerprint=fingerprint, label=label,
+                    observed_value=observed, actor_id=identity.subject, evidence=[evidence])
+    except APIError:
+        raise
     except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
         raise APIError(503, "field_registration_unavailable", "The selected field could not be recorded.") from None
-    return {"field_id": str(field_id), "document_id": str(parsed_id), "target_id": payload.target_id,
-            "label": label, "observed_value": target["value"], "source_version_id": str(version_id)}
+    return {"field_id": str(field_id), "document_id": str(parsed_id), "target_id": target_id,
+            "label": label, "observed_value": observed, "source_version_id": str(version_id),
+            "target_fingerprint": fingerprint, "evidence": [evidence]}
+
+
+def _resolve_text_anchor(report: Any, anchor: TextAnchorRequest, label: str | None,
+                         base_evidence: dict[str, Any]) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
+    """Validate a text selection against the text the restricted parser extracted from the source."""
+    details = report.details or {}
+    if anchor.end <= anchor.start or anchor.end - anchor.start > MAX_TEXT_ANCHOR_CHARS:
+        raise APIError(422, "text_anchor_out_of_range", "The selection must cover 1 to 500 characters.")
+    if anchor.kind == "pdf_page":
+        if report.adapter != "pdf" or anchor.page is None or anchor.block_id is not None:
+            raise APIError(422, "text_anchor_not_supported", "A PDF page anchor needs a PDF document and a page number.")
+        page = next((item for item in details.get("pages", []) if item.get("page") == anchor.page), None)
+        if page is None:
+            raise APIError(422, "text_anchor_out_of_range", "The selected page does not exist in this source.")
+        if page.get("scanned_or_image_only") or not str(page.get("text", "")).strip():
+            raise APIError(422, "text_not_extractable",
+                           "This page has no extractable text layer. OCR is not enabled, so no text can be anchored.")
+        text = str(page["text"])
+        target_id = f"text:pdf:page:{anchor.page}:{anchor.start}-{anchor.end}"
+        location: dict[str, Any] = {"page": anchor.page}
+        extraction = "pdfium_text_layer"
+        default_label = f"Page {anchor.page} text"
+    else:
+        if report.adapter != "docx" or anchor.block_id is None or anchor.page is not None:
+            raise APIError(422, "text_anchor_not_supported", "A Word anchor needs a DOCX document and a text block.")
+        block = next((item for item in details.get("blocks", []) if item.get("id") == anchor.block_id), None)
+        if block is None:
+            raise APIError(422, "text_anchor_out_of_range", "The selected text block does not exist in this source.")
+        text = str(block.get("text", ""))
+        target_id = f"text:docx:{anchor.block_id}:{anchor.start}-{anchor.end}"
+        location = {"block_id": anchor.block_id, "part": block.get("part"), "paragraph_index": block.get("paragraph_index"),
+                    "block_kind": block.get("kind")}
+        extraction = "docx_w_t_runs_excluding_deleted_text"
+        default_label = f"{str(block.get('kind', 'paragraph')).replace('_', ' ').capitalize()} text"
+    if anchor.end > len(text):
+        raise APIError(422, "text_anchor_out_of_range", "The selection extends beyond the extracted source text.")
+    selected = text[anchor.start:anchor.end]
+    if selected != anchor.text:
+        raise APIError(409, "text_selection_mismatch", "The selected text does not match the immutable source at that location.")
+    if not selected.strip():
+        raise APIError(422, "text_selection_empty", "Select visible text, not only whitespace.")
+    observed = {"type": "string", "value": selected, "native": selected, "display": None}
+    evidence = {**base_evidence, "kind": "text_selection", "anchor_kind": anchor.kind, "location": location,
+                "start": anchor.start, "end": anchor.end, "extraction": extraction,
+                "context_before": text[max(0, anchor.start - TEXT_ANCHOR_CONTEXT_CHARS):anchor.start],
+                "context_after": text[anchor.end:anchor.end + TEXT_ANCHOR_CONTEXT_CHARS]}
+    return target_id, observed, label or default_label, evidence
 
 
 @router.get("/{document_id}/fields")

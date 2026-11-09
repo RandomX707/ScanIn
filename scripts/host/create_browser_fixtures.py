@@ -40,6 +40,21 @@ def create_pdf() -> bytes:
     return output.getvalue()
 
 
+def create_text_only_pdf() -> bytes:
+    """A digital PDF with an extractable text layer and no AcroForm fields (read-only, text-anchorable)."""
+    output = io.BytesIO()
+    pdf = canvas.Canvas(output, pagesize=(612, 792))
+    pdf.setTitle("Synthetic Channel360 invoice without form fields")
+    pdf.drawString(42, 748, "Synthetic Repair Invoice")
+    pdf.drawString(42, 720, "Invoice number: INV-SYN-50417")
+    pdf.drawString(42, 700, "Insured: Meera Iyer")
+    pdf.drawString(42, 680, "Amount due: INR 18,250.00")
+    pdf.drawString(42, 650, "Demonstration data only")
+    pdf.showPage()
+    pdf.save()
+    return output.getvalue()
+
+
 def create_docx() -> bytes:
     document = Document()
     document.add_heading("Synthetic Claim Summary", level=1)
@@ -151,6 +166,7 @@ def main() -> None:
     (output / "synthetic-certified.pdf").write_bytes(create_restricted_pdf("certified"))
     (output / "synthetic-signed.pdf").write_bytes(create_restricted_pdf("signed"))
     (output / "synthetic-scanned.pdf").write_bytes(create_scanned_pdf())
+    (output / "synthetic-invoice-no-fields.pdf").write_bytes(create_text_only_pdf())
     (output / "synthetic-claim.docx").write_bytes(create_docx())
     (output / "synthetic-tracked-changes.docx").write_bytes(create_tracked_change_docx())
 
