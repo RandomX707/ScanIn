@@ -94,9 +94,21 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         if windowed:
             total = source_adapter.target_count(data)
         else:
-            safe_targets = [target for target in source_adapter.targets(data) if target.editable]
-            rejected_targets = source_adapter.unsupported_targets(data)
-            all_targets = safe_targets + rejected_targets
+            # Every parser-discovered value stays viewable (and eligible for sidecar corrections) with
+            # its real editable flag and reason. Order is unchanged for existing documents: editable
+            # targets, then unsupported targets, then read-only values that only targets() reports
+            # (for example locked cells on protected sheets or unsupported list validation), each id
+            # exactly once. Adapters never emit targets for cells without a parsed value.
+            adapter_targets = source_adapter.targets(data)
+            ordered = ([target for target in adapter_targets if target.editable]
+                       + list(source_adapter.unsupported_targets(data))
+                       + [target for target in adapter_targets if not target.editable])
+            seen_ids: set[str] = set()
+            all_targets = []
+            for target in ordered:
+                if target.id not in seen_ids:
+                    seen_ids.add(target.id)
+                    all_targets.append(target)
             total = len(all_targets)
         if target_ids is not None:
             wanted = set(target_ids)

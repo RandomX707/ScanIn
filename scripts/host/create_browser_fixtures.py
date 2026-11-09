@@ -106,6 +106,47 @@ def create_sections_docx() -> bytes:
     return output.getvalue()
 
 
+def create_readonly_values_xlsx() -> bytes:
+    """One workbook with every kind of read-only XLSX value next to a normal editable cell (B-1).
+
+    Claim!A2/B2 editable; B3 formula; B4 inline rich text; B5 time of day; B6 list validation whose
+    source is not a literal list or plain range (unsupported). Locked!A1 is locked on a protected
+    sheet, Locked!A2 is explicitly unlocked on the same sheet."""
+    from datetime import time as time_of_day
+    from openpyxl import Workbook
+    from openpyxl.styles import Protection
+    from openpyxl.worksheet.datavalidation import DataValidation
+    workbook = Workbook()
+    claim = workbook.active
+    claim.title = "Claim"
+    claim["A1"], claim["B1"] = "Field", "Value"
+    claim["A2"], claim["B2"] = "Insured", "Meera Iyer"
+    claim["A3"], claim["B3"] = "Name length", "=LEN(B2)"
+    claim["A4"], claim["B4"] = "Remark", "RICH_PLACEHOLDER"
+    claim["A5"], claim["B5"] = "Survey time", time_of_day(15, 30)
+    claim["B5"].number_format = "h:mm"
+    claim["A6"], claim["B6"] = "Status", "Pending"
+    validation = DataValidation(type="list", formula1="OFFSET($A$1,0,0,3,1)", allow_blank=False)
+    claim.add_data_validation(validation)
+    validation.add("B6")
+    locked = workbook.create_sheet("Locked")
+    locked["A1"] = "Locked reserve amount"
+    locked["A2"] = "Unlocked adjuster note"
+    locked["A2"].protection = Protection(locked=False)
+    locked.protection.sheet = True
+    output = io.BytesIO()
+    workbook.save(output)
+
+    def edit(name: str, data: bytes) -> bytes:
+        if name != "xl/worksheets/sheet1.xml":
+            return data
+        start = data.find(b'<c r="B4"')
+        end = data.find(b"</c>", start) + 4
+        return data[:start] + (b'<c r="B4" t="inlineStr"><is><r><rPr><b/></rPr><t>Urgent:</t></r>'
+                               b'<r><t xml:space="preserve"> tow required</t></r></is></c>') + data[end:]
+    return _rewrite_zip(output.getvalue(), edit)
+
+
 def create_docx() -> bytes:
     document = Document()
     document.add_heading("Synthetic Claim Summary", level=1)
@@ -221,6 +262,7 @@ def main() -> None:
     (output / "synthetic-rich-text.xlsx").write_bytes(create_rich_text_xlsx())
     (output / "synthetic-macro.xlsm").write_bytes(create_macro_xlsm())
     (output / "synthetic-sections.docx").write_bytes(create_sections_docx())
+    (output / "synthetic-readonly-values.xlsx").write_bytes(create_readonly_values_xlsx())
     (output / "synthetic-claim.docx").write_bytes(create_docx())
     (output / "synthetic-tracked-changes.docx").write_bytes(create_tracked_change_docx())
 
