@@ -66,10 +66,10 @@ def test_inspect_rejects_encrypted_and_marks_macro_workbooks_read_only(workbook_
 def test_patch_plan_is_frozen_and_preflight_rejects_stale_source(workbook_path: Path):
     adapter = XlsxAdapter()
     source = workbook_path.read_bytes()
-    plan = create_plan(adapter, source, "G2", TypedValue("string", "updated"))
+    plan = create_plan(adapter, source, "G2", TypedValue("string", "unsafe"))
     with pytest.raises((FrozenInstanceError, AttributeError, TypeError)):
         plan.source_sha256 = "tampered"  # type: ignore[misc]
-    fresh = create_plan(adapter, source, "G2", TypedValue("string", "newer version"))
+    fresh = create_plan(adapter, source, "G2", TypedValue("string", "unsafe"))
     changed = adapter.apply(source, fresh)
     assert changed is not None
     with pytest.raises(PlanError, match="stale_source"):
@@ -100,7 +100,7 @@ def test_shared_string_target_changes_without_touching_shared_table_or_other_cel
 def test_safe_edit_verifies_and_preserves_unmodified_package_parts(workbook_path: Path):
     adapter = XlsxAdapter()
     source = workbook_path.read_bytes()
-    plan = create_plan(adapter, source, "G2", TypedValue("string", "confirmed"))
+    plan = create_plan(adapter, source, "G2", TypedValue("string", "unsafe"))
     output = adapter.apply(source, plan)
     report = IndependentVerifier().verify(source, output, plan)
     assert report.outcome == "VERIFIED"
@@ -111,7 +111,7 @@ def test_apply_is_deterministic_and_never_mutates_source(workbook_path: Path):
     adapter = XlsxAdapter()
     source = workbook_path.read_bytes()
     source_hash = hashlib.sha256(source).hexdigest()
-    plan = create_plan(adapter, source, "G2", TypedValue("string", "repeatable"))
+    plan = create_plan(adapter, source, "G2", TypedValue("string", "unsafe"))
     first, second = adapter.apply(source, plan), adapter.apply(source, plan)
     assert first == second
     assert hashlib.sha256(source).hexdigest() == source_hash
@@ -199,7 +199,7 @@ def test_formula_rich_text_array_targets_rejected_by_preflight(workbook_path: Pa
 def test_candidate_cannot_expand_frozen_change_manifest(workbook_path: Path):
     adapter = XlsxAdapter()
     source = workbook_path.read_bytes()
-    plan = create_plan(adapter, source, "G2", TypedValue("string", "confirmed"))
+    plan = create_plan(adapter, source, "G2", TypedValue("string", "unsafe"))
     candidate = adapter.apply(source, plan)
     assert candidate is not None
     with ZipFile(__import__("io").BytesIO(candidate)) as z:
@@ -216,7 +216,7 @@ def test_candidate_cannot_expand_frozen_change_manifest(workbook_path: Path):
 def test_verifier_rejects_a_plan_changed_after_freeze(workbook_path: Path):
     adapter = XlsxAdapter()
     source = workbook_path.read_bytes()
-    plan = create_plan(adapter, source, "G2", TypedValue("string", "confirmed"))
+    plan = create_plan(adapter, source, "G2", TypedValue("string", "unsafe"))
     candidate = adapter.apply(source, plan)
     tampered_plan = replace(plan, permitted_changes=())
     report = IndependentVerifier().verify(source, candidate, tampered_plan)
@@ -231,6 +231,74 @@ def test_rejects_rich_text_and_array_formula_targets(workbook_path: Path):
     assert any(t.cell == "H2" and t.reason == "formula_cell" for t in unsupported)
     assert any(t.cell == "J2" and t.reason == "rich_text" for t in unsupported)
     assert any(t.cell == "K2" and t.reason == "array_formula" for t in unsupported)
+
+
+def test_protected_worksheet_only_exposes_unlocked_cells(tmp_path: Path):
+    from openpyxl import Workbook
+    from openpyxl.styles import Protection
+    path = tmp_path / "protected.xlsx"
+    wb = Workbook(); ws = wb.active; ws.title = "Claim"
+    ws["A1"] = "Locked"; ws["B1"] = "Unlocked"
+    ws["B1"].protection = Protection(locked=False)
+    ws.protection.sheet = True
+    wb.save(path)
+    adapter = XlsxAdapter(); source = path.read_bytes()
+    locked, unlocked = target(adapter, source, "A1"), target(adapter, source, "B1")
+    assert not locked.editable and locked.reason == "protected_cell_locked"
+    assert unlocked.editable
+    patch = Patch(unlocked.version_id, locked.id, locked.value, locked.fingerprint,
+                  TypedValue("string", "changed"))
+    with pytest.raises(PlanError, match="protected_cell_locked"):
+        build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": "protected-cell"})
+
+
+def test_list_validation_rejects_invalid_and_accepts_valid_value(tmp_path: Path):
+    from openpyxl import Workbook
+    from openpyxl.worksheet.datavalidation import DataValidation
+    path = tmp_path / "dropdown.xlsx"
+    wb = Workbook(); ws = wb.active; ws.title = "Claim"
+    ws["A1"] = "Status"; ws["B1"] = "Pending"
+    validation = DataValidation(type="list", formula1='"Pending,Approved,Rejected"')
+    ws.add_data_validation(validation); validation.add(ws["B1"])
+    wb.save(path)
+    adapter = XlsxAdapter(); source = path.read_bytes(); item = target(adapter, source, "B1")
+    invalid = Patch(item.version_id, item.id, item.value, item.fingerprint, TypedValue("string", "Invalid"))
+    with pytest.raises(PlanError, match="data_validation_value_invalid"):
+        build_patch_plan(adapter, source, [invalid], provenance={"edit_set_id": "invalid-list"})
+    valid = Patch(item.version_id, item.id, item.value, item.fingerprint, TypedValue("string", "Approved"))
+    plan = build_patch_plan(adapter, source, [valid], provenance={"edit_set_id": "valid-list"})
+    output = adapter.apply(source, plan)
+    assert IndependentVerifier().verify(source, output, plan).outcome == "VERIFIED"
+
+
+def test_range_list_validation_is_resolved_without_formula_execution(tmp_path: Path):
+    from openpyxl import Workbook
+    from openpyxl.worksheet.datavalidation import DataValidation
+    path = tmp_path / "range-dropdown.xlsx"
+    wb = Workbook(); ws = wb.active; ws.title = "Claim"
+    lookups = wb.create_sheet("Lookups"); lookups["A1"] = "Open"; lookups["A2"] = "Closed"
+    ws["B1"] = "Open"
+    validation = DataValidation(type="list", formula1="'Lookups'!$A$1:$A$2")
+    ws.add_data_validation(validation); validation.add(ws["B1"])
+    wb.save(path)
+    adapter = XlsxAdapter(); source = path.read_bytes(); item = target(adapter, source, "B1")
+    invalid = Patch(item.version_id, item.id, item.value, item.fingerprint, TypedValue("string", "Unknown"))
+    with pytest.raises(PlanError, match="data_validation_value_invalid"):
+        build_patch_plan(adapter, source, [invalid], provenance={"edit_set_id": "invalid-range-list"})
+    valid = Patch(item.version_id, item.id, item.value, item.fingerprint, TypedValue("string", "Closed"))
+    assert build_patch_plan(adapter, source, [valid], provenance={"edit_set_id": "valid-range-list"})
+
+
+def test_unsupported_list_validation_is_read_only(tmp_path: Path):
+    from openpyxl import Workbook
+    from openpyxl.worksheet.datavalidation import DataValidation
+    path = tmp_path / "ambiguous-dropdown.xlsx"
+    wb = Workbook(); ws = wb.active; ws.title = "Claim"; ws["B1"] = "Allowed"
+    validation = DataValidation(type="list", formula1="=INDIRECT(A1)")
+    ws.add_data_validation(validation); validation.add(ws["B1"])
+    wb.save(path)
+    source = path.read_bytes(); item = target(XlsxAdapter(), source, "B1")
+    assert not item.editable and item.reason == "unsupported_data_validation"
 
 
 @pytest.mark.parametrize("value", [TypedValue("integer", 1234567890123456), TypedValue("date", "2026-11-06"), TypedValue("boolean", False)])

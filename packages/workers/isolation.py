@@ -60,32 +60,51 @@ class RestrictedSubprocess:
 
     @staticmethod
     def mac_profile(project_root: str | Path, input_path: str | Path | None,
-                    executable: str | Path | None = None) -> str:
+                    executable: str | Path | None = None, *,
+                    read_paths: Sequence[str | Path] = (), write_paths: Sequence[str | Path] = (),
+                    executable_paths: Sequence[str | Path] = ()) -> str:
         root = Path(project_root).resolve()
         paths = [
             Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve(), root / "packages",
             Path("/System/Library"), Path("/usr/lib"), Path("/usr/share/zoneinfo"), Path("/dev"),
         ]
-        if input_path is not None:
-            paths.append(Path(input_path).resolve())
+        input_resolved = Path(input_path).resolve() if input_path is not None else None
+        paths.extend(item for path in read_paths for item in (Path(path).absolute(), Path(path).resolve()))
+        paths.extend(Path(path).resolve() for path in write_paths)
+        if input_resolved is not None:
+            paths.append(input_resolved)
         escaped = [p.as_posix().replace("\\", "\\\\").replace('"', '\\"') for p in paths]
         project_root_path = root.as_posix().replace("\\", "\\\\").replace('"', '\\"')
         executable_path = Path(executable or sys.executable).resolve().as_posix().replace('"', '\\"')
         framework_helper = Path(sys.base_prefix) / "Resources/Python.app/Contents/MacOS/Python"
         process_rules = [f'(allow process-exec (literal "{executable_path}"))']
+        process_rules.extend(
+            f'(allow process-exec (literal "{Path(path).resolve().as_posix()}"))'
+            for path in executable_paths
+        )
         metadata_paths = {executable_path, project_root_path, *escaped}
+        if input_resolved is not None:
+            metadata_paths.add(input_resolved.as_posix())
+        metadata_paths.update(Path(path).resolve().as_posix() for path in write_paths)
         if framework_helper.is_file():
             helper_path = framework_helper.resolve().as_posix().replace('"', '\\"')
             helper_directory = framework_helper.parent.resolve().as_posix().replace('"', '\\"')
             metadata_paths.add(helper_path)
             process_rules.append(f'(allow process-exec (subpath "{helper_directory}"))')
-        metadata_rules = "(allow file-read-metadata file-test-existence " + " ".join(
-            f'(path-ancestors "{path}")' for path in sorted(metadata_paths)
-        ) + ")"
-        read_rules = " ".join(f'(subpath "{path}")' for path in escaped[:-1])
+        metadata_entries = [f'(path-ancestors "{path}")' for path in sorted(metadata_paths)]
+        if input_resolved is not None:
+            metadata_entries.append(f'(literal "{input_resolved.as_posix()}")')
+        metadata_rules = "(allow file-read-metadata file-test-existence " + " ".join(metadata_entries) + ")"
+        read_roots = [Path(path).as_posix().replace('"', '\\"') for path in paths[:7]]
+        for path in read_paths:
+            read_roots.extend(candidate.as_posix().replace('"', '\\"')
+                              for candidate in (Path(path).absolute(), Path(path).resolve()))
+        read_rules = " ".join(f'(subpath "{path}")' for path in read_roots)
         read_rules += f' (literal "{project_root_path}")'
         if input_path is not None:
-            read_rules += f' (literal "{escaped[-1]}")'
+            literal_input = input_resolved.as_posix().replace('"', '\\"')
+            read_rules += f' (literal "{literal_input}")'
+        write_rules = " ".join(f'(subpath "{Path(path).resolve().as_posix()}")' for path in write_paths)
         return "\n".join((
             "(version 1)",
             '(import "dyld-support.sb")',
@@ -95,10 +114,14 @@ class RestrictedSubprocess:
             "(allow process-fork)",
             "(allow sysctl-read)",
             f"(allow file-read* {read_rules})",
+            *( [f"(allow file-write* {write_rules})"] if write_rules else [] ),
             "(deny network*)",
         ))
 
-    def build_command(self, argv: Sequence[str], *, input_path: str | Path | None = None) -> RestrictedCommand:
+    def build_command(self, argv: Sequence[str], *, input_path: str | Path | None = None,
+                      read_paths: Sequence[str | Path] = (), write_paths: Sequence[str | Path] = (),
+                      executable_paths: Sequence[str | Path] = (),
+                      environment_overrides: dict[str, str] | None = None) -> RestrictedCommand:
         if not argv or any("\x00" in item for item in argv):
             raise ValueError("invalid_worker_command")
         if os.geteuid() == 0:
@@ -114,12 +137,18 @@ class RestrictedSubprocess:
                 [str(self.project_root), *(site.getsitepackages() if self.platform_name == "darwin" else [])]
             ),
         }
+        if environment_overrides:
+            if set(environment_overrides) - {"PATH", "TMPDIR"}:
+                raise ValueError("restricted_worker_environment_override_not_allowed")
+            environment.update(environment_overrides)
         if self.platform_name == "darwin":
             if not Path(self.sandbox_exec).is_file():
                 raise IsolationUnavailable("restricted_worker_unavailable:macos_sandbox_exec_missing")
             canonical_argv = (str(Path(argv[0]).resolve()), *argv[1:])
             executable = canonical_argv[0]
-            profile = self.mac_profile(self.project_root, source, executable)
+            profile = self.mac_profile(self.project_root, source, executable,
+                                       read_paths=read_paths, write_paths=write_paths,
+                                       executable_paths=executable_paths)
             command = (self.sandbox_exec, "-p", profile, *canonical_argv)
             return RestrictedCommand(command, profile, source, tuple(sorted(environment.items())))
         if self.platform_name.startswith("linux"):
@@ -146,6 +175,9 @@ class RestrictedSubprocess:
                 command.extend(["--ro-bind", str(cache), str(cache)])
             if source is not None:
                 command.extend(["--ro-bind", source, "/tmp/idw-source"])
+            for index, path in enumerate(write_paths):
+                command.extend(["--dir", f"/tmp/idw-write-{index}", "--bind", str(Path(path).resolve()),
+                                f"/tmp/idw-write-{index}"])
             sandbox_argv = list(argv)
             try:
                 relative_executable = Path(sandbox_argv[0]).resolve().relative_to(prefix)
@@ -159,10 +191,14 @@ class RestrictedSubprocess:
         raise IsolationUnavailable("restricted_worker_unavailable:unsupported_platform")
 
     def run(self, argv: Sequence[str], *, input_path: str | Path | None = None,
-            timeout_seconds: int = 30) -> RestrictedResult:
+            timeout_seconds: int = 30, read_paths: Sequence[str | Path] = (),
+            write_paths: Sequence[str | Path] = (), executable_paths: Sequence[str | Path] = (),
+            environment_overrides: dict[str, str] | None = None) -> RestrictedResult:
         if timeout_seconds < 1:
             raise ValueError("timeout_must_be_positive")
-        plan = self.build_command(argv, input_path=input_path)
+        plan = self.build_command(argv, input_path=input_path, read_paths=read_paths,
+                                  write_paths=write_paths, executable_paths=executable_paths,
+                                  environment_overrides=environment_overrides)
         env = dict(plan.environment)
         profile_file = None
         command = list(plan.command)

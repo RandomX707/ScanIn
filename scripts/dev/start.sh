@@ -39,7 +39,7 @@ IDW_CLAMAV_SOCKET_PATH=${IDW_CLAMAV_SOCKET_PATH:-/opt/homebrew/var/run/clamav/cl
 export IDW_CLAMAV_SOCKET_PATH
 [ -S "$IDW_CLAMAV_SOCKET_PATH" ] || fail "ClamAV socket is unavailable: $IDW_CLAMAV_SOCKET_PATH"
 
-IDW_WEB_PORT=${IDW_WEB_PORT:-5173}
+IDW_WEB_PORT=${IDW_WEB_PORT:-5174}
 export IDW_WEB_PORT
 for port in 8000 "$IDW_WEB_PORT"; do
   if curl --silent --max-time 1 "http://127.0.0.1:$port/" >/dev/null 2>&1; then
@@ -101,7 +101,7 @@ nohup .venv/bin/uvicorn packages.api.app:create_app --factory --host 127.0.0.1 -
 echo $! > "$API_PID"
 nohup env -u PGPASSFILE -u IDW_DATABASE_URL -u IDW_WORKER_DATABASE_URL \
   -u IDW_MIGRATION_DATABASE_URL -u IDW_DEVELOPMENT_AUTH_SECRET \
-  sh -c 'cd "$1" && exec ./node_modules/.bin/vite --host 127.0.0.1 --port "$2" --strictPort' \
+  sh -c 'cd "$1" && exec ./node_modules/.bin/vite --force --host 127.0.0.1 --port "$2" --strictPort' \
   sh "$ROOT/apps/web" "$IDW_WEB_PORT" >"$RUNTIME/web.log" 2>&1 &
 echo $! > "$WEB_PID"
 

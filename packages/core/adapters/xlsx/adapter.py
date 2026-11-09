@@ -95,9 +95,32 @@ def _shared_strings(parts: dict[str, tuple[zipfile.ZipInfo, bytes]]) -> tuple[li
     return strings, rich
 
 
-def _date_styles(parts: dict[str, tuple[zipfile.ZipInfo, bytes]]) -> set[int]:
+_BUILTIN_DATE_KINDS = {**{fmt: "date" for fmt in (*range(14, 18), *range(27, 37), *range(50, 59))},
+                       **{fmt: "time" for fmt in (18, 19, 20, 21, 45, 46, 47)}, 22: "datetime"}
+
+
+def _format_kind(fmt_id: int, code: str) -> str | None:
+    """'date', 'datetime' or 'time' for a date/time number format, otherwise None."""
+    if fmt_id in _BUILTIN_DATE_KINDS:
+        return _BUILTIN_DATE_KINDS[fmt_id]
+    if not code or not is_date_format(code):
+        return None
+    cleaned = re.sub(r'"[^"]*"|\\.|_.|\*.', "", code.split(";")[0]).lower()
+    elapsed = bool(re.search(r"\[(?:h+|m+|s+)\]", cleaned))
+    cleaned = re.sub(r"\[[^\]]*\]", "", cleaned)
+    has_time = elapsed or bool(re.search(r"[hs]|am/pm|a/p", cleaned))
+    has_date = bool(re.search(r"[yd]", cleaned)) or (not has_time and "m" in cleaned)
+    if has_date and has_time:
+        return "datetime"
+    if has_time:
+        return "time"
+    return "date" if has_date else None
+
+
+def _date_styles(parts: dict[str, tuple[zipfile.ZipInfo, bytes]]) -> dict[int, str]:
+    """Map cellXfs style index -> 'date' | 'datetime' | 'time' for date/time number formats."""
     if "xl/styles.xml" not in parts:
-        return set()
+        return {}
     styles = _xml(parts["xl/styles.xml"][1])
     custom: dict[int, str] = {}
     for n in styles.xpath("./m:numFmts/m:numFmt", namespaces=NS):
@@ -105,18 +128,57 @@ def _date_styles(parts: dict[str, tuple[zipfile.ZipInfo, bytes]]) -> set[int]:
             custom[int(n.get("numFmtId", "0"))] = n.get("formatCode", "")
         except ValueError:
             continue
-    ids: set[int] = set()
+    kinds: dict[int, str] = {}
     for i, xf in enumerate(styles.xpath("./m:cellXfs/m:xf", namespaces=NS)):
         try:
             fmt = int(xf.get("numFmtId", "0"))
         except ValueError:
             continue
-        if 14 <= fmt <= 22 or 27 <= fmt <= 36 or 45 <= fmt <= 47 or 50 <= fmt <= 58 or is_date_format(custom.get(fmt, "")):
-            ids.add(i)
-    return ids
+        kind = _format_kind(fmt, custom.get(fmt, ""))
+        if kind:
+            kinds[i] = kind
+    return kinds
 
 
-def _cell_value(cell: etree._Element, shared: list[str], rich: set[int], dates: set[int], epoch) -> tuple[TypedValue | None, str | None]:
+def _rich_text_value(cell: etree._Element, shared: list[str]) -> TypedValue:
+    """Plain text of a rich-text cell (all runs concatenated) for display and sidecar corrections.
+
+    The cell stays read-only for native editing: rewriting it would drop its run formatting."""
+    if cell.get("t") == "s":
+        try:
+            return TypedValue("string", shared[int(cell.findtext(f"{{{MAIN}}}v") or "")], native=cell.findtext(f"{{{MAIN}}}v"))
+        except (ValueError, IndexError):
+            return TypedValue("null", None)
+    inline = cell.find(f"{{{MAIN}}}is")
+    text_value = "".join(inline.xpath(".//m:t/text()", namespaces=NS)) if inline is not None else ""
+    return TypedValue("string", text_value, native=text_value)
+
+
+def _date_time_value(number: Decimal, raw: str, kind: str, epoch) -> tuple[TypedValue | None, str | None]:
+    """Type a date/time-formatted serial without losing its fractional day or adding a timezone.
+
+    The raw serial is kept as the native representation. Excel's fictitious 29 Feb 1900 (serials
+    60 <= n < 61 in the 1900 system) does not round-trip and is rejected as ambiguous."""
+    if number < 0 or (epoch == WINDOWS_EPOCH and 60 <= number < 61):
+        return None, "ambiguous_excel_date_serial"
+    try:
+        parsed = from_excel(float(number), epoch=epoch)
+    except (ValueError, OverflowError):
+        return None, "invalid_date"
+    has_time = number != number.to_integral_value()
+    if kind == "time":
+        if number < 1:
+            # A time of day with no date. Shown as a value, but there is no safe native writer for it.
+            return TypedValue("time", parsed.isoformat(), native=raw), "time_value_read_only"
+        return TypedValue("datetime", parsed.isoformat(), native=raw), "ambiguous_time_format"
+    if not isinstance(parsed, datetime):
+        return None, "ambiguous_excel_date_serial"
+    if kind == "datetime" or has_time:
+        return TypedValue("datetime", parsed.isoformat(), native=raw), None
+    return TypedValue("date", parsed.date().isoformat(), native=raw), None
+
+
+def _cell_value(cell: etree._Element, shared: list[str], rich: set[int], dates: dict[int, str], epoch) -> tuple[TypedValue | None, str | None]:
     f = cell.find(f"{{{MAIN}}}f")
     if f is not None:
         return None, "array_formula" if f.get("t") in {"array", "dataTable"} else "formula_cell"
@@ -159,14 +221,13 @@ def _cell_value(cell: etree._Element, shared: list[str], rich: set[int], dates: 
         return None, "invalid_number"
     style = int(cell.get("s", "0")) if cell.get("s", "0").isdigit() else 0
     if style in dates:
-        parsed = from_excel(float(number), epoch=epoch)
-        as_date = parsed.date().isoformat() if isinstance(parsed, datetime) else parsed.isoformat()
-        return TypedValue("date", as_date, native=raw), None
+        return _date_time_value(number, raw, dates[style], epoch)
     if number == number.to_integral_value() and "e" not in raw.lower() and "." not in raw:
         return TypedValue("integer", int(number), native=raw), None
     return TypedValue("decimal", float(number), native=raw), None
 
 
+READ_ONLY_DATE_TIME_REASONS = frozenset({"time_value_read_only", "ambiguous_time_format"})
 CELL_REF = re.compile(r"(?:(?:'((?:[^']|'')+)'|([A-Za-z_][A-Za-z0-9_. ]*))!)?(\$?[A-Z]{1,3}\$?[1-9][0-9]*)(?::(\$?[A-Z]{1,3}\$?[1-9][0-9]*))?", re.I)
 UNSAFE_FORMULA = re.compile(r"\b(?:INDIRECT|OFFSET)\s*\(|\[[^\]]+\]|\bR\[?-?\d", re.I)
 CELL_COORD = re.compile(r"^\$?([A-Z]{1,3})\$?([1-9][0-9]*)$", re.I)
@@ -177,6 +238,90 @@ def _column_index(text: str) -> int:
     for char in text.upper():
         out = out * 26 + ord(char) - 64
     return out
+
+
+def _covers(first: str, last: str, cell: str) -> bool:
+    a, b, x = CELL_COORD.match(first), CELL_COORD.match(last), CELL_COORD.match(cell)
+    if not (a and b and x):
+        return False
+    col, row = _column_index(x.group(1)), int(x.group(2))
+    low_col, high_col = sorted((_column_index(a.group(1)), _column_index(b.group(1))))
+    low_row, high_row = sorted((int(a.group(2)), int(b.group(2))))
+    return low_col <= col <= high_col and low_row <= row <= high_row
+
+
+def _column_letters(index: int) -> str:
+    letters = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def _shift_reference(token: str, row_delta: int, col_delta: int) -> str | None:
+    """Move a relative A1 reference as Excel does for shared formulas; $-anchored parts stay fixed."""
+    match = re.fullmatch(r"(\$?)([A-Z]{1,3})(\$?)([1-9][0-9]*)", token, re.I)
+    if not match:
+        return None
+    col = _column_index(match.group(2)) + (0 if match.group(1) else col_delta)
+    row = int(match.group(4)) + (0 if match.group(3) else row_delta)
+    if not (1 <= col <= 16384 and 1 <= row <= 1048576):
+        return None
+    return f"{match.group(1)}{_column_letters(col)}{match.group(3)}{row}"
+
+
+def _translate_shared_formula(master_text: str, master_ref: str, cell_ref: str) -> str | None:
+    """Text of a shared-formula child derived from its master; None when it cannot be translated safely."""
+    master, child = CELL_COORD.match(master_ref), CELL_COORD.match(cell_ref)
+    if not (master and child):
+        return None
+    row_delta = int(child.group(2)) - int(master.group(2))
+    col_delta = _column_index(child.group(1)) - _column_index(master.group(1))
+    failed = False
+
+    def shift(match: re.Match) -> str:
+        nonlocal failed
+        prefix = match.group(0)[:match.start(3) - match.start(0)]
+        first = _shift_reference(match.group(3), row_delta, col_delta)
+        last = _shift_reference(match.group(4), row_delta, col_delta) if match.group(4) else None
+        if first is None or (match.group(4) and last is None):
+            failed = True
+            return match.group(0)
+        return prefix + first + (f":{last}" if last else "")
+
+    translated = CELL_REF.sub(shift, master_text)
+    return None if failed else translated
+
+
+class _FormulaGraph:
+    """Reverse dependency graph over supported formula references (all sheets).
+
+    ``dependents_of(sheet, cell)`` returns every formula cell that depends on the cell directly or
+    through other formulas (breadth-first, visited set, so cycles terminate). No formula is evaluated.
+    """
+
+    def __init__(self, refs: list[tuple[str, str, str, str]]):
+        self.refs = refs
+        self._direct: dict[tuple[str, str], frozenset[str]] = {}
+
+    def direct(self, sheet: str, cell: str) -> frozenset[str]:
+        key = (sheet, cell.replace("$", "").upper())
+        if key not in self._direct:
+            self._direct[key] = frozenset(formula_id for target_sheet, first, last, formula_id in self.refs
+                                          if target_sheet == sheet and _covers(first, last, key[1]))
+        return self._direct[key]
+
+    def dependents_of(self, sheet: str, cell: str) -> set[str]:
+        seen: set[str] = set()
+        queue = list(self.direct(sheet, cell))
+        while queue:
+            formula_id = queue.pop(0)
+            if formula_id in seen:
+                continue
+            seen.add(formula_id)
+            formula_sheet, formula_cell = formula_id.rsplit("!", 1)
+            queue.extend(item for item in self.direct(formula_sheet, formula_cell) if item not in seen)
+        return seen
 
 
 def _formula_references(formula: str, own_sheet: str) -> tuple[list[tuple[str, str, str]], bool]:
@@ -226,6 +371,18 @@ def _resolve_names(formula: str, own_sheet: str, names: dict[str, str]) -> str:
             continue
         clean = re.sub(rf"(?<![A-Za-z0-9_.]){re.escape(bare)}(?![A-Za-z0-9_.])", f"({names[name]})", clean, flags=re.I)
     return clean
+
+
+def _unlocked_styles(parts: dict[str, tuple[zipfile.ZipInfo, bytes]]) -> set[int]:
+    if "xl/styles.xml" not in parts:
+        return set()
+    styles = _xml(parts["xl/styles.xml"][1])
+    unlocked: set[int] = set()
+    for index, xf in enumerate(styles.xpath("./m:cellXfs/m:xf", namespaces=NS)):
+        protection = xf.find(f"{{{MAIN}}}protection")
+        if protection is not None and protection.get("locked", "1").lower() in {"0", "false"}:
+            unlocked.add(index)
+    return unlocked
 
 
 class XlsxAdapter:
@@ -293,40 +450,137 @@ class XlsxAdapter:
         unknown_formula = False
         refs: list[tuple[str, str, str, str]] = []
         name_map = _defined_names(wb, sheets)
+        masters: dict[tuple[str, str], tuple[str, str]] = {}
         for sheet, c in formulas:
             f = c.find(f"{{{MAIN}}}f")
-            parsed, unknown = _formula_references(_resolve_names(f.text or "", sheet, name_map), sheet)
+            if f.get("t") == "shared" and f.get("si") is not None and (f.text or "").strip():
+                masters[(sheet, f.get("si"))] = (c.get("r", ""), f.text or "")
+        for sheet, c in formulas:
+            f = c.find(f"{{{MAIN}}}f")
+            formula_text = f.text or ""
+            if f.get("t") == "shared" and not formula_text.strip():
+                # Shared-formula children carry no text: derive it from the group's master. If that
+                # is impossible the workbook's dependencies are unknown (never silently empty).
+                master = masters.get((sheet, f.get("si") or ""))
+                translated = _translate_shared_formula(master[1], master[0], c.get("r", "")) if master else None
+                if translated is None:
+                    unknown_formula = True
+                    continue
+                formula_text = translated
+            parsed, unknown = _formula_references(_resolve_names(formula_text, sheet, name_map), sheet)
+            if any(target_sheet not in sheets for target_sheet, _, _ in parsed):
+                unknown = True  # reference to a sheet that does not exist in this workbook
             unknown_formula |= unknown
-            refs.extend((target_sheet, first, last, f"{sheet}!{c.get('r')}") for target_sheet, first, last in parsed)
+            refs.extend((target_sheet, first.replace("$", "").upper(), last.replace("$", "").upper(),
+                         f"{sheet}!{c.get('r')}") for target_sheet, first, last in parsed)
         return parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula
 
     def targets(self, source: bytes) -> list[EditTarget]:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
+        graph = _FormulaGraph(refs)
+        unlocked_styles = _unlocked_styles(parts)
         formula_cells = {f"{sheet}!{c.get('r')}" for sheet, c in formulas}
         result: list[EditTarget] = []
         for sheet, part in sheets.items():
             root = _xml(parts[part][1])
+            sheet_protected = root.find(f"{{{MAIN}}}sheetProtection") is not None
             for cell in root.xpath(".//m:c", namespaces=NS):
                 value, reason = _cell_value(cell, shared, rich, dates, epoch)
                 if value is None or reason:
                     continue
                 ref = cell.get("r", "")
-                deps: set[str] = set()
-                if not unknown_formula:
-                    for target_sheet, first, last, formula_id in refs:
-                        if target_sheet != sheet:
-                            continue
-                        a, b = CELL_COORD.match(first), CELL_COORD.match(last)
-                        x = CELL_COORD.match(ref)
-                        if not (a and b and x): continue
-                        col, row = _column_index(x.group(1)), int(x.group(2))
-                        if _column_index(a.group(1)) <= col <= _column_index(b.group(1)) and int(a.group(2)) <= row <= int(b.group(2)):
-                            deps.add(formula_id)
+                style_id = int(cell.get("s", "0")) if cell.get("s", "0").isdigit() else 0
+                if sheet_protected and style_id not in unlocked_styles:
+                    reason = "protected_cell_locked"
+                validation_options, validation_unsupported = self._list_validation_options(
+                    parts, sheets, shared, rich, dates, epoch, sheet, ref, root)
+                if validation_unsupported:
+                    reason = reason or "unsupported_data_validation"
+                deps: set[str] = graph.dependents_of(sheet, ref) if not unknown_formula else set()
                 fp = _fingerprint(cell)
                 result.append(EditTarget(f"xlsx:{sheet}!{ref}", hashlib.sha256(source).hexdigest(), sheet, ref,
-                                         value, fp, cell.get("s"), True, None,
+                                         value, fp, cell.get("s"), reason is None, reason,
                                          None if unknown_formula else tuple(sorted(deps))))
         return result
+
+    def _list_validation_options(self, parts, sheets, shared, rich, dates, epoch,
+                                 sheet_name: str, cell_ref: str, root) -> tuple[set[str] | None, bool]:
+        options: set[str] | None = None
+        unsupported = False
+        wb = _xml(parts["xl/workbook.xml"][1])
+        names = _defined_names(wb, sheets)
+        for validation in root.xpath(".//m:dataValidation", namespaces=NS):
+            if validation.get("type") != "list":
+                continue
+            applies = False
+            for area in (validation.get("sqref") or "").split():
+                try:
+                    min_col, min_row, max_col, max_row = range_boundaries(area)
+                    match = CELL_COORD.match(cell_ref)
+                    if match:
+                        col, row = _column_index(match.group(1)), int(match.group(2))
+                        applies |= min_col <= col <= max_col and min_row <= row <= max_row
+                except ValueError:
+                    continue
+            if not applies:
+                continue
+            formula = (validation.findtext(f"{{{MAIN}}}formula1") or "").strip()
+            values: set[str] | None = None
+            if len(formula) >= 2 and formula[0] == formula[-1] == '"':
+                values = set(formula[1:-1].split(","))
+            else:
+                expression = _resolve_names(formula.lstrip("="), sheet_name, names)
+                reference = CELL_REF.fullmatch(expression)
+                if reference:
+                    target_sheet = (reference.group(1).replace("''", "'") if reference.group(1)
+                                    else reference.group(2) or sheet_name).strip()
+                    target_part = sheets.get(target_sheet)
+                    if target_part:
+                        target_root = _xml(parts[target_part][1])
+                        first = CELL_COORD.match(reference.group(3))
+                        last = CELL_COORD.match(reference.group(4) or reference.group(3))
+                        if first and last:
+                            c1, c2 = _column_index(first.group(1)), _column_index(last.group(1))
+                            r1, r2 = int(first.group(2)), int(last.group(2))
+                            if c2 >= c1 and r2 >= r1 and (c2-c1+1)*(r2-r1+1) <= 1024:
+                                values = set()
+                                cell_map = {node.get("r"): node for node in target_root.xpath(".//m:c", namespaces=NS)}
+                                for row in range(r1, r2 + 1):
+                                    for col in range(c1, c2 + 1):
+                                        ref = f"{get_column_letter(col)}{row}"
+                                        item = cell_map.get(ref)
+                                        if item is None:
+                                            values = None; break
+                                        parsed, item_reason = _cell_value(item, shared, rich, dates, epoch)
+                                        if parsed is None or item_reason:
+                                            values = None; break
+                                        values.add(str(parsed.value))
+                                    if values is None:
+                                        break
+            unsupported |= not bool(values)
+            if values:
+                options = values
+        return options, unsupported
+
+    def preflight(self, source: bytes, target: EditTarget, patch: Patch) -> None:
+        if hashlib.sha256(source).hexdigest() != patch.source_version_id:
+            raise XlsxError("stale_source")
+        fresh = next((item for item in self.targets(source) if item.id == patch.target_id), None)
+        if fresh is None:
+            raise XlsxError("target_not_found")
+        if not fresh.editable:
+            raise XlsxError(fresh.reason or "not_editable")
+        if fresh.fingerprint != patch.expected_fingerprint:
+            raise XlsxError("fingerprint_mismatch")
+        parts, sheets, shared, rich, dates, epoch, *_ = self._data(source)
+        part = sheets[fresh.sheet]
+        root = _xml(parts[part][1])
+        options, unsupported = self._list_validation_options(
+            parts, sheets, shared, rich, dates, epoch, fresh.sheet, fresh.cell, root)
+        if unsupported:
+            raise XlsxError("unsupported_data_validation")
+        if options is not None and str(patch.new_value.value) not in options:
+            raise XlsxError("data_validation_value_invalid")
 
     def unsupported_targets(self, source: bytes) -> list[EditTarget]:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
@@ -336,7 +590,12 @@ class XlsxAdapter:
             seen: set[str] = set()
             for cell in root.xpath(".//m:c", namespaces=NS):
                 value, reason = _cell_value(cell, shared, rich, dates, epoch)
-                if value is None and reason in {"formula_cell", "array_formula", "rich_text", "error_cell", "invalid_number", "invalid_date", "invalid_shared_string"}:
+                if value is not None and reason in READ_ONLY_DATE_TIME_REASONS and cell.find(f"{{{MAIN}}}f") is None:
+                    result.append(EditTarget(f"xlsx:{sheet}!{cell.get('r', '')}", hashlib.sha256(source).hexdigest(), sheet,
+                                             cell.get("r", ""), value, _fingerprint(cell), cell.get("s"), False, reason,
+                                             None if unknown_formula else ()))
+                    continue
+                if value is None and reason in {"formula_cell", "array_formula", "rich_text", "error_cell", "invalid_number", "invalid_date", "invalid_shared_string", "ambiguous_excel_date_serial"}:
                     ref = cell.get("r", "")
                     if cell.find(f"{{{MAIN}}}f") is not None:
                         formula = cell.find(f"{{{MAIN}}}f")
@@ -346,6 +605,7 @@ class XlsxAdapter:
                                              (TypedValue("string", "=" + (cell.find(f"{{{MAIN}}}f").text or ""),
                                                           native=cell.find(f"{{{MAIN}}}f").text or "")
                                               if cell.find(f"{{{MAIN}}}f") is not None
+                                              else _rich_text_value(cell, shared) if reason == "rich_text"
                                               else TypedValue("null", None)),
                                              _fingerprint(cell), cell.get("s"), False, reason,
                                              None if unknown_formula else ()))
@@ -386,18 +646,8 @@ class XlsxAdapter:
 
     def formula_dependents(self, source: bytes, target: EditTarget) -> tuple[tuple[str, ...], bool]:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
-        deps: set[str] = set()
-        for target_sheet, first, last, formula_id in refs:
-            if target_sheet != target.sheet:
-                continue
-            a, b = CELL_COORD.match(first), CELL_COORD.match(last)
-            cell = CELL_COORD.match(target.cell)
-            if not (a and b and cell):
-                continue
-            col, row = _column_index(cell.group(1)), int(cell.group(2))
-            if (_column_index(a.group(1)) <= col <= _column_index(b.group(1))
-                    and int(a.group(2)) <= row <= int(b.group(2))):
-                deps.add(formula_id)
+        # Transitive: every formula affected directly or through other formulas, across sheets.
+        deps: set[str] = _FormulaGraph(refs).dependents_of(target.sheet, target.cell)
         array_unknown = False
         for formula_sheet, formula_cell in formulas:
             formula = formula_cell.find(f"{{{MAIN}}}f")

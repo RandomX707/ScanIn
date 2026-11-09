@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from packages.api.errors import APIError
 from packages.api.settings import Settings
 
-Role = Literal["processor", "reviewer", "administrator"]
+Role = Literal["OWNER"]
 bearer_scheme = HTTPBearer(auto_error=False, bearerFormat="JWT")
 
 
@@ -83,7 +83,7 @@ def require_identity(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
 ) -> AuthenticatedIdentity:
-    """Return a verified actor. No tenant or role header is accepted as authority."""
+    """Return the single authenticated owner. Tenant scope comes only from verified claims."""
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise APIError(401, "authentication_required", "A valid bearer identity is required.")
     settings: Settings = request.app.state.settings

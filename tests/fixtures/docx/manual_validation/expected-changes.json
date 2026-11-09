@@ -1,0 +1,29 @@
+{
+  "artifact_status": "UNVERIFIED_OFFLINE_DIAGNOSTIC_CANDIDATE",
+  "source_sha256": "ad29bde1f5f30840888f28d44f37bdaf7eae06807fa6d176700d4723ef65aa9f",
+  "candidate_sha256": "50ce49d2fd069e0f12524041ce9b63ff130c6864babe7aa35643427c803e8afb",
+  "patch_plan_sha256": "0fe28ec4e16bd1b01b8eb09e9fbcd174d0f7c1dd1a79d73bac7961ad51b2b146",
+  "changes": [
+    {
+      "target_id": "docx:word/document.xml:p1:r0:t0",
+      "old_value": "Policyholder: Ada Example",
+      "new_value": "Policyholder: Alex Example",
+      "part": "word/document.xml",
+      "target_fingerprint": "d4e25d7086effb7b8a8e4a91a0dc42953a6a8c817021a80771d72a9de7e01daf"
+    },
+    {
+      "target_id": "docx:word/document.xml:p3:r0:t0",
+      "old_value": "CLM-DEMO-360",
+      "new_value": "CLM-DEMO-361",
+      "part": "word/document.xml",
+      "target_fingerprint": "1d6190e35f0c48e5ab5efb2f2169353be9d1bd38cfe75d2caabaf5414a3c04b1"
+    }
+  ],
+  "verification": "Not run. This file is not approved, verified, registered, or released.",
+  "external_visual_evidence": {
+    "status": "USER_SUPPLIED_INDEPENDENT_EVIDENCE",
+    "renderer": "LibreOffice 25.2.3.2 (Linux; reported by user)",
+    "summary": "One page; six unchanged text lines retained positions; zero pixel differences outside two edited text-line regions.",
+    "is_application_release_verification": false
+  }
+}

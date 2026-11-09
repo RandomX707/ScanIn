@@ -4,6 +4,16 @@ Nov 6, 2026 · @yashaswi ram
 
 The source of truth for implementation: a deterministic core that edits files in their own format and proves nothing unauthorised changed, with intelligence added later as optional plugins. Supersedes Doc.
 
+## Current product decision — single-user owner workflow (Nov 9, 2026)
+
+This decision supersedes the multi-role and human-approval assumptions retained in the historical design sections below. Channel360 is a single-user document workbench: one authenticated `OWNER` operates their own tenant-scoped workflow. The owner may inspect, classify, correct, validate, request automated verification, release and download their documents. The application has no processor/reviewer/administrator switching, approval queue, approve/reject action or human approval requirement. No reviewer identity or approval event is fabricated.
+
+The active edit-set state path is `draft → ready_for_release → released` (or `failed`). A ready edit set is not yet released. The owner explicitly requests release; the server revalidates the frozen plan, current source, category policy, target fingerprints and expected values, then applies the patch, runs independent format-specific verification and malware scanning. Only outcomes authorized for that adapter are committed and downloadable. Each successful release records an append-only `document.release_authorized_by_owner` event with the authenticated owner and lineage. Original bytes remain immutable, RLS and tenant checks remain mandatory, and category, signature, format and target restrictions are unchanged.
+
+The database retains legacy role values, review records and submitted/approved/rejected edit-set states to preserve history. Those states are not part of the active workflow, cannot authorize a new release, and are never silently migrated into approval. Existing pending legacy work must be reopened as a new draft and preflighted against the current source.
+
+DOCX's default `structural` profile permits release as `STRUCTURALLY_VERIFIED` only after all configured structural/content checks pass; its visual status is `NOT_PERFORMED`. The optional `structural_and_visual` profile still requires visual checks and fails closed if its renderer is unavailable. Structural verification does not promise identical pagination, wrapping or appearance.
+
 ## Settled decisions
 
 These decisions are closed; changing one needs an explicit revision of this document.
@@ -50,10 +60,9 @@ What a user may do with a file is decided by three things in order: what the fil
 **Document category.** Two separate values, so classification can never unlock editing by accident.
 
 - `suggested_category` may come from the uploader, a matched template or a plugin. It grants nothing.
-- `authorized_category` is set only by a reviewer or administrator, or by a trusted ingestion source an administrator has configured, such as the tenant's own internal export folder. Setting it is audited.
+- `authorized_category` is set by the authenticated owner through the audited classification action, or by a separately configured trusted ingestion source. Classification grants no ability to bypass format, signature, protection or target-level restrictions.
 - Policy reads only `authorized_category`. Until it is set, the document is treated as unknown, which allows data corrections only.
 - Categories: insurer-authored, customer form, third-party issued, signed or legal, unknown. The default policy allows document corrections only on documents authorised as insurer-authored.
-- Whoever authorises a document's category may not also approve edit sets on that document when two-person approval applies.
 
 **Authority policy.**
 
@@ -61,7 +70,7 @@ What a user may do with a file is decided by three things in order: what the fil
 | --- | --- |
 | Which roles may make document corrections, per category | The original is always preserved, byte for byte |
 | Which fields may be edited | A copy is labelled verified only when every required check passes |
-| Which changes need a second reviewer | Every action writes an audit record |
+| Human approval required for a change | Every action writes an audit record |
 | Whether copies carry a visible edited stamp | A signed or certified document is never modified as if its signature still held |
 | Which plugins may receive document text | Files change only through patches with preconditions, never through plugins |
 
@@ -76,8 +85,8 @@ Each concept has exactly one owner, and no other component may set its values. T
 | Edit target | Where can a value be changed safely, and is it editable? | Adapter |
 | Field | What does this value mean? | Field discovery (manual, template, plugin) |
 | Permission | Is this actor allowed to change it? | Policy engine |
-| Data correction | What should the workbench record instead? | Reviewer |
-| Patch | What exact change goes into a new copy? | Reviewer, checked by the adapter |
+| Data correction | What should the workbench record instead? | Authenticated owner |
+| Patch | What exact change goes into a new copy? | Authenticated owner, checked by the adapter and independent verifier |
 | Change manifest | What changed, what was allowed to change, and what was verified? | Verifier |
 
 ```python
@@ -262,7 +271,7 @@ fields:
 
 Locators per format: a cell or column for spreadsheets and CSV, a JSON pointer, a PDF form field name, and for text documents a label rule (the value after a given label, inside a given paragraph or table cell).
 
-**Rules engine.** Rules produce findings, never edits. v1 rule types: `required`, `pattern`, `range`, `between_fields`, `equals_sum`, `one_of`, and `matches_field` for comparing documents within a case. A finding records which of three situations applies: the document value is wrong, the value disagrees with another document, or the field was located wrongly. Each needs a different action from the processor.
+**Rules engine (planned).** Rules produce findings, never edits. Planned rule types include `required`, `pattern`, `range`, `between_fields`, `equals_sum`, `one_of`, and `matches_field` for comparing documents within a case. A finding records whether a value may be wrong, disagrees with another document, or a field may be located incorrectly. The authenticated owner chooses whether to record a data correction or create a native correction draft.
 
 **Plugin interfaces.** Defined now, implemented with deterministic providers in v1:
 
@@ -362,12 +371,15 @@ Five editable adapters ship in v1. Each one states what it rejects as clearly as
 
 ### DOCX
 
+**Product verification decision:** Standard supported DOCX corrections require structural and content verification. Visual layout verification is an optional stricter profile, not a mandatory requirement for ordinary structural-only releases.
+
 - **Inspect:** tracked changes, document protection or a macro project make the file Read-only.
 - **Targets:** text spans that lie entirely inside a single `w:t` within one `w:r`, in the body, tables, headers and footers. v1 excludes spans in field codes, hyperlinks, content controls and text boxes, and any span crossing runs (`multi_run_span`).
 - **Write:** replace the substring inside that `w:t`. Set `xml:space="preserve"` when the new value has leading or trailing spaces. Run properties are never touched.
 - **Permitted changes:** the target `w:t` elements and the provenance parts.
-- **Verify:** part-level comparison as for XLSX. C14N `document.xml` differs only in target text. LibreOffice renders PDFs before and after.
-- **Reflow:** the visual check compares line breaks per paragraph and the page count, not only pixels. If the edited paragraph wraps differently, or any later content moves, the visual check FAILs and the outcome is BLOCKED. The user is told the new value changes the layout. For DOCX the visual check is critical.
+- **Structural verification profile (default):** part-level comparison as for XLSX. C14N of supported target parts differs only at intended text nodes; unlisted parts, styles, relationships, media, member order and compression methods remain unchanged; provenance, source hash, target fingerprints, expected old text, exact new text and package readability are checked. A pass is `STRUCTURALLY_VERIFIED`. LibreOffice, PDF conversion, pixel comparison and layout geometry are not run.
+- **Strict visual profile (optional):** `structural_and_visual` runs every structural check plus the independent before/after render, page-count, line-wrap, glyph-position and outside-target pixel checks. If the isolated renderer or any critical visual check is unavailable or fails, the result is `BLOCKED`; the server never downgrades this profile.
+- **Layout limitation:** structural verification does not guarantee pagination, line wrapping, font rendering or appearance across Word processors. Longer text may reflow. Only the strict profile evaluates rendered layout.
 - **Later:** multi-run spans only after a dedicated test corpus exists.
 
 ### OOXML packaging (XLSX and DOCX)
@@ -391,7 +403,7 @@ A document correction becomes a downloadable copy only after policy, preflight a
 
 1. **Draft.** Patches collect in a server-side draft edit set bound to a base version. Drafts are authenticated, encrypted at rest, and never kept in browser storage.
 2. **Submit.** The edit set is frozen and hashed. The idempotency key for its export is the edit set id plus that hash.
-3. **Policy.** The policy engine checks role, `authorized_category`, field permissions and whether a second reviewer is required. If one is, the edit set waits for approval. An approval binds to the edit set's hash, so any later change voids it.
+3. **Owner authorization.** The API checks the authenticated OWNER, tenant ownership, `authorized_category`, field permissions and the frozen plan. There is no human approval step. The owner explicitly requests release after preflight; a changed source or plan fails closed.
 4. **No-op check.** If nothing would change, the base version is returned (see the no-op rule).
 5. **Preflight.** The adapter confirms, for each patch:
    - the target exists in the base version;
@@ -421,11 +433,12 @@ A document correction becomes a downloadable copy only after policy, preflight a
 | Policy | Were signatures, permissions and authority respected? | Re-run policy on the released edit set; signature status unchanged |
 | Provenance | Is the copy linked to its source and approvals? | Manifest complete; provenance embedded; hashes match |
 
-**Outcomes.** Integrity, intent, preservation, policy and provenance are critical for every adapter. Each adapter may mark more checks critical: visual is critical for PDF forms and DOCX. Dependents is never critical. No configuration can make a critical check non-critical.
+**Outcomes.** Integrity, intent, preservation, policy and provenance are critical for every adapter. Visual is critical for PDF forms and is critical for DOCX when the server selects `structural_and_visual`; it is explicitly not performed in the DOCX `structural` profile. Dependents is never critical. Browser requests cannot select or weaken the server profile.
 
 | Outcome | When | Download |
 | --- | --- | --- |
 | VERIFIED | Every check PASS | Released as a verified copy |
+| STRUCTURALLY_VERIFIED | Every mandatory DOCX structural/content check PASS under the `structural` profile; visual checks explicitly `NOT_PERFORMED` | Released as a structurally verified DOCX with an explicit visual-not-checked warning |
 | INCOMPLETE | No FAIL; every critical check PASS; at least one non-critical check NOT\_VERIFIED | Only if tenant policy allows unverified derivatives; labelled verification incomplete, with the unverified items listed |
 | BLOCKED | Any FAIL, or any critical check NOT\_VERIFIED | None; the report is shown |
 
@@ -444,7 +457,7 @@ Every copy names the exact version it came from, and a stale edit can never be a
   - Any resolved conflict creates a new draft revision with a new hash, and any earlier approval is void.
 - **Branches.** Instead of rebasing, the user may confirm a branch from the older base. The version tree shows it, and it never becomes current automatically.
 - **Patch preconditions.** Even on a current base, preflight rejects a patch whose `expected_old_value` or `expected_fingerprint` no longer matches its target.
-- **Approvals.** A review binds to the edit set hash. Editing an approved edit set voids the approval.
+- **Legacy review records.** Historical reviews remain immutable and readable. They are not consulted to authorize new releases; changing a legacy pending edit requires a new draft and current-source preflight.
 - **Targets are per version.** Edit targets are recomputed for each version and never reused across versions.
 - **Reproducibility.** Every version records the adapter, template and provider versions that produced its targets, fields and output.
 
@@ -467,11 +480,7 @@ All of this ships in the first milestone. Retrofitting tenancy or audit later me
 
 | Role | Can |
 | --- | --- |
-| Processor | Upload, view, create fields, make data corrections, draft and submit edit sets |
-| Reviewer | Everything a processor can, plus approve or reject edit sets |
-| Administrator | Manage users, policies, templates and plugin settings; cannot approve their own edit sets |
-
-Two-person approval is a policy setting per document category or field. Nobody approves their own edit set.
+The active product accepts one authenticated OWNER per tenant. The local demonstration session issuer is available only when explicitly enabled in loopback development and emits a short-lived server-signed identity. Future OIDC identities must map to OWNER authorization server-side. The browser cannot choose a role or tenant. Tenant isolation, RLS, category policy and format-specific edit restrictions apply to every operation. There is no active reviewer or administrator identity in the product workflow.
 
 **Hostile files.**
 
@@ -510,9 +519,9 @@ One Postgres schema; every table carries `tenant_id`, and nothing reviewed is ev
 | fields | Field meanings | id, document\_id, version\_id, key, label, source, provider\_version, target\_id, observed\_value, evidence, signals, review\_status |
 | findings | Rule results | id, field\_id, rule, kind (value wrong, inconsistent, located wrongly), detail |
 | data\_corrections | Value-only corrections | id, field\_id, corrected\_value, reason, actor\_id, created\_at |
-| edit\_sets | Document corrections | id, document\_id, base\_version\_id, status (draft, submitted, approved, rejected, released, failed), hash, created\_by |
+| edit\_sets | Document corrections | id, document\_id, base\_version\_id, status (draft, ready_for_release, released, failed; legacy states retained), frozen hash, created\_by |
 | patches | Exact changes | id, edit\_set\_id, target\_id, expected\_old\_value, new\_value |
-| reviews | Approvals | id, edit\_set\_id, edit\_set\_hash, reviewer\_id, decision, note |
+| reviews | Historical approvals, retained for compatibility | Historical rows are preserved; the active owner workflow neither writes nor reads them as release authorization |
 | verification\_results | Check outcomes | id, edit\_set\_id, check, status, detail |
 | export\_manifests | Release record | edit\_set\_id, output\_version\_id, manifest |
 | jobs | Pipeline work | id, document\_id, stage, status, attempts, error, started\_at, finished\_at |
@@ -529,13 +538,13 @@ Object storage keys:
 
 ## API
 
-REST under `/api/v1`. Every route is tenant-scoped and role-checked, and data corrections and document corrections have separate routes, so the two are never confused.
+REST under `/api/v1`. Every route is authenticated and tenant-scoped as OWNER, and data corrections and document corrections have separate routes, so the two are never confused.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | POST | /documents | Upload (streamed multipart); returns id and initial capability level |
 | GET | /documents/{id} | Metadata, capability profile with reasons, category, current version |
-| PATCH | /documents/{id} | Set suggested category (any role) or authorized category (reviewer or administrator only) |
+| PATCH | /documents/{id} | Set suggested category; authenticated owner may set authorized category, with category restrictions still enforced |
 | GET | /documents/{id}/events | Server-sent events for pipeline stages |
 | GET | /documents/{id}/versions | Version tree |
 | GET | /versions/{id}/preview | Viewer manifest for that version |
@@ -550,13 +559,13 @@ REST under `/api/v1`. Every route is tenant-scoped and role-checked, and data co
 | PUT | /edit-sets/{id}/patches | Replace the draft's patches |
 | POST | /edit-sets/{id}/submit | Freeze, hash, run policy; `409 stale_version` if the base is not current |
 | POST | /edit-sets/{id}/rebase | Move the draft to the current version and re-run preflight |
-| POST | /edit-sets/{id}/reviews | Approve or reject (reviewer role) |
+| POST | /edit-sets/{id}/release | Owner-authorized independent verification, malware scan and release; no human approval |
 | GET | /edit-sets/{id} | Status, preflight report, verification results, manifest |
 | GET | /edit-sets/{id}/download | Short-lived signed link; refused unless released |
 | GET | /documents/{id}/audit | Audit trail for the document |
 | GET, PUT | /admin/policies, /admin/templates, /admin/users | Administration |
 
-Errors share one shape: `{"code": "preflight_failed", "message": "...", "details": [{"target_id": "...", "reason": "expected_value_mismatch"}]}`. Defined codes in v1: `stale_version`, `preflight_failed`, `not_editable`, `policy_denied`, `approval_required`, `verification_failed`, `verification_incomplete`.
+Errors share one shape: `{"code": "preflight_failed", "message": "...", "details": [{"target_id": "...", "reason": "expected_value_mismatch"}]}`. Active workflow codes include `stale_version`, `preflight_failed`, `not_editable`, `policy_denied`, `verification_failed` and `verification_incomplete`. Human approval routes and the `approval_required` outcome are retired.
 
 ## Frontend
 
@@ -644,7 +653,7 @@ These tests are the specification. An implementation that passes by weakening a 
 | PDF-2 | PDF form | Edit a checkbox, a radio group and a dropdown | Correct values and appearances |
 | PDF-3 | PDF form | Signed PDF; certified PDF; XFA form | All Read-only |
 | PDF-4 | PDF form | Value over `MaxLen` or wider than the widget | Preflight rejects with a reason |
-| DOCX-1 | DOCX | Single-run edit in body, table cell, header and footer | Run properties unchanged; unlisted parts identical; render matches outside the edited line |
+| DOCX-1 | DOCX structural profile | Single-run edit in body, table cell, header and footer | Run properties unchanged; unlisted parts identical; exact targets and provenance pass; outcome `STRUCTURALLY_VERIFIED` |
 | DOCX-2 | DOCX | Span crossing two runs; span in a hyperlink or field code | Not editable, with the right reason |
 | DOCX-3 | DOCX | Tracked changes; protected document | Read-only |
 | DOCX-4 | DOCX | First edit adds `docProps/custom.xml` | Only that part, `[Content_Types].xml` and `_rels/.rels` change |
@@ -659,14 +668,14 @@ These tests are the specification. An implementation that passes by weakening a 
 
 | ID | Area | Test | Pass condition |
 | --- | --- | --- | --- |
-| SEC-1 | Authority | Processor uploads a third-party document that matches an insurer-authored template | Only `suggested_category` set; document corrections refused until a reviewer authorises the category |
+| SEC-1 | Authority | Owner uploads a third-party document that resembles an insurer-authored form | Category remains an owner-audited classification; native corrections remain blocked unless category policy allows them, and file/target restrictions still apply |
 | SEC-2 | Tenancy | A background job running as tenant A requests tenant B's rows and objects | No rows returned and object access refused, under the application role |
 | SEC-3 | Tenancy | Application role tries to disable RLS or act as table owner | Refused |
 | FLOW-6 | Rebase | Another release changes the same target before rebase | Conflict shown with expected, current and proposed values; precondition unchanged until the user resolves; approval void |
 | FLOW-7 | Concurrency | Two edit sets from the same base verified at the same time | Exactly one becomes current; the other is recorded as a branch; no lost update |
 | FLOW-8 | Crash | Kill the worker after staging, before commit | No version row and no download link; a retry creates exactly one version; the sweeper removes the orphan |
 | FLOW-9 | Idempotency | Retry an export that already committed | The same version is returned; no duplicate |
-| VERIFY-1 | Outcomes | A critical check cannot run, such as the DOCX renderer being unavailable | BLOCKED; no download |
+| VERIFY-1 | Outcomes | A critical check cannot run, such as a PDF visual check or a DOCX strict-profile renderer | BLOCKED; no download |
 | VERIFY-2 | Outcomes | XLSX edit with dependents, with the unverified-derivatives policy on and then off | On: INCOMPLETE, labelled, items listed. Off: no download |
 | XLSX-8 | XLSX | Empty edit set on a workbook with no custom properties part | Base version returned; no derived file; no part added |
 | XLSX-9 | XLSX | Edit a cell read by an `INDIRECT` formula | Dependents unknowable; outcome INCOMPLETE, never VERIFIED |
@@ -674,7 +683,7 @@ These tests are the specification. An implementation that passes by weakening a 
 | JSON-2 | JSON | Edit inside an object with duplicate keys | Not editable, reason `duplicate_keys` |
 | JSON-3 | JSON | Edit strings next to non-ASCII and escaped characters | Byte spans correct; escaping style kept |
 | CSV-3 | CSV | New values beginning with `=`, `+`, `@`, and a decimal -500 | The first three rejected with `unsafe_csv_value`; -500 accepted |
-| DOCX-5 | DOCX | Single-run replacement long enough to wrap its paragraph | Visual check FAIL; outcome BLOCKED |
+| DOCX-5 | DOCX strict visual profile | Single-run replacement long enough to wrap its paragraph | Visual check FAIL; outcome BLOCKED. Under structural-only mode, no layout-equivalence claim is made |
 | PDF-5 | PDF form | Any field edit | Original bytes are an exact prefix of the output |
 
 ## Milestones
@@ -687,7 +696,7 @@ Each milestone closes when its gate tests pass, and every earlier gate must stil
 4. **M3 XLSX.** The M0 adapter wired into the pipeline, plus the display checks and rich-text handling. **Gate:** XLSX-1 to XLSX-10, VERIFY-2.
 5. **M4 Templates and rules.** Template format and matching, rules engine, findings, structural summary, one demo motor-claim worksheet template. **Gate:** TPL-1, and SEC-1 re-run through a template match.
 6. **M5 Fillable PDF.** A fixture proof of pypdf's incremental mode and appearance regeneration first, then the full adapter: signature and certification detection, rendering diff. **Gate:** PDF-1 to PDF-5.
-7. **M6 DOCX.** Single-run targets, exclusions, provenance parts, rendering and reflow checks. **Gate:** DOCX-1 to DOCX-5.
+7. **M6 DOCX.** Single-run targets, exclusions, provenance and structural verification are the standard release path. Optional strict rendered-layout verification is server-selected and fail-closed. **Gate:** DOCX-1 to DOCX-4 cover structural behavior; DOCX-5 covers the strict visual profile.
 8. **M7 Optional plugins.** OCR for scans, Docling parsing, LLM field discovery and summary, each behind its interface. **Gate:** FLOW-5 still passes with plugins disabled; plugin field proposals are measured against labelled fixtures for precision and recall per field.
 
 When handing a milestone to Claude Code or Codex, give it this document, the milestone's scope, and its gate test IDs. State that the tests define done and that no test may be weakened or skipped to make it pass.
@@ -722,7 +731,7 @@ This revision fixes the contradictions and gaps found in the v2.1 technical revi
 | CSV | Formula-injection policy (CSV-3) |
 | JSON | UTF-8 only, duplicate keys not editable, byte-accurate spans (JSON-2, JSON-3) |
 | XLSX | Defined formula subset, unknowable dependents, precision limit, rich text excluded, display checks, Excel qualification (XLSX-9, XLSX-10) |
-| DOCX | Reflow detection; visual check critical (DOCX-5) |
+| DOCX | Structural verification is mandatory by default; reflow detection is critical only under `structural_and_visual` (DOCX-5) |
 | PDF | pypdf incremental mode adopted, proven on fixtures first (PDF-5) |
 | Tenancy | RLS with `USING` and `WITH CHECK`, `FORCE ROW LEVEL SECURITY`, non-owner `NOBYPASSRLS` application role, transaction-local tenant context set by workers too (SEC-2, SEC-3) |
 | Milestones | New M0 XLSX proof spike before any infrastructure; new tests added to gates |

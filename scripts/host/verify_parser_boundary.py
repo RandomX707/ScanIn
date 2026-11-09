@@ -10,6 +10,9 @@ import threading
 import time
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from packages.workers.isolation import RestrictedSubprocess
 from packages.workers.parser import RestrictedParser
 
@@ -19,7 +22,7 @@ def main() -> int:
         print("usage: .venv/bin/python scripts/host/verify_parser_boundary.py WORKBOOK.xlsx", file=sys.stderr)
         return 2
     source = Path(sys.argv[1]).resolve(strict=True)
-    report = RestrictedParser(Path(__file__).resolve().parents[2]).inspect(source)
+    report = RestrictedParser(PROJECT_ROOT).inspect(source)
     print(json.dumps({"status": report.status, "sha256": report.sha256, "capability": report.capability,
                       "adapter": report.adapter, "sheets": report.sheets}, sort_keys=True))
 
@@ -51,7 +54,7 @@ def main() -> int:
             f"\ntry: s.connect(({host!r},{port})); print('NETWORK_ALLOWED'); sys.exit(10) "
             "\nexcept OSError: print('NETWORK_BLOCKED')"
         )
-        result = RestrictedSubprocess(Path(__file__).resolve().parents[2]).run(
+        result = RestrictedSubprocess(PROJECT_ROOT).run(
             [sys.executable, "-c", code], timeout_seconds=5
         )
         stop.set()

@@ -1,12 +1,12 @@
 # Channel360 — Insurance Document Workbench
 
-Channel360 is a local-first insurance document workbench for inspecting source files, recording data corrections, reviewing proposed native document changes, and releasing only independently verified derivatives. The repository remains named **ScanIn**; the application and product are called Channel360.
+Channel360 is a **single-user document workbench for secure inspection, classification, correction, AI-assisted explanation and verified document release**. One authenticated owner operates the document workflow. The repository remains named **ScanIn**; the application and product are called Channel360.
 
-> **Project status:** a validated development prototype, not production-ready software. It has no production identity provider, durable background queue, deployment hardening, or M4–M7 capabilities. Use synthetic documents and a dedicated test database.
+> **Project status:** a validated development prototype, not production-ready software. It has no production identity provider, durable background queue, deployment hardening, or M4 templates/rules. M5 unsigned AcroForm PDF editing and M6 DOCX editing are implemented; M6 defaults to structural verification. M7 is partially implemented through optional, disabled-by-default AI explanations; OCR and Docling are not implemented. Use synthetic documents and a dedicated test database.
 
 ## Why it exists
 
-Insurance teams receive structured records in different formats and need to correct them without losing the original, mixing tenant data, or approving their own changes. Channel360 keeps uploaded originals immutable, records sidecar corrections separately, freezes native edit plans for independent review, and exposes a derived file only after independent verification succeeds.
+Insurance teams receive records in different formats and need to inspect and correct them without losing the original or mixing tenant data. Channel360 keeps uploaded originals immutable, records data corrections as sidecars, freezes native edit plans, and exposes a derived file only after independent automated verification succeeds. Human approval is not part of the standard workflow.
 
 ## Current capabilities
 
@@ -14,10 +14,11 @@ Insurance teams receive structured records in different formats and need to corr
 - Malware scanning before document registration; scanner errors fail closed.
 - Immutable source versions, SHA-256 lineage, audit-chain events and version history.
 - CSV, JSON and XLSX inspection and native correction workflows.
+- A deterministic, source-version-bound Document Summary tab for CSV, JSON, XLSX, PDF and DOCX. Summaries describe observed structure, report limitations, and do not classify documents or alter release permissions.
 - Separate data-correction records and native document edit plans.
-- Administrator classification, processor preflight, independent reviewer approval or rejection, and independent release verification.
-- Download access restricted to `VERIFIED` derivatives. Formula-dependent XLSX output can be `INCOMPLETE` and remains unavailable for download.
-- Local-demo sign-in with server-issued short-lived identities for processor, reviewer and administrator roles. The endpoint is restricted to explicitly configured local development mode and loopback clients.
+- Owner classification and preflight, followed by independent automated verification and malware scanning before release. Category and format restrictions remain enforced.
+- Download access is restricted to fully `VERIFIED` derivatives or DOCX-only `STRUCTURALLY_VERIFIED` derivatives whose server-side manifest records the structural profile; `INCOMPLETE` and `BLOCKED` files remain unavailable.
+- Local-demo sign-in issues one server-signed `OWNER` identity, only when explicitly configured for loopback local development. Production deployments continue to require the configured identity provider.
 - Read-only inspection support for some other formats; editing is not implied by upload acceptance.
 
 ### Supported formats
@@ -27,7 +28,30 @@ Insurance teams receive structured records in different formats and need to corr
 | CSV | Inspect, correct selected values, independently verify and download a verified derivative |
 | JSON | Inspect, correct supported values, independently verify and download a verified derivative |
 | XLSX | Inspect supported workbook targets and apply constrained edits; uncertain formula dependencies remain incomplete and nondownloadable |
-| PDF, DOCX and other accepted files | Read-only or unavailable preview depending on format and adapter; native editing is not implemented |
+| PDF | Browser PDF.js multi-page viewer and AcroForm discovery; unsigned supported text, checkbox, radio and choice fields are independently verified with qpdf and PDFium before release. Signed, certified, XFA, encrypted and scanned files are read-only or rejected as appropriate. |
+| DOCX | Safe OOXML text/table/header/footer inspection plus constrained single-run edits in the body, tables, headers and footers. The default structural profile verifies exact target intent, fingerprints, provenance, package readability and preservation, then releases as `STRUCTURALLY_VERIFIED` after ClamAV scanning. Visual layout is explicitly not checked. An optional server-selected `structural_and_visual` profile requires isolated LibreOffice/PDFium and blocks if it cannot run. |
+| Other accepted formats | Read-only or unavailable preview depending on format and adapter; upload acceptance does not imply editing support |
+
+The Summary tab defaults to a deterministic structural summary generated by the existing restricted parser. An optional **AI** mode can be configured for an OpenAI-compatible HTTPS endpoint. AI is requested only after the owner clicks **Generate AI Explanation**; switching tabs or opening Compare never sends a request. The browser never receives the provider key. AI explanations are informational and do not affect editing, authorization, verification or download decisions.
+
+DOCX verification is configured only on the server with `CHANNEL360_DOCX_VERIFICATION_MODE=structural` (default) or `structural_and_visual`. Put overrides in the ignored local `.env`; never add profile controls to browser requests. Structural release explicitly records that visual checks were not performed. The strict profile blocks when isolated rendering is unavailable.
+
+### Optional AI provider configuration
+
+AI is disabled unless a server-side provider, key, model and HTTPS base URL are configured. Set these in the API process environment or a private, git-ignored `.env` file (never in React/Vite variables):
+
+```dotenv
+CHANNEL360_LLM_PROVIDER=openai_compatible
+CHANNEL360_LLM_API_KEY=replace-with-a-secret
+CHANNEL360_LLM_MODEL=your-approved-model
+CHANNEL360_LLM_BASE_URL=https://api.example.com/v1
+CHANNEL360_LLM_TIMEOUT_SECONDS=20
+CHANNEL360_LLM_MAX_OUTPUT_TOKENS=500
+```
+
+For development, use synthetic documents only. A request sends no raw file: it sends up to 8,000 characters of bounded parser evidence from the selected immutable version, with source locations. The parser includes CSV headings and up to seven representative records, bounded JSON scalar excerpts, up to 40 XLSX cell values, digital PDF text and form-field values, or up to 40 DOCX text blocks. Scanned PDF pages without readable text are not sent as document content and cannot be explained without OCR. The API requires HTTPS, rejects local/private DNS answers, pins the network connection to validated public IP addresses while preserving TLS hostname verification, disables redirects and inherited proxies, enforces a five-request-per-user-per-minute limit, and caps request time, model output tokens and provider response size. JSON mode is retried without its optional `response_format` parameter only when the server explicitly rejects that parameter; returned content still must pass structured parsing and source-reference checks. Evidence references are checked against extracted locations, but text-overlap screening is a heuristic and does not guarantee factual accuracy. Review the provider’s privacy/retention terms before using real personal or insurance information. No AI API key is required for the deterministic No AI mode or test suite.
+
+After configuring an approved provider and starting the API with a local demo identity bound to a test/E2E-labeled tenant, an operator can explicitly run the one-request live connectivity smoke test with `.venv/bin/python scripts/host/smoke_ai_summary.py --send-synthetic-content`. The script creates one synthetic CSV original in that isolated tenant, suppresses provider response text and never prints the identity token. It is not part of standard tests and was not invoked during this implementation.
 
 ## Product screenshots
 
@@ -35,8 +59,19 @@ These screenshots use synthetic demo records and contain no session credentials.
 
 | Workspace | Desktop | Narrow viewport |
 | --- | --- | --- |
-| Native correction | ![Native correction workspace](artifacts/ui-redesign/showcase-workspace-desktop.png) | ![Native correction workspace on a narrow screen](artifacts/ui-redesign/showcase-workspace-mobile.png) |
-| Reviewer queue | ![Reviewer approval queue](artifacts/ui-redesign/showcase-review-queue-desktop.png) | ![Reviewer queue on a narrow screen](artifacts/ui-redesign/showcase-review-queue-mobile.png) |
+| Deterministic summary | ![CSV summary](artifacts/ui-redesign/summary-csv.png) | — |
+| Summary modes (No AI plus a browser-test-mocked AI response; no live provider request was made) | ![No AI mode](artifacts/ui-redesign/summary-no-ai-mode.png) ![AI mode with synthetic test response](artifacts/ui-redesign/summary-ai-mode.png) ![No AI and AI comparison with synthetic test response](artifacts/ui-redesign/summary-compare-mode.png) | ![Summary comparison on a narrow viewport](artifacts/ui-redesign/summary-compare-mode-mobile.png) |
+| JSON summary and document switching | ![JSON summary](artifacts/ui-redesign/summary-json.png) ![JSON summary after switching documents](artifacts/ui-redesign/summary-json-switch.png) | — |
+| XLSX summary | ![XLSX summary](artifacts/ui-redesign/summary-xlsx.png) | — |
+| PDF summary and page viewer | ![PDF summary](artifacts/ui-redesign/summary-pdf.png) | — |
+| DOCX structural summary | ![DOCX summary with read-only extracted text](artifacts/ui-redesign/summary-docx.png) | — |
+| DOCX structural correction | ![DOCX extracted text and editable target](artifacts/ui-redesign/docx-structural-preview-selection.png) ![Frozen correction draft](artifacts/ui-redesign/docx-structural-draft.png) | ![Structural result with visual check explicitly not performed](artifacts/ui-redesign/docx-structural-verification-desktop.png) ![Structural result on a narrow screen](artifacts/ui-redesign/docx-structural-verification-mobile.png) |
+| Owner classification and native correction | ![Owner classified document](artifacts/ui-redesign/single-owner-classification.png) ![Owner correction workspace](artifacts/ui-redesign/native-correction-desktop.png) | ![Native correction workspace on a narrow screen](artifacts/ui-redesign/native-correction-mobile.png) |
+| Owner validation and release | ![Frozen plan validated and ready for release](artifacts/ui-redesign/owner-validation-ready.png) ![Owner confirms verify and release](artifacts/ui-redesign/owner-verify-release-confirmation.png) | — |
+| DOCX structural release | ![DOCX structural verification and download](artifacts/ui-redesign/docx-structural-download-desktop.png) ![Owner audit and version history](artifacts/ui-redesign/owner-audit-version-history.png) | ![Structural result on a narrow screen](artifacts/ui-redesign/docx-structural-verification-mobile.png) |
+| PDF AcroForm workspace | ![PDF page, form targets and frozen correction](artifacts/ui-redesign/native-correction-desktop.png) | ![PDF workspace at 390 pixels](artifacts/ui-redesign/native-correction-mobile.png) |
+| Historical pre-profile DOCX read-only workspace | ![Earlier DOCX extracted-text view before structural releases were enabled](artifacts/ui-redesign/docx-workspace-desktop.png) | ![Earlier DOCX view at 390 pixels](artifacts/ui-redesign/docx-workspace-mobile.png) |
+| Historical pre-profile verification boundary | ![Earlier DOCX native-change block before structural profile support](artifacts/ui-redesign/docx-blocked-verification-desktop.png) | ![Earlier block at 390 pixels](artifacts/ui-redesign/docx-blocked-verification-mobile.png) |
 | Verified release | ![Independent verification result](artifacts/ui-redesign/verified-release-desktop.png) | ![Verification result on a narrow screen](artifacts/ui-redesign/verified-release-mobile.png) |
 | Incomplete XLSX | ![Formula-dependent XLSX remains incomplete](artifacts/ui-redesign/incomplete-verification-desktop.png) | — |
 
@@ -56,21 +91,21 @@ FastAPI ── PostgreSQL (tenant RLS, immutable metadata, audit)
 private local document storage (development)
 ```
 
-The repository is a modular monolith. PostgreSQL is authoritative for tenant-scoped metadata, approval state, version lineage and audit. The local filesystem adapter is for development only. Upload/inspection currently runs synchronously; Redis/Valkey jobs, retry handling and event streaming are not implemented.
+The repository is a modular monolith. PostgreSQL is authoritative for tenant-scoped metadata, owner-authorized release state, version lineage and audit. Historical review rows remain readable but are not part of the active API workflow. The local filesystem adapter is for development only. Upload/inspection currently runs synchronously; Redis/Valkey jobs, retry handling and event streaming are not implemented.
 
 ## Technology
 
 - Python 3.12+, FastAPI, SQLAlchemy, Alembic, psycopg and Pydantic.
 - PostgreSQL 16 with separate migration, application and worker roles and RLS policies.
 - ClamAV daemon socket for fail-closed malware scanning.
-- React 19, TypeScript 5.9, Vite 8 and Playwright 1.54.2 for browser validation.
-- Deterministic CSV/JSON adapters and the M0 OOXML/XLSX editing and verification engine.
+- React 19, TypeScript 5.9, Vite 8, PDF.js 4.10.38 and Playwright 1.54.2 for browser validation.
+- Deterministic CSV/JSON/XLSX adapters; pypdf incremental AcroForm edits; pypdfium2 rendering; qpdf structure checks; lxml/OOXML DOCX editing; and LibreOffice headless verification when the host isolation boundary permits it.
 
 Pinned dependency manifests are `requirements.txt`, `apps/web/package.json` and `apps/web/package-lock.json`.
 
 ## Local requirements
 
-On macOS or Linux, install Python 3.12+, Node.js/npm, PostgreSQL 16, and a running ClamAV daemon with a reachable Unix socket. The supported host validation script currently defaults to `/opt/homebrew/var/run/clamav/clamd.sock` on macOS. Configure PostgreSQL and ClamAV through your local service manager; Channel360 does not install or start system services.
+On macOS or Linux, install Python 3.12+, Node.js/npm, PostgreSQL 16, qpdf and a running ClamAV daemon with a reachable Unix socket. The default DOCX structural correction path does not require LibreOffice. LibreOffice is needed only when opting into strict DOCX visual verification and when running other checks that explicitly require a local office renderer. Configure PostgreSQL and ClamAV through your local service manager; Channel360 does not install or start system services. On macOS, qpdf can be installed with `brew install qpdf`; LibreOffice is optional.
 
 Use a dedicated `channel360_test` database and its Channel360-specific roles. Never point the test scripts at a personal or shared application database. Keep PostgreSQL passwords in a mode-0600 PGPASSFILE outside the repository (the development launcher defaults to `~/.channel360-pgpass`). Do not place passwords in URLs or commit `.env` files.
 
@@ -80,6 +115,7 @@ Use a dedicated `channel360_test` database and its Channel360-specific roles. Ne
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 npm ci --prefix apps/web
+.venv/bin/python -m pip install -r requirements-test.txt  # synthetic acceptance fixtures
 ```
 
 For the actual Chromium browser suite, install the pinned local test runner and browser:
@@ -139,7 +175,7 @@ npm run build --prefix apps/web
 # M0 workbook integrity manifest
 shasum -a 256 -c artifacts/m0/source-sha256.txt
 
-# Complete local Chromium workflows, including approvals and XLSX formula safety
+# Complete local Chromium workflows, including PDF and DOCX fail-closed cases
 scripts/host/start_and_run_browser_e2e.sh
 ```
 
@@ -151,14 +187,18 @@ The Python suite may skip PostgreSQL-marked tests when no database is available.
 | --- | --- |
 | M0 — standalone XLSX correction and verification | Accepted for its standalone scope; formula-dependent outputs intentionally remain incomplete |
 | M1 — application, tenancy, storage, inspection and scanning | Core paths implemented and live PostgreSQL, ClamAV and browser integration exercised. Overall M1 remains partial: durable queue/events, full acceptance corpus and OS-level parser isolation evidence are outstanding |
-| M2 — data corrections, native edit/review/release | CSV, JSON and XLSX persisted workflows exercised; approval separation and verified-only downloads enforced. Product still requires production identity, deployment and operational hardening |
-| M3 — XLSX application integration | Exercised through the persisted review/release path; independent verification preserves incomplete formula-dependent behavior |
+| M2 — data corrections and native edit/release | Supported formats use owner-authorized frozen plans, independent verification, malware scanning, immutable source history and verified-only download. Product still requires production identity, deployment and operational hardening |
+| M3 — XLSX application integration | Exercised through the owner-authorized verification/release path; independent verification preserves incomplete formula-dependent behavior |
 | M4 — templates, deterministic rules and structural summaries | Planned, not implemented |
-| M5 — supported AcroForm PDF editing | Planned, not implemented; PDF remains read-only |
-| M6 — constrained DOCX editing | Planned, not implemented; DOCX remains read-only |
-| M7 — optional OCR/Docling/LLM providers | Planned, not implemented |
+| M5 — supported AcroForm PDF editing | Implemented for supported unsigned AcroForm text, checkbox, radio and choice fields; external producer diversity remains unverified. |
+| M6 — constrained DOCX editing | Implemented for supported single-run edits with structural verification by default; strict visual verification is optional and unavailable on this host. |
+| M7 — optional OCR/Docling/LLM providers | Partially implemented: optional disabled-by-default AI explanations; OCR and Docling are not implemented. |
 
-Additional limitations include synchronous ingestion, development-only local identities and filesystem storage, no production identity-provider integration, and a narrow supported edit surface. Do not use real policyholder data or treat this prototype as production-ready.
+The default DOCX profile does not check visual layout or reflow; set `CHANNEL360_DOCX_VERIFICATION_MODE=structural_and_visual` to enable the strict profile.
+
+Additional limitations include synchronous ingestion, development-only local identities and filesystem storage, sampled (not kernel-enforced) 2 GiB macOS parser RSS monitoring, and an unverified OS-level network boundary on some host configurations. The strict DOCX visual profile blocks if isolated rendering is unavailable. Do not use real policyholder data or treat this prototype as production-ready.
+
+For offline, diagnostic-only comparison of original and candidate DOCX packages, see [DOCX Offline Candidate Diagnostics](docs/DOCX_OFFLINE_DIAGNOSTICS.md). The diagnostic CLI never releases a document; application release uses its own mandatory structural verifier and owner-authorized release transition.
 
 ## License
 

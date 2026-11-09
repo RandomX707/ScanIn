@@ -71,32 +71,51 @@ class HMACDevelopmentSigner:
 
 def append_event(connection: Connection, *, actor_id: str, action: str, subject: str,
                  payload: dict[str, object], timestamp: datetime | None = None) -> AuditEvent:
+    return append_events(connection, actor_id=actor_id,
+                         events=((action, subject, payload),), timestamp=timestamp)[0]
+
+
+def append_events(connection: Connection, *, actor_id: str,
+                  events: tuple[tuple[str, str, dict[str, object]], ...],
+                  timestamp: datetime | None = None) -> list[AuditEvent]:
+    """Append a transaction's events while acquiring the tenant-chain head once."""
+    if not events:
+        return []
     tenant_id = require_tenant_context(connection)
-    now = timestamp or datetime.now(timezone.utc)
-    if now.tzinfo is None or now.utcoffset() is None:
-        raise ValueError("audit timestamps must include a timezone")
-    now = now.astimezone(timezone.utc)
     # Locking the tenant head row serializes all writers for a tenant in this transaction.
     head = connection.execute(
-        text("SELECT audit_sequence, audit_head_hash FROM tenants WHERE id=:tenant FOR UPDATE"),
+        # Audit writers update only non-key head columns. NO KEY UPDATE remains
+        # compatible with tenant FK KEY SHARE locks held earlier in workflows,
+        # avoiding lock-upgrade deadlocks during concurrent releases.
+        text("SELECT audit_sequence, audit_head_hash FROM tenants WHERE id=:tenant FOR NO KEY UPDATE"),
         {"tenant": tenant_id},
     ).mappings().one()
     sequence = int(head["audit_sequence"]) + 1
     previous = head["audit_head_hash"] or GENESIS_HASH
-    event_id = uuid4()
-    digest = hash_event(tenant_id=tenant_id, sequence=sequence, event_id=event_id, timestamp=now,
-                        actor_id=actor_id, action=action, subject=subject, payload=payload,
-                        previous_hash=previous)
-    connection.execute(text("""INSERT INTO audit_events
+    appended: list[AuditEvent] = []
+    insert = text("""INSERT INTO audit_events
         (id,tenant_id,sequence,ts,actor_id,action,subject,payload,prev_hash,event_hash)
-        VALUES (:id,:tenant,:sequence,:ts,:actor,:action,:subject,CAST(:payload AS jsonb),:previous,:digest)"""),
-        {"id": event_id, "tenant": tenant_id, "sequence": sequence, "ts": now, "actor": actor_id,
-         "action": action, "subject": subject,
-         "payload": json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False),
-         "previous": previous, "digest": digest})
+        VALUES (:id,:tenant,:sequence,:ts,:actor,:action,:subject,CAST(:payload AS jsonb),:previous,:digest)""")
+    for action, subject, payload in events:
+        now = timestamp or datetime.now(timezone.utc)
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("audit timestamps must include a timezone")
+        now = now.astimezone(timezone.utc)
+        event_id = uuid4()
+        digest = hash_event(tenant_id=tenant_id, sequence=sequence, event_id=event_id, timestamp=now,
+                            actor_id=actor_id, action=action, subject=subject, payload=payload,
+                            previous_hash=previous)
+        connection.execute(insert, {"id": event_id, "tenant": tenant_id, "sequence": sequence,
+            "ts": now, "actor": actor_id, "action": action, "subject": subject,
+            "payload": json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False),
+            "previous": previous, "digest": digest})
+        appended.append(AuditEvent(event_id, tenant_id, sequence, now, actor_id, action, subject,
+                                   payload, previous, digest))
+        sequence += 1
+        previous = digest
     connection.execute(text("UPDATE tenants SET audit_sequence=:sequence, audit_head_hash=:digest WHERE id=:tenant"),
-                       {"sequence": sequence, "digest": digest, "tenant": tenant_id})
-    return AuditEvent(event_id, tenant_id, sequence, now, actor_id, action, subject, payload, previous, digest)
+                       {"sequence": sequence - 1, "digest": previous, "tenant": tenant_id})
+    return appended
 
 
 def verify_chain(connection: Connection, tenant_id: UUID) -> tuple[bool, str | None]:

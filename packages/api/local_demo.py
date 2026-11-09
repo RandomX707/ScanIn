@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from ipaddress import ip_address
-from typing import Literal
-
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict
 
@@ -14,7 +12,6 @@ router = APIRouter(prefix="/api/local-demo", tags=["local demo sign-in"])
 
 class LocalDemoSessionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    role: Literal["processor", "reviewer", "administrator"]
 
 
 @router.post("/session")
@@ -30,13 +27,13 @@ def create_local_demo_session(payload: LocalDemoSessionRequest, request: Request
     if not is_loopback:
         raise APIError(404, "not_found", "Local demo sign-in is unavailable.")
 
-    subject = f"channel360-demo-{payload.role}"
+    subject = "channel360-demo-owner"
     lifetime = 1800
     token = create_development_token(
         settings,
         subject=subject,
         tenant_id=settings.local_demo_tenant_id,
-        role=payload.role,
+        role="OWNER",
         expires_in_seconds=lifetime,
     )
     return {
@@ -44,7 +41,7 @@ def create_local_demo_session(payload: LocalDemoSessionRequest, request: Request
         "token_type": "bearer",
         "expires_in": lifetime,
         "subject": subject,
-        "role": payload.role,
+        "role": "OWNER",
         "tenant_id": str(settings.local_demo_tenant_id),
         "tenant_name": settings.local_demo_tenant_name,
     }

@@ -4,11 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
+    "dev": "vite --host 127.0.0.1 --port 5174 --strictPort",
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "pdfjs-dist": "4.10.38",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },

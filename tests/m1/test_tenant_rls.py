@@ -104,6 +104,17 @@ def test_all_tenant_tables_have_forced_using_and_check_rls(postgres_engines):
         assert expected <= set(forced)
 
 
+def test_application_role_can_read_but_cannot_write_historical_reviews(postgres_engines):
+    _, app = postgres_engines
+    with app.connect() as connection:
+        privileges = connection.execute(text("""SELECT
+            has_table_privilege(current_user,'reviews','SELECT'),
+            has_table_privilege(current_user,'reviews','INSERT'),
+            has_table_privilege(current_user,'reviews','UPDATE'),
+            has_table_privilege(current_user,'reviews','DELETE')""")).one()
+    assert tuple(privileges) == (True, False, False, False)
+
+
 def test_missing_authenticated_tenant_context_has_no_access(postgres_engines, tenant_pair):
     _, app = postgres_engines
     with app.connect() as connection:
@@ -113,3 +124,13 @@ def test_missing_authenticated_tenant_context_has_no_access(postgres_engines, te
             with connection.begin():
                 connection.execute(text("INSERT INTO documents(id,tenant_id,filename) VALUES (:id,:t,'no-context')"),
                                    {"id": uuid4(), "t": tenant_pair[0]})
+
+
+def test_dashboard_tenant_name_query_sees_only_the_callers_tenant(postgres_engines, tenant_pair):
+    from sqlalchemy import text as sql
+    from packages.db.tenant import tenant_transaction
+    _, app = postgres_engines
+    first, second = tenant_pair
+    with app.connect() as connection, tenant_transaction(connection, first):
+        assert connection.execute(sql("SELECT name FROM tenants WHERE id=:t"), {"t": first}).scalar_one_or_none() == "tenant-a"
+        assert connection.execute(sql("SELECT name FROM tenants WHERE id=:t"), {"t": second}).scalar_one_or_none() is None

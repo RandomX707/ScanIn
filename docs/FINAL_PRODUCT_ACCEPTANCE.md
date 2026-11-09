@@ -1,19 +1,20 @@
 # Final Product Acceptance — Development Scope
 
-Updated 2026-11-08.
+Updated 2026-11-09.
 
 ## Decision
 
-The local synthetic development workflows for M0–M3 are validated to the scope listed below. The whole product is **not accepted for production use**. Authentication, operations, storage, queueing, parser isolation and the planned M4–M7 capabilities still require work.
+The local development workflows and integration evidence below passed for their tested synthetic scopes. M5 PDF is a narrow, usable implementation with open corpus/gate work. M6 DOCX is deliberately blocked at preflight because required isolated rendering is unavailable. **Neither M5 nor M6 is accepted as a complete milestone, and the product is not accepted for production use.**
 
 ## Current evidence
 
-- Python regression: 157 passed, 22 skipped, 0 failed (34 warnings). Skipped service-dependent tests are not counted as passes.
+- Python regression: 195 passed, 22 skipped, 0 failed (34 warnings). Skipped service-dependent tests are not counted as passes.
 - PostgreSQL integration/security suite: 22 passed against the existing `channel360_test` database.
 - ClamAV: 4/4 real daemon checks passed.
-- Browser suite: 6/6 Chromium tests passed, including CSV, JSON, XLSX, approval, rejection, and formula-dependent incomplete release.
+- Browser suite: 13/13 Chromium tests passed, including CSV/JSON/XLSX/PDF verified releases, text/checkbox/radio/dropdown PDF edits, DOCX fail-closed preflight, restricted PDF cases, reviewer rejection and formula-dependent incomplete release.
 - React TypeScript/Vite production build: passed.
 - M0 input workbook hashes: 2/2 passed; full M0 behavior is included in Python regression.
+- Parser loopback isolation probe passed on this host. Darwin parser RSS is parent-sampled every ~50 ms; a hard `RLIMIT_AS` memory cap is unavailable here.
 - Live URLs verified during validation: `http://127.0.0.1:5174` and `http://127.0.0.1:8000/docs`.
 
 ## Milestone readiness
@@ -24,6 +25,11 @@ The local synthetic development workflows for M0–M3 are validated to the scope
 | M1 | Core tenant, registry, storage, inspection and scanning paths validated. Partial overall: queue/events, full corpus and independently verified OS parser network isolation remain open |
 | M2 | CSV/JSON/XLSX correction, separate review, independent verification, immutable original and download workflow validated locally |
 | M3 | XLSX is integrated into persisted approval/release workflow; incomplete formula dependencies remain nondownloadable |
-| M4–M7 | Planned, not implemented in this pass |
+| M4 | Deferred; templates/rules not implemented |
+| M5 | Synthetic acceptance subset passes. Fifty corpus cases and browser approval/download for supported text, checkbox, radio and dropdown fields pass qpdf/PDFium verification. Compatibility with external commercial form producers remains unverified. |
+| M6 | Partial and host-blocked. OOXML adapter and verifier are unit exercised, but no DOCX can enter approval because isolated LibreOffice visual/reflow verification returns `NOT_VERIFIED`. |
+| M7 | Deferred; optional OCR/AI integrations are not implemented |
+
+DOCX preview is safely extracted text only on this host. It is not represented as a rendered Word preview. DOCX editing remains blocked until LibreOffice can render under a compatible restricted worker and actual layout/reflow acceptance passes. The branch does not complete M6.
 
 See [README](../README.md), [known limitations](KNOWN_LIMITATIONS.md), [security validation](SECURITY_VALIDATION_REPORT.md), and [live E2E report](LIVE_END_TO_END_TEST_REPORT.md).

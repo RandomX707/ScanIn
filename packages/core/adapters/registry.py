@@ -8,6 +8,8 @@ from pathlib import PurePosixPath
 from packages.core.adapters.csv_adapter.adapter import CsvAdapter
 from packages.core.adapters.json_adapter.adapter import JsonAdapter
 from packages.core.adapters.xlsx.adapter import XlsxAdapter
+from packages.core.adapters.pdf.adapter import PdfAdapter
+from packages.core.adapters.docx.adapter import DocxAdapter
 from packages.core.models.contracts import CapabilityProfile
 
 
@@ -17,6 +19,9 @@ class AdapterSelection:
     media_type: str
     findings: tuple[str, ...]
     score: float
+
+
+CSV_RESOURCE_LIMIT_REASONS = frozenset({"csv_cell_limit_exceeded", "csv_row_limit_exceeded"})
 
 
 class AdapterRegistry:
@@ -33,11 +38,18 @@ class AdapterRegistry:
         self.csv = csv_adapter or CsvAdapter()
         self.json = json_adapter or JsonAdapter()
         self.xlsx = xlsx_adapter or XlsxAdapter()
+        self.pdf = PdfAdapter()
+        self.docx = DocxAdapter()
 
     def inspect(self, source: bytes, *, filename: str = "", max_expansion_ratio: int = 100) -> AdapterSelection:
         extension = PurePosixPath(filename.replace("\\", "/")).suffix.lower()
         if source.startswith(b"%PDF-"):
-            return self._unsupported("pdf", "application/pdf", "read_only", "adapter_not_implemented", extension)
+            try:
+                profile = self.pdf.inspect(source)
+                return self._selected(profile, "application/pdf", extension, score=1.0)
+            except ValueError as error:
+                code = getattr(error, "code", "invalid_pdf")
+                return self._unsupported("pdf", "application/pdf", "rejected", code, extension)
         if source.startswith(b"\x89PNG\r\n\x1a\n"):
             return self._unsupported("image", "image/png", "read_only", "adapter_not_implemented", extension)
         if source.startswith(b"\xff\xd8\xff"):
@@ -46,6 +58,14 @@ class AdapterRegistry:
             return self._unsupported("image", "image/gif", "read_only", "adapter_not_implemented", extension)
         if source.startswith(b"PK\x03\x04"):
             return self._inspect_zip(source, extension, max_expansion_ratio=max_expansion_ratio)
+        if source.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+            encrypted = "EncryptedPackage".encode("utf-16le") in source
+            if encrypted:
+                return self._unsupported("office", "application/x-ole-storage", "rejected",
+                                         "encrypted_office_package", extension)
+            if extension in {".doc", ".xls", ".ppt"}:
+                return self._unsupported("office", "application/x-ole-storage", "read_only",
+                                         "legacy_office_unsupported", extension)
 
         prefix = source.lstrip(b"\xef\xbb\xbf \t\r\n")
         if prefix.startswith((b"{", b"[")):
@@ -54,6 +74,10 @@ class AdapterRegistry:
 
         if self._looks_textual(source):
             profile = self.csv.inspect(source)
+            if profile.level == "rejected" and set(profile.reasons) & CSV_RESOURCE_LIMIT_REASONS:
+                # Too large to inspect safely: reject with the stable limit code rather than re-labelling
+                # the file as plain text.
+                return self._selected(profile, "text/csv", extension, score=0.92 if extension == ".csv" else 0.8)
             has_delimiter = self._has_delimiter(source)
             if profile.level in {"editable", "read_only"} and (has_delimiter or extension == ".csv"):
                 score = 0.92 if extension == ".csv" else 0.8
@@ -77,8 +101,14 @@ class AdapterRegistry:
             return AdapterSelection(profile, "application/zip", (), 1.0)
 
         if "word/document.xml" in names:
-            return self._unsupported("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                     "read_only", "adapter_not_implemented", extension)
+            try:
+                profile = self.docx.inspect(source)
+                return self._selected(profile, "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                      extension, score=1.0)
+            except ValueError as error:
+                code = getattr(error, "code", "invalid_docx")
+                return self._unsupported("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                         "rejected", code, extension)
         if "ppt/presentation.xml" in names:
             return self._unsupported("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation",
                                      "read_only", "adapter_not_implemented", extension)

@@ -2,7 +2,7 @@
 set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 RUNTIME="$ROOT/.runtime/dev"
-WEB_PORT=${IDW_WEB_PORT:-5173}
+WEB_PORT=${IDW_WEB_PORT:-5174}
 show_pid() {
   label=$1 file=$2
   if [ -r "$file" ]; then

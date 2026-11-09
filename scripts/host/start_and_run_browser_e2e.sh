@@ -20,9 +20,17 @@ export PGPASSFILE="${HOME:?HOME must be set}/.channel360-pgpass"
 [ -r "$PGPASSFILE" ] || { echo "PGPASSFILE is not readable." >&2; exit 2; }
 
 # start.sh verifies database ownership/credentials, bootstraps only the
-# dedicated local demo tenant, and starts API/Vite. It leaves them running.
-env -u IDW_DATABASE_URL -u IDW_WORKER_DATABASE_URL -u IDW_MIGRATION_DATABASE_URL \
-  -u IDW_DEVELOPMENT_AUTH_SECRET scripts/dev/start.sh
+# dedicated local demo tenant, and starts API/Vite. Reuse a healthy Channel360
+# instance so this runner can be invoked against an already-running workbench.
+if curl --silent --fail http://127.0.0.1:8000/health/ready >/dev/null \
+  && curl --silent --fail "$IDW_WEB_BASE_URL/" >/dev/null; then
+  echo "Using the ready Channel360 instance at $IDW_WEB_BASE_URL."
+else
+  env -u IDW_DATABASE_URL -u IDW_WORKER_DATABASE_URL -u IDW_MIGRATION_DATABASE_URL \
+    -u IDW_DEVELOPMENT_AUTH_SECRET scripts/dev/start.sh
+fi
+
+.venv/bin/python scripts/host/create_browser_fixtures.py
 
 if [ ! -x apps/web/node_modules/.bin/playwright ]; then
   env -u PGPASSFILE scripts/host/validate_channel360_e2e.sh browser-setup
@@ -37,11 +45,8 @@ issue_token() {
   env -u PGPASSFILE .venv/bin/python scripts/issue_dev_token.py --tenant-id "$tenant" \
     --subject "$subject" --role "$role" --expires-in-seconds 3600
 }
-export IDW_DEMO_PROCESSOR_TOKEN=$(issue_token channel360-e2e-processor processor)
-export IDW_DEMO_ADMIN_TOKEN=$(issue_token channel360-e2e-admin administrator)
-export IDW_DEMO_REVIEWER_TOKEN=$(issue_token channel360-e2e-reviewer reviewer)
-export IDW_DEMO_SELF_REVIEW_TOKEN=$(issue_token channel360-e2e-processor reviewer)
-export IDW_DEMO_OTHER_TENANT_TOKEN=$(issue_token channel360-e2e-other-tenant processor \
+export IDW_DEMO_OWNER_TOKEN=$(issue_token channel360-e2e-owner OWNER)
+export IDW_DEMO_OTHER_TENANT_TOKEN=$(issue_token channel360-e2e-other-tenant OWNER \
   22222222-2222-4222-8222-222222222222)
 
 env -u PGPASSFILE -u IDW_DEVELOPMENT_AUTH_SECRET scripts/host/validate_channel360_e2e.sh browser

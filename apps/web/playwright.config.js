@@ -8,7 +8,7 @@ export default defineConfig({
   retries: 0,
   reporter: [['list'], ['junit', { outputFile: '../../artifacts/host-integration/browser-results.xml' }]],
   use: {
-    baseURL: process.env.IDW_WEB_BASE_URL || 'http://127.0.0.1:5173',
+    baseURL: process.env.IDW_WEB_BASE_URL || 'http://127.0.0.1:5174',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',

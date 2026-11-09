@@ -1,12 +1,12 @@
 # Security Validation Report
 
-Validation date: 2026-11-08. Scope: local development prototype and the dedicated `channel360_test` database. This is not a production security certification.
+Validation date: 2026-11-09. Scope: local development prototype and the dedicated `channel360_test` database. This is not a production security certification.
 
 ## Executed controls
 
 - PostgreSQL integration suite: 22 passed. The tests exercise tenant RLS, cross-tenant isolation, role boundaries, reviewer separation, immutable/frozen edit sets, release transaction behavior, audit chain, and verified-only download.
 - ClamAV suite: 4/4 passed against ClamAV 1.5.4: clean synthetic file accepted; EICAR quarantined; executable rejected; unavailable scanner remains private and unpromoted.
-- Browser workflows: 6/6 passed using separate server-issued processor, administrator and reviewer identities. Browser checks include cross-tenant denial, rejection, approval, verification, original hash preservation and formula-dependent XLSX download denial.
+- Browser workflows: 13/13 passed using separate server-issued processor, administrator and reviewer identities. Browser checks include CSV/JSON/XLSX/PDF release, PDF text/checkbox/radio/dropdown edits, DOCX fail-closed handling, rejection, approval, verification, original hash preservation and formula-dependent XLSX download denial.
 - Local-demo session issuance is server-side, short-lived, loopback-only and restricted to explicitly configured local development. The browser contains no signing secret.
 - The application launcher uses the existing private PGPASSFILE, validates restrictive permissions, targets `channel360_test`, verifies the expected owner and refuses missing PostgreSQL or ClamAV. No database or role reset was performed.
 - Generated browser traces/results, runtime state, storage, credentials and derived downloads are excluded from Git. Only synthetic M0 source workbooks and credential-free UI screenshots are retained.
@@ -15,6 +15,7 @@ Validation date: 2026-11-08. Scope: local development prototype and the dedicate
 
 - No production identity provider, enterprise key management, MFA, deployment hardening, retention review or production incident procedures.
 - Parser OS-level network isolation has not been independently validated on every target host.
+- LibreOffice cannot be used on this host for DOCX visual verification. A deny-default Seatbelt probe blocked an outside-tree read and loopback connection, but the renderer itself crashes at startup after profile application. No DOCX native changes can proceed until a compatible restricted rendering worker is available.
 - The filesystem storage adapter and synchronous processing path are development implementations; durable queue, retries, monitoring and event delivery are absent.
 - Local PostgreSQL/ClamAV passing tests do not establish production service configuration or availability.
 

@@ -95,7 +95,7 @@ browser_setup() {
 }
 
 browser() {
-  WEB_URL=${IDW_WEB_BASE_URL:-http://127.0.0.1:${IDW_WEB_PORT:-5173}}
+  WEB_URL=${IDW_WEB_BASE_URL:-http://127.0.0.1:${IDW_WEB_PORT:-5174}}
   if [ ! -x apps/web/node_modules/.bin/playwright ]; then
     echo "Run browser-setup first; it installs the pinned local Playwright runner and Chromium." >&2
     exit 2
@@ -108,7 +108,7 @@ browser() {
     echo "Vite is not reachable at $WEB_URL; start it with docs/LOCAL_RUN_GUIDE.md." >&2
     exit 2
   fi
-  for name in IDW_DEMO_PROCESSOR_TOKEN IDW_DEMO_ADMIN_TOKEN IDW_DEMO_REVIEWER_TOKEN IDW_DEMO_SELF_REVIEW_TOKEN IDW_DEMO_OTHER_TENANT_TOKEN; do
+  for name in IDW_DEMO_OWNER_TOKEN IDW_DEMO_OTHER_TENANT_TOKEN; do
     eval "value=\${$name:-}"
     if [ -z "$value" ]; then echo "Missing $name in shell environment." >&2; exit 2; fi
   done

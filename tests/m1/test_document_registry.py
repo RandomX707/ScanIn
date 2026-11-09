@@ -89,7 +89,7 @@ def test_dashboard_snapshot_is_tenant_scoped_and_uses_registered_records(postgre
     assert snapshot["metrics"]["total_documents"] == 1
     assert snapshot["metrics"]["awaiting_inspection"] == 1
     assert snapshot["metrics"]["documents_with_corrections"] == 0
-    assert snapshot["metrics"]["pending_approvals"] == 0
+    assert snapshot["metrics"]["ready_for_release"] == 0
     assert snapshot["metrics"]["verified_versions"] == 0
     assert snapshot["recent_documents"][0]["filename"] == "dashboard.csv"
     assert snapshot["recent_activity"][0]["action"] == "document.original_registered"

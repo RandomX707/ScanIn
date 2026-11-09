@@ -42,6 +42,87 @@ def test_content_first_registry_identifies_json_with_mismatched_suffix():
     assert result["findings"] == ["extension_mismatch"]
 
 
+def test_structural_summary_for_csv_uses_real_rows_and_recognized_headers():
+    result = inspect_bytes(b"claim_number,policyholder,amount\nC-17,Example Person,125\nC-18,Another Person,80\n",
+                           filename="claims.csv")
+    summary = result["structural_summary"]
+    assert summary["generation_method"] == "structural"
+    assert summary["format"] == "csv"
+    assert summary["apparent_document_type"] == "insurance claim document"
+    assert summary["statistics"]["record_count"] == 2
+    assert {item["name"] for item in summary["observed_fields"]} >= {"claim_number", "policyholder", "amount"}
+    assert "2 data records" in summary["description"]
+    assert "Example Person" not in summary["description"]
+    single = inspect_bytes(b"claim_number\nCLM-1\n", filename="claim.csv")["structural_summary"]
+    assert "1 data record across" in single["description"]
+
+
+def test_ragged_csv_summary_keeps_inspection_available():
+    for source in (b"claim_number,policy_number,insured_name\nC-1,P-1,Ada\nC-2,P-2\nC-3,P-3,Bea,extra\n",
+                   b"claim,insured\nC-1,Ada,extra\nC-2\n",
+                   b"claim,insured,unused\nC-1,Ada\n"):
+        result = inspect_bytes(source, filename="ragged.csv", include_targets=True,
+                               include_summary_evidence=True)
+        assert result["status"] == "inspected"
+        assert result["structural_summary"]["statistics"]["column_count"] == max(
+            len(line.split(b",")) for line in source.splitlines() if line)
+        assert result["structural_summary"]["limitations"]
+        assert result["targets"]
+
+
+def test_rejected_pdf_keeps_a_complete_inspection_envelope(tmp_path, monkeypatch, capsys):
+    from scripts.host.create_browser_fixtures import create_encrypted_pdf
+    from packages.workers.parse_entry import main
+    data = create_encrypted_pdf()
+    path = tmp_path / "encrypted.pdf"
+    path.write_bytes(data)
+    monkeypatch.setattr("sys.argv", ["parse_entry", "--input", str(path)])
+    assert main() == 0
+    result = __import__("json").loads(capsys.readouterr().out)
+    assert result["status"] == "rejected"
+    assert result["capability"]["reasons"] == ["encrypted_pdf"]
+    assert result["sha256"] == __import__("hashlib").sha256(data).hexdigest()
+
+
+def test_structural_summary_for_json_describes_shape_without_inventing_a_type():
+    result = inspect_bytes(b'{"envelope":{"items":[{"reference":"X-1"}]},"enabled":true,"loss_amount":125.5}', filename="payload.json")
+    summary = result["structural_summary"]
+    assert summary["statistics"]["top_level_structure"] == "object"
+    assert summary["apparent_document_type"] is None
+    assert "envelope contains items" in summary["description"]
+    assert "X-1" not in summary["description"]
+    assert next(item for item in summary["observed_fields"] if item["name"] == "loss_amount")["kind"] == "number"
+
+
+def test_structural_summary_is_deterministic_and_unknown_type_is_honest():
+    source = b"plain text without a supported document structure"
+    first = inspect_bytes(source, filename="notes.txt")["structural_summary"]
+    second = inspect_bytes(source, filename="notes.txt")["structural_summary"]
+    assert first == second
+    assert first["format"] == "text"
+    assert first["apparent_document_type"] is None
+    assert "unclear" in first["description"].lower()
+    unsupported = inspect_bytes(b"\x89PNG\r\n\x1a\n", filename="image.png")["structural_summary"]
+    assert unsupported["apparent_document_type"] is None
+    assert "could not be read reliably" in unsupported["description"]
+
+
+def test_structural_summary_xlsx_uses_sheet_dimensions_and_headers():
+    from openpyxl import Workbook
+    workbook = Workbook(); sheet = workbook.active; sheet.title = "Claims"
+    sheet.append(["claim_number", "policyholder"]); sheet.append(["CLM-9", "Example"])
+    sheet["C1"] = "=A2"
+    workbook.create_sheet("Totals").append(["records"])
+    output = io.BytesIO(); workbook.save(output)
+    summary = inspect_bytes(output.getvalue(), filename="claims.xlsx")["structural_summary"]
+    assert summary["format"] == "xlsx"
+    assert summary["statistics"]["worksheets"][0]["rows"] == 2
+    assert summary["statistics"]["worksheets"][0]["columns"] == 3
+    assert summary["apparent_document_type"] == "insurance claim document"
+    assert "=A2" not in summary["description"]
+    assert "Totals (1 row × 1 column)" in summary["description"]
+
+
 def test_restricted_entrypoint_returns_bounded_typed_targets_on_request():
     result = inspect_bytes(b"claim_id,amount\nCLM-1,125\n", filename="claim.csv", include_targets=True)
     assert result["targets"] == [
@@ -61,6 +142,32 @@ def test_restricted_entrypoint_returns_bounded_typed_targets_on_request():
     assert result["targets_truncated"] is False
 
 
+def test_ai_evidence_is_opt_in_bounded_and_uses_server_references():
+    source = b"claim_number,policyholder\nC-17,Example Person\nC-18,Second Person\n"
+    normal = inspect_bytes(source, filename="claims.csv")
+    ai = inspect_bytes(source, filename="claims.csv", include_summary_evidence=True)
+    assert "summary_evidence" not in normal
+    assert ai["summary_evidence"] == [
+        {"id": "csv:header", "location": "CSV header", "text": "claim_number | policyholder"},
+        {"id": "csv:row:2", "location": "CSV record 1", "text": "claim_number: C-17; policyholder: Example Person"},
+        {"id": "csv:row:3", "location": "CSV record 2", "text": "claim_number: C-18; policyholder: Second Person"},
+    ]
+    assert sum(len(item["text"]) for item in ai["summary_evidence"]) <= 8000
+
+
+def test_ai_evidence_for_json_and_xlsx_is_content_bounded_and_location_addressable():
+    parsed_json = inspect_bytes(b'{"claim":{"reference":"SYN-17","status":"open"}}',
+                                filename="claim.json", include_summary_evidence=True)
+    assert {item["id"] for item in parsed_json["summary_evidence"]} >= {"json:$/claim/reference", "json:$/claim/status"}
+    from openpyxl import Workbook
+    workbook = Workbook(); sheet = workbook.active; sheet.title = "Synthetic Claims"
+    sheet.append(["claim_number", "status"]); sheet.append(["SYN-18", "open"])
+    output = io.BytesIO(); workbook.save(output)
+    parsed_xlsx = inspect_bytes(output.getvalue(), filename="claims.xlsx", include_summary_evidence=True)
+    assert any(item["location"].startswith("Worksheet Synthetic Claims") and "SYN-18" in item["text"]
+               for item in parsed_xlsx["summary_evidence"])
+
+
 def test_zip_expansion_bomb_is_rejected_before_adapter_load():
     data = _xlsx({
         "[Content_Types].xml": b"Types",
@@ -77,11 +184,10 @@ def test_path_traversal_member_is_rejected():
         inspect_bytes(data)
 
 
-def test_non_xlsx_zip_is_explicit_read_only():
+def test_malformed_docx_zip_is_rejected():
     data = _xlsx({"word/document.xml": b"<document />"})
-    result = inspect_bytes(data)
-    assert result["capability"]["level"] == "Read-only"
-    assert "adapter_not_implemented" in result["capability"]["reasons"]
+    with pytest.raises(ParserRejected, match="not_docx"):
+        inspect_bytes(data)
 
 
 def test_nested_archives_are_rejected_without_extraction(tmp_path):

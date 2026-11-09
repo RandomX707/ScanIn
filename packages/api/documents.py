@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import io
 import json
+import time
 from urllib.parse import quote
 from uuid import UUID, uuid4
 from typing import Any
@@ -17,30 +19,54 @@ from packages.api.auth import AuthenticatedIdentity, require_identity
 from packages.api.db_context import api_tenant_transaction
 from packages.api.errors import APIError
 from packages.ingestion.pipeline import IngestionOrchestrator
-from packages.registry.documents import DocumentRepository
+from packages.registry.documents import DocumentRepository, is_download_eligible
 from packages.storage.local import ImmutableLocalStorage, StoredFile
-from packages.workers.parser import ParserNotVerified
+from packages.workers.parser import ParserNotVerified, PdfVerificationWorkerUnavailable, RestrictedPdfVerifier
 from packages.core.models.contracts import TypedValue
 from packages.db.worker_context import ValidatedJobContext, worker_tenant_transaction
 from packages.workers.lifecycle import WorkerLifecycleRepository
 from packages.core.adapters.csv_adapter.adapter import CsvAdapter
 from packages.core.adapters.json_adapter.adapter import JsonAdapter
 from packages.core.adapters.xlsx.adapter import XlsxAdapter
+from packages.core.adapters.pdf.adapter import PdfAdapter
+from packages.core.adapters.docx.adapter import DocxAdapter
 from packages.core.models.contracts import Patch
 from packages.core.verification.text_adapters import CsvIndependentVerifier, JsonIndependentVerifier
+from packages.core.verification.pdf import PdfIndependentVerifier
+from packages.core.verification.docx import DocxIndependentVerifier
 from packages.core.verification.independent import IndependentVerifier
 from packages.workflow.frozen_serialization import deserialize_frozen_edit_set, serialize_frozen_edit_set
 from packages.workflow.release import NativeReleaseWorkflow, WorkflowRejected, XlsxReleaseWorkflow
+from packages.workflow.release_lock import ReleaseInProgress, claim_release
 from packages.ingestion.models import ScanResult
 from packages.core.planning.planner import PlanError
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
+MAX_VIEW_TARGET_OFFSET = 10_000_000
+MAX_TEXT_ANCHOR_CHARS = 500
+TEXT_ANCHOR_CONTEXT_CHARS = 40
+MAX_VIEW_TARGET_LOOKUP = 50
+
+
+class TextAnchorRequest(BaseModel):
+    """A user selection inside text the server extracted from one immutable source version."""
+    model_config = ConfigDict(extra="forbid")
+    source_version_id: UUID
+    kind: str = Field(pattern=r"^(pdf_page|docx_block)$")
+    page: int | None = Field(default=None, ge=1, le=100_000)
+    block_id: str | None = Field(default=None, min_length=1, max_length=300)
+    start: int = Field(ge=0, le=1_000_000)
+    end: int = Field(ge=1, le=1_000_000)
+    text: str = Field(min_length=1, max_length=MAX_TEXT_ANCHOR_CHARS)
 
 
 class ManualFieldRequest(BaseModel):
+    """Exactly one source: a parser-discovered target (editable or not) or a validated text anchor."""
     model_config = ConfigDict(extra="forbid")
-    target_id: str = Field(min_length=1, max_length=500)
-    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    target_id: str | None = Field(default=None, min_length=1, max_length=500)
+    fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    text_anchor: TextAnchorRequest | None = None
+    label: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class DataCorrectionRequest(BaseModel):
@@ -71,15 +97,9 @@ class PatchBatchRequest(BaseModel):
     patches: list[PatchInput] = Field(min_length=1, max_length=200)
 
 
-class ReviewRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    decision: str = Field(pattern=r"^(approved|rejected)$")
-    note: str = Field(default="", max_length=2000)
-
-
-def _require_processor(identity: AuthenticatedIdentity) -> None:
-    if identity.role not in {"processor", "administrator"}:
-        raise APIError(403, "role_not_permitted", "A processor role is required for this correction.")
+def _require_owner(identity: AuthenticatedIdentity) -> None:
+    if identity.role != "OWNER":
+        raise APIError(403, "owner_required", "An authenticated owner identity is required.")
 
 
 def _typed_correction(value: dict[str, Any], *, allow_metadata: bool = False) -> TypedValue:
@@ -104,6 +124,11 @@ def _typed_correction(value: dict[str, Any], *, allow_metadata: bool = False) ->
         if kind == "datetime":
             from datetime import datetime
             datetime.fromisoformat(str(value["value"]))
+        if kind == "time":
+            from datetime import time
+            parsed_time = time.fromisoformat(str(value["value"]))
+            if parsed_time.tzinfo is not None:
+                raise ValueError("time_with_timezone")
     except (ValueError, TypeError, KeyError):
         raise APIError(422, "invalid_correction_value", "The correction type and value are incompatible.") from None
     return typed
@@ -143,13 +168,56 @@ def _source_version(request: Request, identity: AuthenticatedIdentity, document_
     return version, source
 
 
-def _release_workflow(adapter_name: str) -> NativeReleaseWorkflow:
+def _presentation_capability(report: object) -> dict[str, object]:
+    return dict(getattr(report, "capability"))
+
+
+VIEWABLE_ADAPTERS = frozenset({"csv", "json", "xlsx", "pdf", "docx"})
+
+
+def _capabilities(report: Any) -> dict[str, dict[str, object]]:
+    """Three independent capabilities: viewable, natively editable, eligible for sidecar corrections."""
+    capability = dict(report.capability or {})
+    reasons = list(capability.get("reasons") or [])
+    level = capability.get("level")
+    if level == "rejected":
+        viewable, view_reason = False, reasons[0] if reasons else "document_rejected"
+    elif report.status != "inspected" or report.adapter not in VIEWABLE_ADAPTERS:
+        viewable, view_reason = False, reasons[0] if reasons else "viewer_not_supported"
+    else:
+        viewable, view_reason = True, None
+    native = viewable and level == "editable"
+    details = report.details or {}
+    if not viewable:
+        anchorable, anchor_reason = False, view_reason
+    elif report.adapter == "pdf":
+        anchorable = bool(details.get("fields")) or any(
+            not page.get("scanned_or_image_only") and str(page.get("text", "")).strip() for page in details.get("pages", []))
+        anchor_reason = None if anchorable else "no_extractable_text_or_fields"
+    elif report.adapter == "docx":
+        anchorable = bool(details.get("blocks"))
+        anchor_reason = None if anchorable else "no_extractable_text"
+    else:
+        page = report.targets_page or {}
+        total = page.get("total") if page.get("total") is not None else len(report.targets or ())
+        anchorable = bool(total)
+        anchor_reason = None if anchorable else "no_values_found"
+    return {"viewable": {"available": viewable, "reason": view_reason},
+            "native_editing": {"available": native, "reason": None if native else (view_reason if not viewable else reasons[0] if reasons else "document_not_editable")},
+            "data_corrections": {"available": anchorable, "reason": anchor_reason}}
+
+
+def _release_workflow(adapter_name: str, *, docx_mode: str = "structural", pdf_verifier=None) -> NativeReleaseWorkflow:
     if adapter_name == "csv":
         return NativeReleaseWorkflow(CsvAdapter(), CsvIndependentVerifier())
     if adapter_name == "json":
         return NativeReleaseWorkflow(JsonAdapter(), JsonIndependentVerifier())
     if adapter_name == "xlsx":
         return XlsxReleaseWorkflow()
+    if adapter_name == "pdf":
+        return NativeReleaseWorkflow(PdfAdapter(), pdf_verifier or PdfIndependentVerifier())
+    if adapter_name == "docx":
+        return NativeReleaseWorkflow(DocxAdapter(), DocxIndependentVerifier(mode=docx_mode))
     raise APIError(415, "native_adapter_unsupported", "This document format does not support native editing.")
 
 
@@ -310,11 +378,17 @@ def inspect_document(
     return {
         "document_id": str(parsed_id), "filename": filename, "source_sha256": report.sha256,
         "size_bytes": report.size_bytes, "media_type": report.media_type,
-        "capability": report.capability, "adapter": report.adapter,
+        "capability": _presentation_capability(report), "adapter": report.adapter,
         "adapter_version": report.adapter_version, "sheets": list(report.sheets),
         "features": list(report.features), "findings": list(report.findings),
-        "inspection_score": report.score, "state": state, "viewing_ready": state == "ready",
+        "inspection_score": report.score, "state": state,
+        # Ready for viewing only when a safe viewer exists for this file (a legacy .doc is inspected
+        # but has no viewer, so it is never reported as viewable).
+        "viewing_ready": state == "ready" and _capabilities(report)["viewable"]["available"],
+        "capabilities": _capabilities(report),
         "targets": list(report.targets), "targets_truncated": report.targets_truncated,
+        "targets_page": report.targets_page, "editable_target_count": getattr(report, "targets_editable_total", None),
+        "details": report.details,
     }
 
 
@@ -336,7 +410,14 @@ def list_document_versions(document_id: str, request: Request,
 
 @router.get("/{document_id}/versions/{version_id}/view")
 def view_document_version(document_id: str, version_id: str, request: Request,
+                          target_offset: int = Query(default=0, ge=0, le=MAX_VIEW_TARGET_OFFSET),
+                          target_id: list[str] = Query(default=[]),
                           identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
+    """Return one bounded page of native targets, or an exact lookup of up to MAX_VIEW_TARGET_LOOKUP ids."""
+    if len(target_id) > MAX_VIEW_TARGET_LOOKUP or any(not item or len(item) > 512 for item in target_id):
+        raise APIError(422, "target_lookup_invalid", "Request at most 50 exact target identifiers.")
+    if target_id and target_offset:
+        raise APIError(422, "target_lookup_invalid", "Use either a target page or an exact target lookup.")
     try:
         parsed_id, parsed_version_id = UUID(document_id), UUID(version_id)
     except ValueError:
@@ -355,34 +436,138 @@ def view_document_version(document_id: str, version_id: str, request: Request,
             source = storage.read_original(stored)
             filename = _filename(str(row["filename"]))
     try:
-        report = request.app.state.restricted_parser.inspect(stored.path, filename=filename, include_targets=True)
+        report = request.app.state.restricted_parser.inspect(
+            stored.path, filename=filename, include_targets=True, target_offset=target_offset,
+            target_ids=target_id or None)
     except ParserNotVerified:
         raise APIError(503, "view_not_verified", "Safe document viewing is unavailable.") from None
     if report.sha256 != row["sha256"]:
         raise APIError(409, "source_version_changed", "The requested version failed integrity validation.")
-    if report.adapter not in {"csv", "json", "xlsx"} or report.status != "inspected":
-        raise APIError(415, "viewer_not_supported", "This file type has no supported read-only viewer.")
-    if report.targets_truncated:
-        raise APIError(413, "viewer_target_limit", "The document exceeds the safe viewer target limit.")
+    if report.adapter not in VIEWABLE_ADAPTERS or report.status != "inspected":
+        raise APIError(415, "viewer_not_supported", "This file type has no supported read-only viewer.",
+                       details=[{"capability": _presentation_capability(report), "capabilities": _capabilities(report)}])
+    page = report.targets_page or {}
+    if target_offset and page.get("total") is not None and target_offset >= int(page["total"]):
+        raise APIError(416, "target_page_out_of_range", "The requested target page is beyond the document.")
     return {
         "document_id": str(parsed_id), "version_id": str(parsed_version_id),
         "parent_version_id": str(row["parent_version_id"]) if row["parent_version_id"] else None,
         "version_kind": row["kind"], "filename": filename, "source_sha256": report.sha256,
         "size_bytes": len(source), "media_type": report.media_type,
-        "capability": report.capability, "adapter": report.adapter,
+        "capability": _presentation_capability(report), "adapter": report.adapter,
+        "docx_verification_mode": request.app.state.settings.channel360_docx_verification_mode
+        if report.adapter == "docx" else None,
         "features": list(report.features), "targets": list(report.targets),
+        "capabilities": _capabilities(report),
+        "targets_truncated": report.targets_truncated, "targets_page": report.targets_page,
+        "editable_target_count": getattr(report, "targets_editable_total", None),
+        "details": report.details,
+        "structural_summary": ({**report.structural_summary, "source_document_id": str(parsed_id),
+                                "source_version_id": str(parsed_version_id)} if report.structural_summary else None),
     }
+
+
+@router.post("/{document_id}/versions/{version_id}/ai-summary")
+def generate_ai_summary(document_id: str, version_id: str, request: Request,
+                        identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
+    """Generate an optional explanation from bounded evidence for one authorized immutable version."""
+    try:
+        parsed_id, parsed_version_id = UUID(document_id), UUID(version_id)
+    except ValueError:
+        raise APIError(404, "not_found", "The requested version was not found.") from None
+    storage: ImmutableLocalStorage = request.app.state.document_storage
+    with request.app.state.engine.connect() as connection:
+        with api_tenant_transaction(connection, identity):
+            repo = DocumentRepository(connection, identity.tenant_id)
+            row = repo.get_version(parsed_id, parsed_version_id)
+            if row is None:
+                raise APIError(404, "not_found", "The requested version was not found.")
+            if row["ingestion_state"] != "ready":
+                raise APIError(409, "document_not_ready", "The document must finish safe inspection first.")
+            if row["kind"] == "derived":
+                version = next((item for item in repo.list_versions(parsed_id)
+                                if str(item["version_id"]) == str(parsed_version_id)), None)
+                if version is None or version.get("verification_outcome") != "VERIFIED":
+                    raise APIError(404, "not_found", "The requested version was not found.")
+            stored = StoredFile(identity.tenant_id, parsed_id, storage.root / str(row["storage_key"]),
+                                str(row["storage_key"]), int(row["size_bytes"]), str(row["sha256"]))
+            storage.read_original(stored)
+            filename = _filename(str(row["filename"]))
+    try:
+        report = request.app.state.restricted_parser.inspect(
+            stored.path, filename=filename, include_summary_evidence=True, timeout_seconds=30)
+    except ParserNotVerified:
+        raise APIError(503, "view_not_verified", "Safe document inspection is unavailable.") from None
+    if report.status != "inspected" or report.adapter not in {"csv", "json", "xlsx", "pdf", "docx"}:
+        raise APIError(415, "viewer_not_supported", "This file type has no supported safe text extraction.")
+    if report.sha256 != row["sha256"]:
+        raise APIError(409, "source_version_changed", "The requested version failed integrity validation.")
+    if report.targets_truncated:
+        raise APIError(413, "summary_evidence_limit", "The document exceeds safe summary evidence limits.")
+    evidence = list(report.summary_evidence)
+    pdf_pages = (report.details or {}).get("pages", []) if report.adapter == "pdf" else []
+    if not evidence or (pdf_pages and not any(not page.get("scanned_or_image_only") for page in pdf_pages)):
+        raise APIError(422, "ai_insufficient_readable_content",
+                       "No readable document content is available to explain. Scanned PDFs require OCR, which is not enabled.")
+    provider = getattr(request.app.state, "llm_provider", None)
+    if provider is None:
+        from packages.core.summaries.llm import LLMConfigurationError, OpenAICompatibleExplanationProvider
+        try:
+            provider = OpenAICompatibleExplanationProvider(request.app.state.settings)
+        except LLMConfigurationError:
+            raise APIError(503, "ai_not_configured", "AI explanations are unavailable until a server-side provider is configured.") from None
+    now = time.monotonic()
+    limiter = request.app.state.ai_summary_requests
+    with request.app.state.ai_summary_lock:
+        recent = [stamp for stamp in limiter.get((str(identity.tenant_id), identity.subject), []) if now - stamp < 60]
+        if len(recent) >= 5:
+            raise APIError(429, "ai_rate_limited", "The AI explanation limit is five requests per user per minute.")
+        recent.append(now)
+        limiter[(str(identity.tenant_id), identity.subject)] = recent
+    from packages.core.summaries.llm import LLMProviderError
+    try:
+        result = provider.explain(source_document_id=str(parsed_id), source_version_id=str(parsed_version_id),
+                                 source_sha256=report.sha256,
+                                 structural_summary=report.structural_summary or {}, evidence=evidence)
+    except LLMProviderError as error:
+        messages = {
+            "provider_timeout": ("The AI provider did not respond in time.", 504),
+            "provider_rate_limited": ("The AI provider is rate limiting requests. Try again later.", 429),
+            "provider_credentials_rejected": ("The configured AI provider credentials were rejected.", 503),
+            "provider_unavailable": ("The AI provider is temporarily unavailable.", 503),
+            "provider_response_not_grounded": ("The AI response did not pass source-reference and text-overlap checks. Those checks do not verify factual accuracy.", 502),
+            "insufficient_readable_evidence": ("There is not enough readable content to explain.", 422),
+        }
+        message, status = messages.get(error.code, ("The AI provider returned an invalid response.", error.status_code))
+        raise APIError(status, error.code, message) from None
+    except Exception:
+        # Provider exceptions may contain request/response material; never propagate or log their text.
+        raise APIError(502, "provider_request_failed", "The AI explanation could not be generated.") from None
+    if (result.get("source_document_id") != str(parsed_id) or
+            result.get("source_version_id") != str(parsed_version_id) or
+            result.get("source_sha256") != report.sha256 or result.get("generation_method") != "ai"):
+        raise APIError(502, "provider_response_invalid", "The AI response did not match the selected source version.")
+    return result
 
 
 @router.post("/{document_id}/fields")
 def create_manual_field(document_id: str, payload: ManualFieldRequest, request: Request,
                         identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    """Bind a user-selected field to a current, parser-discovered native target."""
-    _require_processor(identity)
+    """Register a sidecar data-correction field bound to safely inspected source content.
+
+    A field is either a parser-discovered target (native editability is irrelevant: corrections never
+    touch the file) or a text anchor that the server re-extracts and checks against the immutable
+    source. The observed value always comes from the server's own extraction, never from the client.
+    """
+    _require_owner(identity)
     try:
         parsed_id = UUID(document_id)
     except ValueError:
         raise APIError(404, "not_found", "The requested document was not found.") from None
+    by_target = payload.target_id is not None or payload.fingerprint is not None
+    if by_target == (payload.text_anchor is not None) or (by_target and (payload.target_id is None or payload.fingerprint is None)):
+        raise APIError(422, "field_source_invalid",
+                       "Provide either target_id and fingerprint, or one text_anchor.")
     storage: ImmutableLocalStorage = request.app.state.document_storage
     with request.app.state.engine.connect() as connection:
         with api_tenant_transaction(connection, identity):
@@ -397,16 +582,35 @@ def create_manual_field(document_id: str, payload: ManualFieldRequest, request: 
             storage.read_original(stored)
             version_id = UUID(str(row["current_version_id"]))
             filename = _filename(str(row["filename"]))
+    anchor = payload.text_anchor
+    if anchor is not None and anchor.source_version_id != version_id:
+        raise APIError(409, "stale_source_version", "The selection was made on a version that is no longer current.")
     try:
-        report = request.app.state.restricted_parser.inspect(stored.path, filename=filename, include_targets=True)
+        report = request.app.state.restricted_parser.inspect(
+            stored.path, filename=filename, include_targets=anchor is None,
+            target_ids=[payload.target_id] if anchor is None else None)
     except ParserNotVerified:
         raise APIError(503, "target_resolution_not_verified", "Safe target resolution is unavailable.") from None
     if report.sha256 != stored.sha256:
         raise APIError(409, "source_version_changed", "The source version changed during target resolution.")
-    target = next((item for item in report.targets if item.get("id") == payload.target_id), None)
-    if target is None or target.get("editable") is not True or target.get("fingerprint") != payload.fingerprint:
-        raise APIError(409, "target_not_editable_or_stale", "The selected field is unsupported or no longer current.")
-    label = str(target.get("label") or payload.target_id)
+    if report.status != "inspected" or report.adapter not in {"csv", "json", "xlsx", "pdf", "docx"}:
+        raise APIError(409, "document_not_viewable", "This document has no safe viewer, so no field can be anchored in it.")
+    base_evidence = {"source_sha256": report.sha256, "source_version_id": str(version_id), "adapter": report.adapter,
+                     "adapter_version": report.adapter_version}
+    if anchor is None:
+        target = next((item for item in report.targets if item.get("id") == payload.target_id), None)
+        if target is None or target.get("fingerprint") != payload.fingerprint:
+            raise APIError(409, "target_not_found_or_stale", "The selected value is not present in the current source version.")
+        target_id, fingerprint, observed = str(payload.target_id), str(payload.fingerprint), target["value"]
+        label = payload.label or str(target.get("label") or payload.target_id)
+        evidence = {**base_evidence, "kind": "native_target", "target_id": target_id,
+                    "natively_editable": target.get("editable") is True, "native_reason": target.get("reason")}
+    else:
+        target_id, observed, label, evidence = _resolve_text_anchor(report, anchor, payload.label, base_evidence)
+        fingerprint = hashlib.sha256(json.dumps(
+            {"source_sha256": report.sha256, "anchor": target_id, "text": observed["value"]},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        evidence["text_sha256"] = hashlib.sha256(str(observed["value"]).encode()).hexdigest()
     try:
         with request.app.state.engine.connect() as connection:
             with api_tenant_transaction(connection, identity):
@@ -415,12 +619,62 @@ def create_manual_field(document_id: str, payload: ManualFieldRequest, request: 
                 if current is None or str(current.get("current_version_id")) != str(version_id) or current.get("sha256") != stored.sha256:
                     raise APIError(409, "source_version_changed", "The source version changed during target resolution.")
                 field_id = repo.create_manual_field(document_id=parsed_id, version_id=version_id,
-                    target_id=payload.target_id, fingerprint=payload.fingerprint, label=label,
-                    observed_value=target["value"], actor_id=identity.subject)
+                    target_id=target_id, fingerprint=fingerprint, label=label,
+                    observed_value=observed, actor_id=identity.subject, evidence=[evidence])
+    except APIError:
+        raise
     except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
         raise APIError(503, "field_registration_unavailable", "The selected field could not be recorded.") from None
-    return {"field_id": str(field_id), "document_id": str(parsed_id), "target_id": payload.target_id,
-            "label": label, "observed_value": target["value"], "source_version_id": str(version_id)}
+    return {"field_id": str(field_id), "document_id": str(parsed_id), "target_id": target_id,
+            "label": label, "observed_value": observed, "source_version_id": str(version_id),
+            "target_fingerprint": fingerprint, "evidence": [evidence]}
+
+
+def _resolve_text_anchor(report: Any, anchor: TextAnchorRequest, label: str | None,
+                         base_evidence: dict[str, Any]) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
+    """Validate a text selection against the text the restricted parser extracted from the source."""
+    details = report.details or {}
+    if anchor.end <= anchor.start or anchor.end - anchor.start > MAX_TEXT_ANCHOR_CHARS:
+        raise APIError(422, "text_anchor_out_of_range", "The selection must cover 1 to 500 characters.")
+    if anchor.kind == "pdf_page":
+        if report.adapter != "pdf" or anchor.page is None or anchor.block_id is not None:
+            raise APIError(422, "text_anchor_not_supported", "A PDF page anchor needs a PDF document and a page number.")
+        page = next((item for item in details.get("pages", []) if item.get("page") == anchor.page), None)
+        if page is None:
+            raise APIError(422, "text_anchor_out_of_range", "The selected page does not exist in this source.")
+        if page.get("scanned_or_image_only") or not str(page.get("text", "")).strip():
+            raise APIError(422, "text_not_extractable",
+                           "This page has no extractable text layer. OCR is not enabled, so no text can be anchored.")
+        text = str(page["text"])
+        target_id = f"text:pdf:page:{anchor.page}:{anchor.start}-{anchor.end}"
+        location: dict[str, Any] = {"page": anchor.page}
+        extraction = "pdfium_text_layer"
+        default_label = f"Page {anchor.page} text"
+    else:
+        if report.adapter != "docx" or anchor.block_id is None or anchor.page is not None:
+            raise APIError(422, "text_anchor_not_supported", "A Word anchor needs a DOCX document and a text block.")
+        block = next((item for item in details.get("blocks", []) if item.get("id") == anchor.block_id), None)
+        if block is None:
+            raise APIError(422, "text_anchor_out_of_range", "The selected text block does not exist in this source.")
+        text = str(block.get("text", ""))
+        target_id = f"text:docx:{anchor.block_id}:{anchor.start}-{anchor.end}"
+        location = {"block_id": anchor.block_id, "part": block.get("part"), "paragraph_index": block.get("paragraph_index"),
+                    "block_kind": block.get("kind")}
+        extraction = "docx_w_t_runs_excluding_deleted_text"
+        default_label = f"{str(block.get('kind', 'paragraph')).replace('_', ' ').capitalize()} text"
+    if anchor.end > len(text):
+        raise APIError(422, "text_anchor_out_of_range", "The selection extends beyond the extracted source text.")
+    selected = text[anchor.start:anchor.end]
+    if selected != anchor.text:
+        raise APIError(409, "text_selection_mismatch", "The selected text does not match the immutable source at that location.")
+    if not selected.strip():
+        raise APIError(422, "text_selection_empty", "Select visible text, not only whitespace.")
+    observed = {"type": "string", "value": selected, "native": selected, "display": None}
+    evidence = {**base_evidence, "kind": "text_selection", "anchor_kind": anchor.kind, "location": location,
+                "start": anchor.start, "end": anchor.end, "extraction": extraction,
+                "context_before": text[max(0, anchor.start - TEXT_ANCHOR_CONTEXT_CHARS):anchor.start],
+                "context_after": text[anchor.end:anchor.end + TEXT_ANCHOR_CONTEXT_CHARS]}
+    return target_id, observed, label or default_label, evidence
 
 
 @router.get("/{document_id}/fields")
@@ -443,7 +697,7 @@ def list_manual_fields(document_id: str, request: Request,
 @router.post("/{document_id}/fields/{field_id}/corrections")
 def create_data_correction(document_id: str, field_id: str, payload: DataCorrectionRequest, request: Request,
                            identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    _require_processor(identity)
+    _require_owner(identity)
     try:
         parsed_document, parsed_field = UUID(document_id), UUID(field_id)
     except ValueError:
@@ -490,8 +744,7 @@ def export_data_corrections(document_id: str, request: Request,
 @router.put("/{document_id}/category")
 def classify_document(document_id: str, payload: CategoryRequest, request: Request,
                       identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    if identity.role != "administrator":
-        raise APIError(403, "administrator_required", "Only an administrator can authorize a document category.")
+    _require_owner(identity)
     try:
         parsed_id = UUID(document_id)
         with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
@@ -509,7 +762,7 @@ def classify_document(document_id: str, payload: CategoryRequest, request: Reque
 @router.post("/{document_id}/edit-sets")
 def create_edit_set_draft(document_id: str, payload: EditSetDraftRequest, request: Request,
                           identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    _require_processor(identity)
+    _require_owner(identity)
     try:
         parsed_id = UUID(document_id)
     except ValueError:
@@ -522,7 +775,7 @@ def create_edit_set_draft(document_id: str, payload: EditSetDraftRequest, reques
             if document is None:
                 raise APIError(404, "not_found", "The requested document was not found.")
             if document["document_category"] != "insurer-authored":
-                raise APIError(403, "document_category_not_authorized", "Only an administrator-classified insurer-authored document can be changed.")
+                raise APIError(403, "document_category_not_authorized", "Only a document classified as insurer-authored can be changed.")
             if document["ingestion_state"] != "ready" or document["current_version_id"] is None:
                 raise APIError(409, "document_not_ready", "Safe inspection must finish before creating edits.")
             repo.create_edit_set(edit_set_id=edit_set_id, document_id=parsed_id,
@@ -573,7 +826,7 @@ def list_document_audit(document_id: str, request: Request,
 @router.put("/{document_id}/edit-sets/{edit_set_id}/patches")
 def add_edit_set_patches(document_id: str, edit_set_id: str, payload: PatchBatchRequest, request: Request,
                          identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    _require_processor(identity)
+    _require_owner(identity)
     try:
         parsed_id, parsed_edit_id = UUID(document_id), UUID(edit_set_id)
     except ValueError:
@@ -592,7 +845,8 @@ def add_edit_set_patches(document_id: str, edit_set_id: str, payload: PatchBatch
     try:
         report = request.app.state.restricted_parser.inspect(
             request.app.state.document_storage.root / str(version["storage_key"]),
-            filename=str(version.get("filename", "")) or str(edit_set["filename"]), include_targets=True)
+            filename=str(version.get("filename", "")) or str(edit_set["filename"]), include_targets=True,
+            target_ids=[item.target_id for item in payload.patches])
     except ParserNotVerified:
         raise APIError(503, "preflight_not_verified", "Restricted target resolution is unavailable.") from None
     if report.sha256 != version["sha256"]:
@@ -630,7 +884,7 @@ def add_edit_set_patches(document_id: str, edit_set_id: str, payload: PatchBatch
 @router.post("/{document_id}/edit-sets/{edit_set_id}/preflight")
 def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
                        identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    _require_processor(identity)
+    _require_owner(identity)
     try:
         parsed_id, parsed_edit_id = UUID(document_id), UUID(edit_set_id)
     except ValueError:
@@ -654,12 +908,14 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
     try:
         report = request.app.state.restricted_parser.inspect(
             request.app.state.document_storage.root / str(version["storage_key"]),
-            filename=str(edit_set["filename"]), include_targets=True)
+            filename=str(edit_set["filename"]), include_targets=True,
+            target_ids=[str(item["target_id"]) for item in stored_patches])
     except ParserNotVerified:
         raise APIError(503, "preflight_not_verified", "Restricted preflight is unavailable.") from None
     if report.sha256 != version["sha256"]:
         raise APIError(409, "stale_base_version", "The base version failed its source fingerprint check.")
-    workflow = _release_workflow(str(report.adapter))
+    docx_mode = request.app.state.settings.channel360_docx_verification_mode
+    workflow = _release_workflow(str(report.adapter), docx_mode=docx_mode)
     target_map = {item["id"]: item for item in report.targets}
     patch_values: list[Patch] = []
     for item in stored_patches:
@@ -678,7 +934,17 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
         frozen = workflow.freeze(source=source, document_id=str(parsed_id), base_version_id=str(base_version_id),
             actor_id=identity.subject, role=identity.role, authorized_category="insurer-authored",
             reason=str(edit_set["reason"]), patches=patch_values, edit_set_id=str(parsed_edit_id))
+        if report.adapter == "docx":
+            readiness = workflow.release(source=source, edit_set=frozen)
+            expected = "STRUCTURALLY_VERIFIED" if docx_mode == "structural" else "VERIFIED"
+            if readiness.status != expected:
+                code = "docx_structural_preflight_failed" if docx_mode == "structural" else "critical_docx_visual_verification_unavailable"
+                message = ("DOCX structural preflight failed." if docx_mode == "structural" else
+                           "The configured strict DOCX profile requires successful independent visual verification.")
+                raise APIError(422, code, message)
         plan_payload = serialize_frozen_edit_set(frozen)
+    except APIError:
+        raise
     except (PlanError, WorkflowRejected, ValueError) as error:
         reason = getattr(error, "code", getattr(error, "reason_code", str(error)))
         raise APIError(422, str(reason), "The edit set failed preflight validation.") from None
@@ -695,18 +961,24 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
         raise
     except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
         raise APIError(409, "freeze_conflict", "The plan could not be frozen because the draft changed.") from None
-    return {"edit_set_id": str(parsed_edit_id), "status": "submitted", "frozen_hash": frozen.frozen_sha256,
+    return {"edit_set_id": str(parsed_edit_id), "status": "ready_for_release", "frozen_hash": frozen.frozen_sha256,
             "plan_sha256": frozen.plan.plan_sha256,
             "changes": [{"target_id": patch.target_id, "old": patch.expected_old_value.canonical(),
                          "proposed": patch.new_value.canonical()} for patch in frozen.plan.patches],
             "dependents": list(frozen.plan.dependents), "dependencies_unknown": frozen.plan.dependencies_unknown,
-            "approval_required": True}
+            "verification_profile": docx_mode if report.adapter == "docx" else None}
 
 
 @router.post("/{document_id}/edit-sets/{edit_set_id}/rebase")
 def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
                     identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    _require_processor(identity)
+    """Rebase a stale draft or frozen (ready_for_release) edit set onto the current version.
+
+    A NEW draft is created; the predecessor keeps its frozen plan, hash and patches and becomes
+    superseded only once the successor exists. Conflicts against the new source are reported, never
+    resolved silently.
+    """
+    _require_owner(identity)
     try:
         parsed_id, parsed_edit_id = UUID(document_id), UUID(edit_set_id)
     except ValueError:
@@ -716,8 +988,9 @@ def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
         draft = repo.get_edit_set(parsed_edit_id)
         if draft is None or draft["document_id"] != parsed_id:
             raise APIError(404, "not_found", "The edit draft was not found.")
-        if draft["status"] != "draft" or draft["created_by"] != identity.subject:
-            raise APIError(409, "edit_set_not_rebasable", "Only the author may rebase an unfrozen draft.")
+        if draft["status"] not in {"draft", "ready_for_release"} or draft["created_by"] != identity.subject:
+            raise APIError(409, "edit_set_not_rebasable",
+                           "Only the author may rebase an open or frozen edit set that has not been released, superseded or failed.")
         patches = repo.list_patches(parsed_edit_id)
         document = repo.get(parsed_id)
         if document is None or document["current_version_id"] is None:
@@ -727,16 +1000,19 @@ def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
             raise APIError(409, "rebase_not_required", "The document has not changed since this draft was created.")
         if document["document_category"] != "insurer-authored":
             raise APIError(403, "document_category_not_authorized", "The current document classification does not permit editing.")
+    if not patches:
+        raise APIError(422, "patch_set_empty", "An edit set without patches has nothing to rebase.")
     version, source = _source_version(request, identity, parsed_id, new_version_id)
     try:
         report = request.app.state.restricted_parser.inspect(
             request.app.state.document_storage.root / str(version["storage_key"]),
-            filename=str(draft["filename"]), include_targets=True)
+            filename=str(draft["filename"]), include_targets=True,
+            target_ids=[str(patch["target_id"]) for patch in patches])
     except ParserNotVerified:
         raise APIError(503, "rebase_not_verified", "Restricted target resolution is unavailable.") from None
     if report.sha256 != version["sha256"]:
         raise APIError(409, "stale_base_version", "The proposed rebase version failed its source fingerprint check.")
-    if report.status != "inspected" or report.adapter not in {"csv", "json", "xlsx"}:
+    if report.status != "inspected" or report.adapter not in {"csv", "json", "xlsx", "pdf", "docx"}:
         raise APIError(415, "native_adapter_unsupported", "This version has no safe native editing adapter.")
     target_map = {item["id"]: item for item in report.targets}
     rebased: list[dict[str, object]] = []
@@ -744,72 +1020,61 @@ def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
     for patch in patches:
         target = target_map.get(str(patch["target_id"]))
         expected = patch["expected_old_value"]
-        if (target is None or target.get("editable") is not True
-                or target["value"].get("type") != expected.get("type")
-                or target["value"].get("value") != expected.get("value")):
-            conflicts.append({"target_id": str(patch["target_id"]), "reason": "base_value_changed_or_target_missing"})
+        if target is None:
+            conflicts.append({"target_id": str(patch["target_id"]), "reason": "target_missing_in_current_version"})
             continue
+        if target.get("editable") is not True:
+            conflicts.append({"target_id": str(patch["target_id"]), "reason": f"target_not_editable:{target.get('reason') or 'unsupported'}"})
+            continue
+        if target["value"].get("type") != expected.get("type") or target["value"].get("value") != expected.get("value"):
+            conflicts.append({"target_id": str(patch["target_id"]), "reason": "base_value_changed"})
+            continue
+        # New patch rows for the successor; the predecessor's rows (and frozen plan) stay untouched.
         rebased.append({"target_id": str(patch["target_id"]), "expected_old_value": target["value"],
                         "expected_fingerprint": target["fingerprint"], "new_value": patch["new_value"]})
     if conflicts:
-        raise APIError(409, "rebase_conflicts", "The new document version changed one or more target values.",
+        raise APIError(409, "rebase_conflicts", "The current document version changed one or more targeted values.",
                        details=conflicts)
     new_edit_set_id = uuid4()
     try:
         with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
-            repo = DocumentRepository(connection, identity.tenant_id)
-            current = repo.get(parsed_id)
-            if current is None or str(current["current_version_id"]) != str(new_version_id):
-                raise APIError(409, "stale_base_version", "The document changed during rebase.")
-            repo.create_edit_set(edit_set_id=new_edit_set_id, document_id=parsed_id,
-                base_version_id=new_version_id, category=str(current["document_category"]),
-                actor_id=identity.subject, reason=str(draft["reason"]))
-            repo.add_patches(new_edit_set_id, rebased, actor_id=identity.subject)
-    except APIError:
-        raise
-    except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
+            outcome = DocumentRepository(connection, identity.tenant_id).supersede_with_rebased_draft(
+                predecessor_id=parsed_edit_id, successor_id=new_edit_set_id, document_id=parsed_id,
+                new_version_id=new_version_id, actor_id=identity.subject, patches=rebased)
+    except ValueError as error:
+        code = str(error)
+        if code in {"edit_set_not_rebasable", "stale_base_version", "rebase_not_required"}:
+            raise APIError(409, code, "The edit set changed while it was being rebased; reload and try again.") from None
+        if code == "document_category_not_authorized":
+            raise APIError(403, code, "The current document classification does not permit editing.") from None
+        raise APIError(409, "rebase_conflict", "The draft could not be rebased against the current version.") from None
+    except (SQLAlchemyError, RuntimeError, PermissionError):
+        # Includes the unique successor index: a concurrent rebase already created the successor.
         raise APIError(409, "rebase_conflict", "The draft could not be rebased against the current version.") from None
     return {"previous_edit_set_id": str(parsed_edit_id), "edit_set_id": str(new_edit_set_id),
-            "base_version_id": str(new_version_id), "status": "draft", "patches": len(rebased)}
-
-
-@router.post("/{document_id}/edit-sets/{edit_set_id}/review")
-def review_edit_set(document_id: str, edit_set_id: str, payload: ReviewRequest, request: Request,
-                    identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    if identity.role not in {"reviewer", "administrator"}:
-        raise APIError(403, "reviewer_role_required", "Only a reviewer or administrator may decide this edit set.")
-    try:
-        parsed_id, parsed_edit_id = UUID(document_id), UUID(edit_set_id)
-    except ValueError:
-        raise APIError(404, "not_found", "The edit set was not found.") from None
-    try:
-        with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
-            repo = DocumentRepository(connection, identity.tenant_id)
-            edit_set = repo.get_edit_set(parsed_edit_id)
-            if edit_set is None or edit_set["document_id"] != parsed_id:
-                raise APIError(404, "not_found", "The edit set was not found.")
-            repo.review_edit_set(parsed_edit_id, decision=payload.decision, reviewer_id=identity.subject,
-                                 frozen_hash=str(edit_set["frozen_hash"]).strip(), note=payload.note)
-    except APIError:
-        raise
-    except ValueError as error:
-        code = "reviewer_must_differ_from_author" if str(error) == "reviewer_must_differ_from_author" else "review_precondition_failed"
-        raise APIError(409, code, "This edit set cannot be reviewed in its current state.") from None
-    except (SQLAlchemyError, RuntimeError, PermissionError):
-        raise APIError(503, "review_unavailable", "The review decision could not be recorded.") from None
-    return {"edit_set_id": str(parsed_edit_id), "status": payload.decision, "reviewer_id": identity.subject}
+            "base_version_id": str(new_version_id), "status": "draft", "patches": len(rebased),
+            "previous_status": outcome["previous_status"], "previous_frozen_hash": outcome["frozen_hash"],
+            "previous_base_version_id": str(outcome["from_version_id"]), "predecessor_status": "superseded"}
 
 
 @router.post("/{document_id}/edit-sets/{edit_set_id}/release")
 def release_edit_set(document_id: str, edit_set_id: str, request: Request,
                      identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    """Apply an approved frozen plan, independently verify it, scan it, then atomically register it."""
-    if identity.role not in {"processor", "administrator"}:
-        raise APIError(403, "role_not_permitted", "A processor role is required to release this correction.")
+    """Apply an owner-authorized frozen plan, verify and scan it before registration."""
+    _require_owner(identity)
     try:
         parsed_document, parsed_edit_set = UUID(document_id), UUID(edit_set_id)
     except ValueError:
         raise APIError(404, "not_found", "The edit set was not found.") from None
+    try:
+        with claim_release(request.app.state.engine, str(parsed_edit_set)):
+            return _release_edit_set_claimed(parsed_document, parsed_edit_set, request, identity)
+    except ReleaseInProgress:
+        raise APIError(409, "release_in_progress", "A release attempt for this edit set is already running.") from None
+
+
+def _release_edit_set_claimed(parsed_document: UUID, parsed_edit_set: UUID, request: Request,
+                              identity: AuthenticatedIdentity) -> dict[str, object]:
     with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
         repo = DocumentRepository(connection, identity.tenant_id)
         edit_set = repo.get_edit_set(parsed_edit_set)
@@ -819,9 +1084,15 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
             versions = repo.list_versions(parsed_document)
             released = next((v for v in versions if str(v["version_id"]) == str(edit_set["released_version_id"])), None)
             return {"edit_set_id": str(parsed_edit_set), "version_id": str(edit_set["released_version_id"]),
-                    "outcome": (released or {}).get("verification_outcome", "INCOMPLETE"), "idempotent": True}
-        if edit_set["status"] != "approved":
-            raise APIError(409, "approval_required", "A reviewer must approve the frozen edit set before release.")
+                    "outcome": (released or {}).get("verification_outcome", "INCOMPLETE"),
+                    "download_available": is_download_eligible(
+                        (released or {}).get("verification_outcome"), (released or {}).get("verification_adapter"), {
+                            "verification_profile": (released or {}).get("verification_profile"),
+                            "structural_checks": (released or {}).get("structural_checks"),
+                            "visual_checks": (released or {}).get("visual_checks"),
+                        }), "idempotent": True}
+        if edit_set["status"] != "ready_for_release":
+            raise APIError(409, "edit_set_not_ready_for_release", "Preflight and freeze this edit set before release.")
         if str(edit_set["current_version_id"]) != str(edit_set["base_version_id"]):
             raise APIError(409, "stale_base_version", "The document changed after this edit set was created.")
         frozen_payload = edit_set.get("patch_plan")
@@ -834,8 +1105,15 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
     if frozen.edit_set_id != str(parsed_edit_set) or frozen.document_id != str(parsed_document):
         raise APIError(409, "frozen_plan_identity_mismatch", "The frozen plan is bound to a different edit set.")
     version, source = _source_version(request, identity, parsed_document, UUID(str(edit_set["base_version_id"])))
-    workflow = _release_workflow(adapter_name)
-    result = workflow.release(source=source, edit_set=frozen, allow_incomplete=True)
+    docx_mode = request.app.state.settings.channel360_docx_verification_mode
+    workflow = _release_workflow(adapter_name, docx_mode=docx_mode,
+                                 pdf_verifier=RestrictedPdfVerifier(request.app.state.restricted_parser))
+    try:
+        result = workflow.release(source=source, edit_set=frozen, allow_incomplete=True)
+    except PdfVerificationWorkerUnavailable as error:
+        raise APIError(503, "pdf_verification_worker_unavailable",
+                       "Isolated PDF verification could not complete; the frozen edit set is available for retry.",
+                       details=[{"reason_code": error.reason_code}]) from None
     base_manifest: dict[str, object] = {
         "source_sha256": str(version["sha256"]), "adapter": adapter_name,
         "adapter_version": adapter_version, "edit_set_id": str(parsed_edit_set),
@@ -843,10 +1121,14 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
     }
     if result.verification is not None:
         base_manifest["verification"] = result.verification.as_dict()
+    if adapter_name == "docx":
+        base_manifest.update({"verification_profile": docx_mode,
+                              "structural_checks": (result.verification.structural_checks if result.verification else "FAIL"),
+                              "visual_checks": (result.verification.visual_checks if result.verification else "NOT_VERIFIED")})
     outcome = result.status
     staged = None
     stored = None
-    if outcome in {"VERIFIED", "INCOMPLETE"} and result.derived_bytes is not None:
+    if outcome in {"VERIFIED", "STRUCTURALLY_VERIFIED", "INCOMPLETE"} and result.derived_bytes is not None:
         storage: ImmutableLocalStorage = request.app.state.document_storage
         staged = storage.stage(identity.tenant_id, parsed_document, uuid4(), io.BytesIO(result.derived_bytes),
                                max_bytes=request.app.state.settings.max_upload_bytes)
@@ -863,7 +1145,10 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
         elif scan.status != "clean" or scan.sha256 != staged.sha256:
             storage.discard_staged(staged)
             staged = None
-            outcome = "BLOCKED"
+            reason_code = scan.reason_code or ("scanner_hash_mismatch" if scan.status == "clean" else "scanner_unavailable")
+            raise APIError(503, "release_scan_unavailable",
+                           "The derived file could not be confirmed clean; this frozen edit set is available for retry.",
+                           details=[{"reason_code": reason_code}])
         else:
             stored = storage.promote_derived(staged, scan, edit_set_id=parsed_edit_set)
             staged = None
@@ -880,7 +1165,8 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
                 adapter_version=adapter_version, source_sha256=str(version["sha256"]),
                 manifest={**base_manifest, "outcome": "BLOCKED"}, actor_id=identity.subject)
         return {"edit_set_id": str(parsed_edit_set), "outcome": "BLOCKED", "version_id": None,
-                "download_available": False, "verification": result.verification.as_dict() if result.verification else None}
+                "download_available": is_download_eligible("BLOCKED", adapter_name, base_manifest),
+                "verification": result.verification.as_dict() if result.verification else None}
     base_manifest["outcome"] = outcome
     base_manifest["media_type"] = str(version.get("mime") or "application/octet-stream")
     try:
@@ -893,7 +1179,8 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
         # The content-addressed object remains private and is harmlessly reusable on retry.
         raise APIError(409, "release_commit_failed", "The verified candidate was not registered; retry after checking the document version.") from None
     return {"edit_set_id": str(parsed_edit_set), "outcome": outcome, "version_id": str(new_version),
-            "download_available": outcome == "VERIFIED", "verification": result.verification.as_dict() if result.verification else None}
+            "download_available": is_download_eligible(outcome, adapter_name, base_manifest),
+            "verification": result.verification.as_dict() if result.verification else None}
 
 
 @router.get("/{document_id}/versions/{version_id}/download")
@@ -912,7 +1199,13 @@ def download_document_version(document_id: str, version_id: str, request: Reques
         if version["kind"] == "derived":
             versions = repo.list_versions(parsed_document)
             item = next((entry for entry in versions if str(entry["version_id"]) == str(parsed_version)), None)
-            if item is None or item.get("verification_outcome") != "VERIFIED":
+            allowed = bool(item and is_download_eligible(
+                item.get("verification_outcome"), item.get("verification_adapter"), {
+                    "verification_profile": item.get("verification_profile"),
+                    "structural_checks": item.get("structural_checks"),
+                    "visual_checks": item.get("visual_checks"),
+                }))
+            if not allowed:
                 raise APIError(409, "verified_download_required", "Only independently verified derived files may be downloaded.")
         stored = StoredFile(identity.tenant_id, parsed_document, storage.root / str(version["storage_key"]),
                             str(version["storage_key"]), int(version["size_bytes"]), str(version["sha256"]))

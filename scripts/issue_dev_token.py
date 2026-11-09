@@ -17,7 +17,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Issue a short-lived local/test identity token.")
     parser.add_argument("--tenant-id", required=True, type=UUID)
     parser.add_argument("--subject", required=True)
-    parser.add_argument("--role", required=True, choices=("processor", "reviewer", "administrator"))
+    parser.add_argument("--role", required=True, choices=("OWNER",))
     parser.add_argument("--expires-in-seconds", type=int, default=900)
     args = parser.parse_args()
     settings = get_settings()

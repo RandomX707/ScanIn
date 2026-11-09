@@ -244,7 +244,7 @@ def test_csv_native_release_returns_verified_new_copy_without_touching_original(
     patch = Patch(target.version_id, target.id, target.value, target.fingerprint, TypedValue("decimal", Decimal("130.75")))
     frozen = NativeReleaseWorkflow(adapter, CsvIndependentVerifier()).freeze(
         source=source, document_id="document-1", base_version_id="version-1", actor_id="reviewer-1",
-        role="reviewer", authorized_category="insurer-authored", reason="Fix approved amount", patches=(patch,),
+        role="OWNER", authorized_category="insurer-authored", reason="Fix approved amount", patches=(patch,),
     )
     result = NativeReleaseWorkflow(adapter, CsvIndependentVerifier()).release(source=source, edit_set=frozen)
     assert source == original
@@ -281,7 +281,7 @@ def test_json_native_release_returns_verified_new_copy():
     patch = Patch(target.version_id, target.id, target.value, target.fingerprint, TypedValue("integer", 130))
     workflow = NativeReleaseWorkflow(adapter, JsonIndependentVerifier())
     frozen = workflow.freeze(source=source, document_id="document-1", base_version_id="version-1",
-                             actor_id="processor-1", role="processor", authorized_category="insurer-authored",
+                             actor_id="processor-1", role="OWNER", authorized_category="insurer-authored",
                              reason="Correct claim value", patches=(patch,))
     result = workflow.release(source=source, edit_set=frozen)
     assert result.status == "VERIFIED"

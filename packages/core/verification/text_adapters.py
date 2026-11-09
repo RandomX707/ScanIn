@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import codecs
+
 import csv
 import hashlib
 import io
@@ -20,8 +22,14 @@ class CsvIndependentVerifier:
         if _plan_hash(plan) != plan.plan_sha256 or source_hash != plan.source_sha256:
             return _blocked(source_hash, output_hash, "policy", "frozen_plan_or_source_mismatch")
         try:
-            source_doc = _csv_document(source)
-            output_doc = _csv_document(candidate)
+            wanted = set()
+            for patch in plan.patches:
+                try:
+                    wanted.add(_csv_target(patch.target_id))
+                except ValueError:
+                    pass
+            source_doc = _csv_document(source, frozenset(wanted))
+            output_doc = _csv_document(candidate, frozenset(wanted))
         except Exception as error:
             return _blocked(source_hash, output_hash, "integrity", f"csv_parse_failed:{type(error).__name__}")
         results: list[CheckResult] = [CheckResult("integrity", "PASS", True, {"source_and_candidate_parse": True})]
@@ -135,62 +143,82 @@ class JsonIndependentVerifier:
         return _report(source_hash, output_hash, results)
 
 
-def _csv_document(data: bytes) -> dict[tuple[int, int], tuple[int, int, bytes, str, bool]]:
+def _csv_document(data: bytes, wanted: set[tuple[int, int]] | frozenset[tuple[int, int]] | None = None
+                  ) -> dict[tuple[int, int], tuple[int, int, bytes, str, bool]]:
+    """Independent CSV read-back. Every field of the document is tokenized and validated exactly as the
+    verifier always did (its own lenient tokenizer plus the standard csv reader's strict per-field
+    rules), but only the cells in ``wanted`` (all cells when None) are decoded and returned, so a release
+    of one cell never holds a decoded copy of the whole document."""
     bom = data.startswith(b"\xef\xbb\xbf")
     start = 3 if bom else 0
     payload = data[start:]
-    encoding = "utf-8" if bom else "utf-8"
+    # Independent encoding decision: the whole payload must decode strictly as UTF-8 (always when a
+    # BOM is present) or, failing that, as Windows-1252. Nothing is ever decoded with replacement.
+    encoding = "utf-8"
     try:
-        sample = payload[:8192].decode(encoding)
+        payload.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
+        if bom:
+            raise
         encoding = "cp1252"
-        sample = payload[:8192].decode(encoding)
+        payload.decode(encoding, errors="strict")
+    sample = codecs.getincrementaldecoder(encoding)(errors="strict").decode(payload[:8192], final=False)
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
     except csv.Error:
         dialect = csv.excel
     delimiter, quotechar = ord(dialect.delimiter), ord(dialect.quotechar or '"')
+    quote = bytes((quotechar,))
+    # Verifier tokenizer (deliberately not the adapter's): an unquoted token runs to the next delimiter
+    # or line break and may contain quotes; a quoted token treats "" as an escape and ends at the first
+    # lone quote or at end of data.
+    quoted_token = re.compile(re.escape(quote) + b"[^" + re.escape(quote) + b"]*+(?:" + re.escape(quote * 2)
+                              + b"[^" + re.escape(quote) + b"]*+)*+(" + re.escape(quote) + b")?")
+    plain_token = re.compile(b"[^" + re.escape(bytes((delimiter,))) + b"\\r\\n]*+")
+    field_limit = csv.field_size_limit()
     result: dict[tuple[int, int], tuple[int, int, bytes, str, bool]] = {}
     row = column = 1
     pos = start
-    while pos < len(data):
-        if data[pos] in (10, 13):
+    length = len(data)
+    while pos < length:
+        byte = data[pos]
+        if byte == 10 or byte == 13:
             pos = pos + 2 if data[pos:pos + 2] == b"\r\n" else pos + 1
             row, column = row + 1, 1
             continue
         begin = pos
-        quoted = data[pos] == quotechar
-        if quoted:
-            pos += 1
-            while pos < len(data):
-                if data[pos] == quotechar:
-                    if pos + 1 < len(data) and data[pos + 1] == quotechar:
-                        pos += 2
-                    else:
-                        pos += 1
-                        break
-                else:
-                    pos += 1
-        else:
-            while pos < len(data) and data[pos] not in (delimiter, 10, 13):
-                pos += 1
+        quoted = byte == quotechar
+        match = (quoted_token if quoted else plain_token).match(data, pos)
+        pos = match.end()
         raw = data[begin:pos]
+        closed = quoted and match.group(1) is not None
+        simple = (closed or (not quoted and quote not in raw)) and len(raw) <= field_limit
+        keep = wanted is None or (row, column) in wanted
         if not raw:
             value = ""
+        elif simple:
+            # For these tokens the strict standard reader can only return the unescaped text.
+            value = (raw[1:-1].replace(quote * 2, quote) if quoted else raw).decode(encoding) if keep else ""
         else:
-            parsed = list(csv.reader(io.StringIO(raw.decode(encoding), newline=""), delimiter=chr(delimiter),
-                                     quotechar=chr(quotechar), doublequote=True, strict=True))
-            if len(parsed) != 1 or len(parsed[0]) != 1:
-                raise ValueError("csv_token_invalid")
-            value = parsed[0][0]
-        result[(row, column)] = (begin, pos, raw, value, quoted)
-        if pos < len(data) and data[pos] == delimiter:
+            value = _strict_csv_field(raw, encoding, delimiter, quotechar)
+        if keep:
+            result[(row, column)] = (begin, pos, raw, value, quoted)
+        if pos < length and data[pos] == delimiter:
             pos += 1
             column += 1
-        elif pos < len(data) and data[pos] in (10, 13):
+        elif pos < length and data[pos] in (10, 13):
             pos = pos + 2 if data[pos:pos + 2] == b"\r\n" else pos + 1
             row, column = row + 1, 1
     return result
+
+
+
+def _strict_csv_field(raw: bytes, encoding: str, delimiter: int, quotechar: int) -> str:
+    parsed = list(csv.reader(io.StringIO(raw.decode(encoding), newline=""), delimiter=chr(delimiter),
+                             quotechar=chr(quotechar), doublequote=True, strict=True))
+    if len(parsed) != 1 or len(parsed[0]) != 1:
+        raise ValueError("csv_token_invalid")
+    return parsed[0][0]
 
 
 def _json_nodes(data: bytes) -> list[Any]:

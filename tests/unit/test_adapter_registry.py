@@ -6,6 +6,16 @@ import zipfile
 from packages.core.adapters.registry import AdapterRegistry
 
 
+def test_compound_office_reasons_distinguish_legacy_from_encrypted():
+    header = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    legacy = AdapterRegistry().inspect(header + b"synthetic compound file", filename="legacy.doc")
+    encrypted = AdapterRegistry().inspect(header + "EncryptedPackage".encode("utf-16le"), filename="locked.xlsx")
+    assert legacy.profile.reasons == ("legacy_office_unsupported",)
+    assert legacy.profile.level == "read_only"
+    assert encrypted.profile.reasons == ("encrypted_office_package",)
+    assert encrypted.profile.level == "rejected"
+
+
 def test_registry_selects_csv_by_content_and_reports_extension_mismatch():
     result = AdapterRegistry().inspect(b"claim_id,amount\nCLM-1,125\n", filename="policy.json")
     assert result.profile.adapter == "csv"
@@ -20,14 +30,15 @@ def test_registry_selects_json_over_csv_when_json_signature_is_present():
     assert "extension_mismatch" in result.findings
 
 
-def test_registry_routes_docx_to_explicit_read_only_instead_of_xlsx():
+def test_registry_routes_docx_to_the_constrained_ooxml_adapter():
     content = io.BytesIO()
     with zipfile.ZipFile(content, "w") as package:
         package.writestr("[Content_Types].xml", b"<Types />")
         package.writestr("word/document.xml", b"<document />")
     result = AdapterRegistry().inspect(content.getvalue(), filename="claim.xlsx")
     assert result.profile.level == "read_only"
-    assert result.profile.reasons == ("adapter_not_implemented",)
+    assert result.profile.adapter == "docx"
+    assert result.profile.reasons == ("no_supported_single_run_targets",)
     assert "extension_mismatch" in result.findings
 
 
