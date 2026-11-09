@@ -2,7 +2,7 @@
 
 Channel360 is a **single-user document workbench for secure inspection, classification, correction, AI-assisted explanation and verified document release**. One authenticated owner operates the document workflow. The repository remains named **ScanIn**; the application and product are called Channel360.
 
-> **Project status:** a validated development prototype, not production-ready software. It has no production identity provider, durable background queue, deployment hardening, or M4–M7 capabilities. Use synthetic documents and a dedicated test database.
+> **Project status:** a validated development prototype, not production-ready software. It has no production identity provider, durable background queue, deployment hardening, or M4 templates/rules. M5 unsigned AcroForm PDF editing and M6 DOCX editing are implemented; M6 defaults to structural verification. M7 is partially implemented through optional, disabled-by-default AI explanations; OCR and Docling are not implemented. Use synthetic documents and a dedicated test database.
 
 ## Why it exists
 
@@ -190,9 +190,11 @@ The Python suite may skip PostgreSQL-marked tests when no database is available.
 | M2 — data corrections and native edit/release | Supported formats use owner-authorized frozen plans, independent verification, malware scanning, immutable source history and verified-only download. Product still requires production identity, deployment and operational hardening |
 | M3 — XLSX application integration | Exercised through the owner-authorized verification/release path; independent verification preserves incomplete formula-dependent behavior |
 | M4 — templates, deterministic rules and structural summaries | Planned, not implemented |
-| M5 — supported AcroForm PDF editing | Synthetic acceptance subset passes: 50 corpus outcomes and browser verified downloads for text, checkbox, radio and dropdown. External producer diversity (including Adobe/Microsoft-authored forms) remains unverified. |
-| M6 — constrained DOCX editing | Structural-profile edit, owner release, independent verification and download are supported without LibreOffice; the strict visual profile remains NOT_VERIFIED on this host because its isolated LibreOffice renderer is unavailable. Structural release does not prove unchanged pagination, line wrapping, font rendering or appearance across Word processors. |
-| M7 — optional OCR/Docling/LLM providers | Planned, not implemented |
+| M5 — supported AcroForm PDF editing | Implemented for supported unsigned AcroForm text, checkbox, radio and choice fields; external producer diversity remains unverified. |
+| M6 — constrained DOCX editing | Implemented for supported single-run edits with structural verification by default; strict visual verification is optional and unavailable on this host. |
+| M7 — optional OCR/Docling/LLM providers | Partially implemented: optional disabled-by-default AI explanations; OCR and Docling are not implemented. |
+
+The default DOCX profile does not check visual layout or reflow; set `CHANNEL360_DOCX_VERIFICATION_MODE=structural_and_visual` to enable the strict profile.
 
 Additional limitations include synchronous ingestion, development-only local identities and filesystem storage, sampled (not kernel-enforced) 2 GiB macOS parser RSS monitoring, and an unverified OS-level network boundary on some host configurations. The strict DOCX visual profile blocks if isolated rendering is unavailable. Do not use real policyholder data or treat this prototype as production-ready.
 

@@ -15,6 +15,7 @@ from packages.workflow.release import (
     XlsxReleaseWorkflow,
     export_corrections,
 )
+from packages.registry.documents import is_download_eligible
 from tests.conftest import make_fixture
 
 
@@ -98,6 +99,35 @@ def test_frozen_edit_set_corruption_is_blocked(tmp_path):
     result = XlsxReleaseWorkflow().release(source=source, edit_set=tampered)
     assert result.status == "BLOCKED"
     assert result.derived_bytes is None
+
+
+@pytest.mark.parametrize(("outcome", "adapter", "manifest", "expected"), [
+    ("VERIFIED", "csv", {}, True),
+    ("STRUCTURALLY_VERIFIED", "docx", {
+        "verification_profile": "structural", "structural_checks": "PASS",
+        "visual_checks": "NOT_PERFORMED",
+    }, True),
+    ("STRUCTURALLY_VERIFIED", "pdf", {
+        "verification_profile": "structural", "structural_checks": "PASS",
+        "visual_checks": "NOT_PERFORMED",
+    }, False),
+    ("STRUCTURALLY_VERIFIED", "docx", {
+        "verification_profile": "structural_and_visual", "structural_checks": "PASS",
+        "visual_checks": "NOT_PERFORMED",
+    }, False),
+    ("STRUCTURALLY_VERIFIED", "docx", {
+        "verification_profile": "structural", "structural_checks": "FAIL",
+        "visual_checks": "NOT_PERFORMED",
+    }, False),
+    ("STRUCTURALLY_VERIFIED", "docx", {
+        "verification_profile": "structural", "structural_checks": "PASS",
+        "visual_checks": "PASS",
+    }, False),
+    ("INCOMPLETE", "xlsx", {}, False),
+    ("BLOCKED", "docx", {}, False),
+])
+def test_download_eligibility_uses_release_outcome_adapter_and_manifest(outcome, adapter, manifest, expected):
+    assert is_download_eligible(outcome, adapter, manifest) is expected
 
 
 def test_frozen_edit_set_metadata_is_bound_to_the_freeze_hash(tmp_path):

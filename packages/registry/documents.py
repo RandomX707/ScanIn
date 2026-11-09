@@ -11,6 +11,18 @@ from packages.db.tenant import require_tenant_context
 from packages.storage.local import StoredFile
 
 
+def is_download_eligible(outcome: str | None, adapter: str | None,
+                         manifest: dict[str, object] | None) -> bool:
+    """Return whether this stored release manifest authorizes derived download."""
+    if outcome == "VERIFIED":
+        return True
+    manifest = manifest or {}
+    return bool(outcome == "STRUCTURALLY_VERIFIED" and adapter == "docx" and
+                manifest.get("verification_profile") == "structural" and
+                manifest.get("structural_checks") == "PASS" and
+                manifest.get("visual_checks") == "NOT_PERFORMED")
+
+
 @dataclass(frozen=True)
 class RegisteredDocument:
     tenant_id: UUID
@@ -145,13 +157,8 @@ class DocumentRepository:
             item["verification_profile"] = manifest.get("verification_profile")
             item["structural_checks"] = manifest.get("structural_checks")
             item["visual_checks"] = manifest.get("visual_checks")
-            item["download_available"] = bool(
-                item.get("verification_outcome") == "VERIFIED" or
-                (item.get("verification_outcome") == "STRUCTURALLY_VERIFIED" and
-                 item.get("verification_adapter") == "docx" and
-                 manifest.get("verification_profile") == "structural" and
-                 manifest.get("structural_checks") == "PASS" and
-                 manifest.get("visual_checks") == "NOT_PERFORMED"))
+            item["download_available"] = bool(item.get("kind") == "original" or is_download_eligible(
+                item.get("verification_outcome"), item.get("verification_adapter"), manifest))
             item.pop("verification_manifest", None)
             items.append(item)
         return items
@@ -253,11 +260,8 @@ class DocumentRepository:
                                outcome: str, adapter: str, adapter_version: str,
                                manifest: dict[str, object], actor_id: str) -> UUID:
         """Atomically attach a verifier report and derived version to an owner-authorized plan."""
-        structural_docx = (outcome == "STRUCTURALLY_VERIFIED" and adapter == "docx" and
-                           manifest.get("verification_profile") == "structural" and
-                           manifest.get("structural_checks") == "PASS" and
-                           manifest.get("visual_checks") == "NOT_PERFORMED")
-        if outcome not in {"VERIFIED", "INCOMPLETE"} and not structural_docx:
+        download_eligible = is_download_eligible(outcome, adapter, manifest)
+        if outcome not in {"INCOMPLETE"} and not download_eligible:
             raise ValueError("candidate_outcome_not_releasable")
         if stored.tenant_id != self.tenant_id:
             raise PermissionError("stored file tenant does not match transaction context")

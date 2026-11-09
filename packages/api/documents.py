@@ -18,7 +18,7 @@ from packages.api.auth import AuthenticatedIdentity, require_identity
 from packages.api.db_context import api_tenant_transaction
 from packages.api.errors import APIError
 from packages.ingestion.pipeline import IngestionOrchestrator
-from packages.registry.documents import DocumentRepository
+from packages.registry.documents import DocumentRepository, is_download_eligible
 from packages.storage.local import ImmutableLocalStorage, StoredFile
 from packages.workers.parser import ParserNotVerified
 from packages.core.models.contracts import TypedValue
@@ -896,7 +896,12 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
             released = next((v for v in versions if str(v["version_id"]) == str(edit_set["released_version_id"])), None)
             return {"edit_set_id": str(parsed_edit_set), "version_id": str(edit_set["released_version_id"]),
                     "outcome": (released or {}).get("verification_outcome", "INCOMPLETE"),
-                    "download_available": bool((released or {}).get("download_available")), "idempotent": True}
+                    "download_available": is_download_eligible(
+                        (released or {}).get("verification_outcome"), (released or {}).get("verification_adapter"), {
+                            "verification_profile": (released or {}).get("verification_profile"),
+                            "structural_checks": (released or {}).get("structural_checks"),
+                            "visual_checks": (released or {}).get("visual_checks"),
+                        }), "idempotent": True}
         if edit_set["status"] != "ready_for_release":
             raise APIError(409, "edit_set_not_ready_for_release", "Preflight and freeze this edit set before release.")
         if str(edit_set["current_version_id"]) != str(edit_set["base_version_id"]):
@@ -962,7 +967,8 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
                 adapter_version=adapter_version, source_sha256=str(version["sha256"]),
                 manifest={**base_manifest, "outcome": "BLOCKED"}, actor_id=identity.subject)
         return {"edit_set_id": str(parsed_edit_set), "outcome": "BLOCKED", "version_id": None,
-                "download_available": False, "verification": result.verification.as_dict() if result.verification else None}
+                "download_available": is_download_eligible("BLOCKED", adapter_name, base_manifest),
+                "verification": result.verification.as_dict() if result.verification else None}
     base_manifest["outcome"] = outcome
     base_manifest["media_type"] = str(version.get("mime") or "application/octet-stream")
     try:
@@ -975,7 +981,7 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
         # The content-addressed object remains private and is harmlessly reusable on retry.
         raise APIError(409, "release_commit_failed", "The verified candidate was not registered; retry after checking the document version.") from None
     return {"edit_set_id": str(parsed_edit_set), "outcome": outcome, "version_id": str(new_version),
-            "download_available": outcome in {"VERIFIED", "STRUCTURALLY_VERIFIED"},
+            "download_available": is_download_eligible(outcome, adapter_name, base_manifest),
             "verification": result.verification.as_dict() if result.verification else None}
 
 
@@ -995,13 +1001,12 @@ def download_document_version(document_id: str, version_id: str, request: Reques
         if version["kind"] == "derived":
             versions = repo.list_versions(parsed_document)
             item = next((entry for entry in versions if str(entry["version_id"]) == str(parsed_version)), None)
-            allowed = bool(item and (item.get("verification_outcome") == "VERIFIED" or
-                (item.get("verification_outcome") == "STRUCTURALLY_VERIFIED" and
-                 item.get("verification_adapter") == "docx" and
-                 item.get("verification_profile") == "structural" and
-                 item.get("structural_checks") == "PASS" and
-                 item.get("visual_checks") == "NOT_PERFORMED" and
-                 request.app.state.settings.channel360_docx_verification_mode == "structural")))
+            allowed = bool(item and is_download_eligible(
+                item.get("verification_outcome"), item.get("verification_adapter"), {
+                    "verification_profile": item.get("verification_profile"),
+                    "structural_checks": item.get("structural_checks"),
+                    "visual_checks": item.get("visual_checks"),
+                }))
             if not allowed:
                 raise APIError(409, "verified_download_required", "Only independently verified derived files may be downloaded.")
         stored = StoredFile(identity.tenant_id, parsed_document, storage.root / str(version["storage_key"]),
