@@ -967,6 +967,12 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
 @router.post("/{document_id}/edit-sets/{edit_set_id}/rebase")
 def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
                     identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
+    """Rebase a stale draft or frozen (ready_for_release) edit set onto the current version.
+
+    A NEW draft is created; the predecessor keeps its frozen plan, hash and patches and becomes
+    superseded only once the successor exists. Conflicts against the new source are reported, never
+    resolved silently.
+    """
     _require_owner(identity)
     try:
         parsed_id, parsed_edit_id = UUID(document_id), UUID(edit_set_id)
@@ -977,8 +983,9 @@ def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
         draft = repo.get_edit_set(parsed_edit_id)
         if draft is None or draft["document_id"] != parsed_id:
             raise APIError(404, "not_found", "The edit draft was not found.")
-        if draft["status"] != "draft" or draft["created_by"] != identity.subject:
-            raise APIError(409, "edit_set_not_rebasable", "Only the author may rebase an unfrozen draft.")
+        if draft["status"] not in {"draft", "ready_for_release"} or draft["created_by"] != identity.subject:
+            raise APIError(409, "edit_set_not_rebasable",
+                           "Only the author may rebase an open or frozen edit set that has not been released, superseded or failed.")
         patches = repo.list_patches(parsed_edit_id)
         document = repo.get(parsed_id)
         if document is None or document["current_version_id"] is None:
@@ -988,6 +995,8 @@ def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
             raise APIError(409, "rebase_not_required", "The document has not changed since this draft was created.")
         if document["document_category"] != "insurer-authored":
             raise APIError(403, "document_category_not_authorized", "The current document classification does not permit editing.")
+    if not patches:
+        raise APIError(422, "patch_set_empty", "An edit set without patches has nothing to rebase.")
     version, source = _source_version(request, identity, parsed_id, new_version_id)
     try:
         report = request.app.state.restricted_parser.inspect(
@@ -1006,33 +1015,41 @@ def rebase_edit_set(document_id: str, edit_set_id: str, request: Request,
     for patch in patches:
         target = target_map.get(str(patch["target_id"]))
         expected = patch["expected_old_value"]
-        if (target is None or target.get("editable") is not True
-                or target["value"].get("type") != expected.get("type")
-                or target["value"].get("value") != expected.get("value")):
-            conflicts.append({"target_id": str(patch["target_id"]), "reason": "base_value_changed_or_target_missing"})
+        if target is None:
+            conflicts.append({"target_id": str(patch["target_id"]), "reason": "target_missing_in_current_version"})
             continue
+        if target.get("editable") is not True:
+            conflicts.append({"target_id": str(patch["target_id"]), "reason": f"target_not_editable:{target.get('reason') or 'unsupported'}"})
+            continue
+        if target["value"].get("type") != expected.get("type") or target["value"].get("value") != expected.get("value"):
+            conflicts.append({"target_id": str(patch["target_id"]), "reason": "base_value_changed"})
+            continue
+        # New patch rows for the successor; the predecessor's rows (and frozen plan) stay untouched.
         rebased.append({"target_id": str(patch["target_id"]), "expected_old_value": target["value"],
                         "expected_fingerprint": target["fingerprint"], "new_value": patch["new_value"]})
     if conflicts:
-        raise APIError(409, "rebase_conflicts", "The new document version changed one or more target values.",
+        raise APIError(409, "rebase_conflicts", "The current document version changed one or more targeted values.",
                        details=conflicts)
     new_edit_set_id = uuid4()
     try:
         with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
-            repo = DocumentRepository(connection, identity.tenant_id)
-            current = repo.get(parsed_id)
-            if current is None or str(current["current_version_id"]) != str(new_version_id):
-                raise APIError(409, "stale_base_version", "The document changed during rebase.")
-            repo.create_edit_set(edit_set_id=new_edit_set_id, document_id=parsed_id,
-                base_version_id=new_version_id, category=str(current["document_category"]),
-                actor_id=identity.subject, reason=str(draft["reason"]))
-            repo.add_patches(new_edit_set_id, rebased, actor_id=identity.subject)
-    except APIError:
-        raise
-    except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
+            outcome = DocumentRepository(connection, identity.tenant_id).supersede_with_rebased_draft(
+                predecessor_id=parsed_edit_id, successor_id=new_edit_set_id, document_id=parsed_id,
+                new_version_id=new_version_id, actor_id=identity.subject, patches=rebased)
+    except ValueError as error:
+        code = str(error)
+        if code in {"edit_set_not_rebasable", "stale_base_version", "rebase_not_required"}:
+            raise APIError(409, code, "The edit set changed while it was being rebased; reload and try again.") from None
+        if code == "document_category_not_authorized":
+            raise APIError(403, code, "The current document classification does not permit editing.") from None
+        raise APIError(409, "rebase_conflict", "The draft could not be rebased against the current version.") from None
+    except (SQLAlchemyError, RuntimeError, PermissionError):
+        # Includes the unique successor index: a concurrent rebase already created the successor.
         raise APIError(409, "rebase_conflict", "The draft could not be rebased against the current version.") from None
     return {"previous_edit_set_id": str(parsed_edit_id), "edit_set_id": str(new_edit_set_id),
-            "base_version_id": str(new_version_id), "status": "draft", "patches": len(rebased)}
+            "base_version_id": str(new_version_id), "status": "draft", "patches": len(rebased),
+            "previous_status": outcome["previous_status"], "previous_frozen_hash": outcome["frozen_hash"],
+            "previous_base_version_id": str(outcome["from_version_id"]), "predecessor_status": "superseded"}
 
 
 @router.post("/{document_id}/edit-sets/{edit_set_id}/release")

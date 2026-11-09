@@ -191,7 +191,8 @@ class DocumentRepository:
     def get_edit_set(self, edit_set_id: UUID) -> dict[str, object] | None:
         row = self.connection.execute(text("""SELECT e.id,e.tenant_id,e.document_id,e.base_version_id,
             e.status,e.frozen_hash,e.authorized_category,e.created_by,e.reason,e.patch_plan,e.adapter,
-            e.adapter_version,e.released_version_id,d.current_version_id,d.document_category,d.filename
+            e.adapter_version,e.released_version_id,e.supersedes,e.superseded_by,
+            d.current_version_id,d.document_category,d.filename
             FROM edit_sets e JOIN documents d ON d.tenant_id=e.tenant_id AND d.id=e.document_id
             WHERE e.tenant_id=:tenant AND e.id=:edit_set"""),
             {"tenant": self.tenant_id, "edit_set": edit_set_id}).mappings().one_or_none()
@@ -200,7 +201,7 @@ class DocumentRepository:
     def list_edit_sets(self, document_id: UUID) -> list[dict[str, object]]:
         rows = self.connection.execute(text("""SELECT id AS edit_set_id,base_version_id,status,frozen_hash,
             authorized_category,created_by,reason,patch_plan,adapter,adapter_version,released_version_id,
-            created_at,updated_at FROM edit_sets WHERE tenant_id=:tenant AND document_id=:document
+            supersedes,superseded_by,created_at,updated_at FROM edit_sets WHERE tenant_id=:tenant AND document_id=:document
             ORDER BY created_at DESC,id DESC"""),
             {"tenant": self.tenant_id, "document": document_id}).mappings()
         return [dict(row) for row in rows]
@@ -242,6 +243,55 @@ class DocumentRepository:
         append_event(connection=self.connection, actor_id=actor_id, action="edit_set.targets_added",
                      subject=str(edit_set_id), payload={"target_ids": sorted(str(patch["target_id"]) for patch in patches),
                      "patch_count": len(patches)})
+
+    def supersede_with_rebased_draft(self, *, predecessor_id: UUID, successor_id: UUID, document_id: UUID,
+                                     new_version_id: UUID, actor_id: str,
+                                     patches: list[dict[str, object]]) -> dict[str, object]:
+        """Atomically create a draft on the current version and mark the stale predecessor superseded.
+
+        The predecessor and its document are locked first, so a competing release, a second rebase or
+        any change to the current version is serialised against this transaction. The predecessor's
+        frozen plan, hash and patch rows are never modified; the successor gets new patch rows whose
+        expectations were resolved against the new source version.
+        """
+        row = self.connection.execute(text("""SELECT e.status,e.created_by,e.base_version_id,e.superseded_by,
+            e.frozen_hash,e.reason,d.current_version_id,d.document_category,d.ingestion_state,e.document_id
+            FROM edit_sets e JOIN documents d ON d.tenant_id=e.tenant_id AND d.id=e.document_id
+            WHERE e.tenant_id=:tenant AND e.id=:edit_set FOR UPDATE OF e,d"""),
+            {"tenant": self.tenant_id, "edit_set": predecessor_id}).one_or_none()
+        if row is None or row[9] != document_id:
+            raise ValueError("edit_set_not_found")
+        status, created_by, base_version_id, superseded_by, frozen_hash, reason, current_version_id, category, state, _ = row
+        if status not in {"draft", "ready_for_release"} or superseded_by is not None or created_by != actor_id:
+            raise ValueError("edit_set_not_rebasable")
+        if current_version_id != new_version_id:
+            raise ValueError("stale_base_version")
+        if base_version_id == current_version_id:
+            raise ValueError("rebase_not_required")
+        if category != "insurer-authored" or state != "ready":
+            raise ValueError("document_category_not_authorized")
+        self.connection.execute(text("""INSERT INTO edit_sets
+            (id,tenant_id,document_id,base_version_id,authorized_category,created_by,reason,supersedes)
+            VALUES (:id,:tenant,:document,:version,:category,:actor,:reason,:predecessor)"""),
+            {"id": successor_id, "tenant": self.tenant_id, "document": document_id, "version": new_version_id,
+             "category": category, "actor": actor_id, "reason": reason, "predecessor": predecessor_id})
+        append_event(connection=self.connection, actor_id=actor_id, action="edit_set.draft_created",
+                     subject=str(successor_id), payload={"document_id": str(document_id), "reason": reason,
+                                                         "supersedes": str(predecessor_id)})
+        self.add_patches(successor_id, patches, actor_id=actor_id)
+        updated = self.connection.execute(text("""UPDATE edit_sets SET status='superseded',superseded_by=:successor,
+            updated_at=now() WHERE tenant_id=:tenant AND id=:predecessor AND status=:status RETURNING id"""),
+            {"tenant": self.tenant_id, "predecessor": predecessor_id, "successor": successor_id,
+             "status": status}).scalar_one_or_none()
+        if updated is None:
+            raise ValueError("edit_set_not_rebasable")
+        append_event(connection=self.connection, actor_id=actor_id, action="edit_set.superseded",
+                     subject=str(predecessor_id), payload={
+                         "document_id": str(document_id), "successor_edit_set_id": str(successor_id),
+                         "previous_status": status, "frozen_hash": frozen_hash.strip() if frozen_hash else None,
+                         "from_version_id": str(base_version_id), "to_version_id": str(new_version_id)})
+        return {"previous_status": status, "frozen_hash": frozen_hash.strip() if frozen_hash else None,
+                "from_version_id": base_version_id}
 
     def freeze_edit_set(self, edit_set_id: UUID, *, frozen_hash: str, plan: dict[str, object],
                         adapter: str, adapter_version: str, actor_id: str) -> None:

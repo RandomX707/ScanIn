@@ -98,6 +98,7 @@ function auditLabel(action: string) {
     "edit_set.draft_created": "Native correction draft created",
     "edit_set.targets_added": "Correction values added",
     "edit_set.ready_for_release": "Correction validated and ready for release",
+    "edit_set.superseded": "Stale edit set superseded by a rebased draft",
     "document.release_authorized_by_owner": "Owner authorized verified release",
     "field.data_corrected": "Data correction recorded",
     "field.manual_created": "Correction field added",
