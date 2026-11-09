@@ -107,3 +107,37 @@ def test_mixed_line_endings_patch_is_refused_by_the_planner():
     with pytest.raises(PlanError) as error:
         build_patch_plan(adapter, source, (patch,), provenance={"edit_set_id": "e", "actor_id": "owner"})
     assert error.value.code == "mixed_line_endings"
+
+
+@pytest.mark.parametrize("source", [b"claim,name\nC1,x\x81y\n", b"\xef\xbb\xbfclaim,name\nC1,\xff\n"])
+def test_unparsable_read_only_csv_inspects_without_targets_instead_of_failing(source):
+    for kwargs in ({}, {"target_offset": 0}, {"target_ids": ["csv:2:2"]}):
+        result = inspect_bytes(source, filename="claims.csv", include_targets=True, include_summary_evidence=True, **kwargs)
+        assert result["status"] == "inspected"
+        assert result["capability"] == {"level": "Read-only", "reasons": ["unsupported_encoding"]}
+        assert result["targets"] == [] and result["targets_page"]["total"] == 0 and result["targets_truncated"] is False
+        assert result["structural_summary"]["statistics"] == {}
+        assert "could not be read reliably" in result["structural_summary"]["description"]
+        assert "summary_evidence" not in result or result["summary_evidence"] == []
+
+
+@pytest.mark.parametrize("limit_name,source,reason", [
+    ("MAX_CSV_CELLS", b"a,b,c\n1,2,3\n", "csv_cell_limit_exceeded"),
+    ("MAX_CSV_ROWS", b"a\nb\nc\nd\n", "csv_row_limit_exceeded"),
+])
+def test_resource_limits_are_rejected_with_their_stable_code(monkeypatch, limit_name, source, reason):
+    import packages.core.adapters.csv_adapter.adapter as module
+    from packages.core.adapters.registry import AdapterRegistry
+    from packages.workers.parse_entry import ParserRejected
+    monkeypatch.setattr(module, limit_name, 3)
+    selection = AdapterRegistry().inspect(source, filename="big.csv")
+    assert (selection.profile.level, selection.profile.reasons, selection.media_type) == ("rejected", (reason,), "text/csv")
+    with pytest.raises(ParserRejected) as error:
+        inspect_bytes(source, filename="big.csv", include_targets=True)
+    assert error.value.reason_code == reason and error.value.digest == hashlib.sha256(source).hexdigest()
+
+
+def test_malformed_csv_still_fails_closed_as_unsupported_text():
+    from packages.core.adapters.registry import AdapterRegistry
+    selection = AdapterRegistry().inspect(b'claim,name\nC1,"open\n', filename="bad.csv")
+    assert (selection.profile.level, selection.profile.reasons) == ("read_only", ("adapter_not_implemented",))

@@ -21,6 +21,9 @@ class AdapterSelection:
     score: float
 
 
+CSV_RESOURCE_LIMIT_REASONS = frozenset({"csv_cell_limit_exceeded", "csv_row_limit_exceeded"})
+
+
 class AdapterRegistry:
     """Content-first format selection with conservative unsupported results."""
 
@@ -71,6 +74,10 @@ class AdapterRegistry:
 
         if self._looks_textual(source):
             profile = self.csv.inspect(source)
+            if profile.level == "rejected" and set(profile.reasons) & CSV_RESOURCE_LIMIT_REASONS:
+                # Too large to inspect safely: reject with the stable limit code rather than re-labelling
+                # the file as plain text.
+                return self._selected(profile, "text/csv", extension, score=0.92 if extension == ".csv" else 0.8)
             has_delimiter = self._has_delimiter(source)
             if profile.level in {"editable", "read_only"} and (has_delimiter or extension == ".csv"):
                 score = 0.92 if extension == ".csv" else 0.8

@@ -69,11 +69,28 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         "findings": list(selection.findings),
         "score": selection.score,
     }
+    # A CSV that is read-only because its bytes cannot be parsed (for example undecodable text) has no
+    # targets. Report that honestly instead of failing the whole inspection; an editable profile whose
+    # document cannot be parsed is still an error (fail closed).
+    structure_available = supported
+    if supported and profile.adapter == "csv":
+        try:
+            source_adapter.document(data)
+        except ValueError:
+            if profile.level == "editable":
+                raise
+            structure_available = False
     # Adapters with a bounded target API (CSV) never build the full target list: the page or the exact
     # lookup is produced from their compact index, parsed once for this request.
-    windowed = supported and callable(getattr(source_adapter, "target_window", None))
+    windowed = structure_available and callable(getattr(source_adapter, "target_window", None))
     all_targets: list[Any] = []
-    if include_targets and supported:
+    if include_targets and supported and not structure_available:
+        result["targets"] = []
+        result["targets_page"] = {"mode": "lookup" if target_ids is not None else "page", "offset": target_offset,
+                                  "limit": MAX_TARGETS, "total": 0, "next_offset": None,
+                                  **({"requested": len(target_ids), "found": 0} if target_ids is not None else {})}
+        result["targets_truncated"] = False
+    elif include_targets and supported:
         if windowed:
             total = source_adapter.target_count(data)
         else:
@@ -107,7 +124,7 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
     if profile.adapter == "csv":
         # The CSV summary is computed from the parsed document, never from target dictionaries.
         summary_targets: list[Any] = []
-        parsed = source_adapter.document(data) if supported else None
+        parsed = source_adapter.document(data) if structure_available else None
     else:
         summary_targets = all_targets if include_targets and supported else (
             source_adapter.targets(data) if supported else [])
@@ -115,7 +132,7 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
     result["structural_summary"] = StructuralSummaryProvider().summarize(
         source=data, adapter=profile.adapter, details=result.get("details"), targets=[_target_dict(item) for item in summary_targets],
         sheets=list(profile.sheets), parsed=parsed)
-    if include_summary_evidence and supported:
+    if include_summary_evidence and structure_available:
         result["summary_evidence"] = _summary_evidence(data, profile.adapter, result.get("details"), source_adapter)
     return result
 
