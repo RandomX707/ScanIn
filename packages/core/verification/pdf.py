@@ -12,6 +12,7 @@ from typing import Any
 
 from PIL import Image, ImageChops, ImageDraw
 from pypdf import PdfReader
+from pypdf.generic import NameObject
 
 from packages.core.models.contracts import CheckResult, PatchPlan, VerifyReport
 
@@ -138,6 +139,9 @@ class PdfIndependentVerifier:
             field = new_fields.get(name)
             old = old_fields.get(name)
             actual_value = str(field.get("/V", "")) if field is not None else ""
+            is_button = field is not None and str(field.get("/FT", "")) == "/Btn"
+            if is_button and not isinstance(field.get("/V"), NameObject):
+                value_errors.append(f"{patch.target_id}:button_value_not_name")
             matches = (actual_value != "/Off") if patch.new_value.type == "boolean" and patch.new_value.value else (
                 actual_value == "/Off" if patch.new_value.type == "boolean" else
                 actual_value.lstrip("/") == str(patch.new_value.value) if field and str(field.get("/FT")) == "/Btn" else
@@ -148,15 +152,33 @@ class PdfIndependentVerifier:
             if not widgets or any(not _has_normal_appearance(widget) for widget in widgets):
                 value_errors.append(f"{patch.target_id}:appearance_stream_missing")
             if field is not None and str(field.get("/FT", "")) == "/Btn":
-                selected_state = str(field.get("/V", "/Off"))
+                old_widgets = _target_widget_objects(old_reader, name)
+                widgets = _target_widget_objects(new_reader, name)
+                flags = int(field.get("/Ff", 0) or 0)
+                is_radio = bool(flags & (1 << 15))
+                if is_radio:
+                    selected_state = "/Off" if str(patch.new_value.value) in {"", "/Off"} else f"/{str(patch.new_value.value).lstrip('/')}"
+                elif patch.new_value.type == "boolean" and not patch.new_value.value:
+                    selected_state = "/Off"
+                else:
+                    states = {str(key) for widget in old_widgets
+                              for key in _normal_appearance_states(widget) if str(key) != "/Off"}
+                    if len(states) != 1:
+                        value_errors.append(f"{patch.target_id}:checkbox_appearance_state_ambiguous")
+                    selected_state = next(iter(states), "/Off")
+                seen_selected_state = False
                 for widget in widgets:
-                    appearance = _resolve(widget.get("/AP", {}))
-                    normal = _resolve(appearance.get("/N", {})) if appearance else {}
+                    normal = _normal_appearance_states(widget)
                     actual_state = str(widget.get("/AS", "/Off"))
-                    if selected_state != "/Off" and actual_state not in {selected_state, "/Off"}:
+                    should_select = selected_state != "/Off" and selected_state in {str(key) for key in normal}
+                    expected_state = selected_state if should_select else "/Off"
+                    seen_selected_state |= should_select
+                    if actual_state != expected_state:
                         value_errors.append(f"{patch.target_id}:button_appearance_state_mismatch")
                     if actual_state not in {str(key) for key in normal}:
                         value_errors.append(f"{patch.target_id}:button_appearance_state_missing")
+                if selected_state != "/Off" and not seen_selected_state:
+                    value_errors.append(f"{patch.target_id}:button_appearance_state_missing")
         unintended = [name for name in old_fields if name not in target_names
                       and _canonical_pdf_object(old_fields[name]) != _canonical_pdf_object(new_fields[name])]
         for name in target_names & old_fields.keys():
@@ -299,6 +321,12 @@ def _widget_field_name(widget) -> str:
 def _page_has_widgets(page) -> bool:
     return any(str(reference.get_object().get("/Subtype", "")) == "/Widget"
                for reference in page.get("/Annots", []))
+
+
+def _normal_appearance_states(widget) -> dict:
+    appearance = _resolve(widget.get("/AP", {}))
+    normal = _resolve(appearance.get("/N", {})) if appearance else {}
+    return normal if hasattr(normal, "keys") else {}
 
 
 def _widget_appearance_errors(old_reader: PdfReader, new_reader: PdfReader,

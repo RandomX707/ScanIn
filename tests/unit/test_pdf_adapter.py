@@ -122,6 +122,112 @@ def test_pdf_checkbox_radio_and_dropdown_updates_use_real_appearance_options():
     assert report.outcome == "VERIFIED", report.as_dict()
 
 
+@pytest.mark.parametrize("checked", [True, False])
+def test_pdf_radio_and_checkbox_values_are_name_objects_and_widget_states_match(checked):
+    from pypdf.generic import NameObject
+    from reportlab.pdfgen import canvas
+
+    output = io.BytesIO()
+    pdf = canvas.Canvas(output)
+    pdf.acroForm.checkbox(name="consent", x=40, y=700, checked=not checked,
+                          borderWidth=1, forceBorder=True)
+    pdf.acroForm.radio(name="coverage", value="basic", x=40, y=650, selected=True, forceBorder=True)
+    pdf.acroForm.radio(name="coverage", value="standard", x=75, y=650, forceBorder=True)
+    pdf.showPage(); pdf.save()
+    source = output.getvalue()
+    adapter = PdfAdapter()
+    targets = {item.id: item for item in adapter.targets(source)}
+    patches = [
+        Patch(hashlib.sha256(source).hexdigest(), "pdf:coverage", targets["pdf:coverage"].value,
+              targets["pdf:coverage"].fingerprint, TypedValue("choice", "standard")),
+        Patch(hashlib.sha256(source).hexdigest(), "pdf:consent", targets["pdf:consent"].value,
+              targets["pdf:consent"].fingerprint, TypedValue("boolean", checked)),
+    ]
+    plan = build_patch_plan(adapter, source, patches, provenance={"edit_set_id": "typed-buttons"})
+    candidate = adapter.apply(source, plan)
+    reader = PdfReader(io.BytesIO(candidate))
+    fields = reader.get_fields()
+    assert isinstance(fields["coverage"]["/V"], NameObject)
+    assert fields["coverage"]["/V"] == NameObject("/standard")
+    assert isinstance(fields["consent"]["/V"], NameObject)
+    consent_state = ("/" + targets["pdf:consent"].native_locator["on_state"]) if checked else "/Off"
+    assert fields["consent"]["/V"] == NameObject(consent_state)
+
+    radio_widgets = [ref.get_object() for page in reader.pages for ref in page.get("/Annots", [])
+                     if ref.get_object().get("/Parent") is not None and
+                     ref.get_object()["/Parent"].get_object().get("/T") == "coverage"]
+    assert len(radio_widgets) == 2
+    assert sum(str(widget["/AS"]) == "/standard" for widget in radio_widgets) == 1
+    assert sum(str(widget["/AS"]) == "/Off" for widget in radio_widgets) == 1
+    checkbox_widgets = [ref.get_object() for page in reader.pages for ref in page.get("/Annots", [])
+                        if ref.get_object().get("/T") == "consent"]
+    assert len(checkbox_widgets) == 1
+    assert str(checkbox_widgets[0]["/AS"]) == consent_state
+    from PIL import ImageChops
+    from packages.core.verification.pdf import _render
+    assert ImageChops.difference(_render(source, forms_enabled=True)[0],
+                                 _render(candidate, forms_enabled=True)[0]).getbbox() is not None
+    report = PdfIndependentVerifier().verify(source, candidate, plan)
+    assert report.outcome == "VERIFIED", report.as_dict()
+
+
+def test_pdf_radio_duplicate_export_values_remain_supported():
+    output = io.BytesIO()
+    pdf = canvas.Canvas(output)
+    pdf.acroForm.radio(name="coverage", value="standard", x=30, y=700, selected=True, forceBorder=True)
+    pdf.acroForm.radio(name="coverage", value="standard", x=65, y=700, forceBorder=True)
+    pdf.acroForm.radio(name="coverage", value="premium", x=100, y=700, forceBorder=True)
+    pdf.showPage(); pdf.save()
+    source = output.getvalue()
+    adapter = PdfAdapter()
+    target = next(item for item in adapter.targets(source) if item.id == "pdf:coverage")
+    assert set(target.options) == {"standard", "premium"}
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("choice", "premium"))
+    plan = build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": "duplicate-radio-values"})
+    candidate = adapter.apply(source, plan)
+    reader = PdfReader(io.BytesIO(candidate))
+    widgets = [ref.get_object() for ref in reader.pages[0]["/Annots"]
+               if ref.get_object().get("/Parent") is not None]
+    assert str(reader.get_fields()["coverage"]["/V"]) == "/premium"
+    assert [str(widget["/AS"]) for widget in widgets] == ["/Off", "/Off", "/premium"]
+    assert PdfIndependentVerifier().verify(source, candidate, plan).outcome == "VERIFIED"
+
+
+@pytest.mark.parametrize("bad_state", ["wrong_type", "mismatched_as"])
+def test_pdf_button_verifier_rejects_typed_or_appearance_state_mismatch(bad_state):
+    from pypdf.generic import NameObject, TextStringObject
+
+    source = _complex_two_page_form_pdf()
+    adapter = PdfAdapter()
+    target = next(item for item in adapter.targets(source) if item.id == "pdf:coverage")
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("choice", "standard"))
+    plan = build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": "bad-radio-state"})
+    candidate = adapter.apply(source, plan)
+
+    def mutate(writer):
+        field = next(ref.get_object() for ref in writer._root_object["/AcroForm"].get_object()["/Fields"]
+                     if ref.get_object().get("/T") == "coverage")
+        if bad_state == "wrong_type":
+            field[NameObject("/V")] = TextStringObject("standard")
+        else:
+            widget = next(widget for widget in _writer_form_widgets(writer, "coverage")
+                          if widget.get("/AS") == NameObject("/standard"))
+            widget[NameObject("/AS")] = NameObject("/Off")
+
+    tampered = _incremental_tamper(candidate, mutate)
+    report = PdfIndependentVerifier().verify(source, tampered, plan)
+    assert report.outcome == "BLOCKED"
+    assert report.check("intent").status == "FAIL"
+
+
+def _writer_form_widgets(writer, name):
+    return [ref.get_object() for page in writer.pages for ref in page.get("/Annots", [])
+            if ref.get_object().get("/Parent") is not None and
+            ref.get_object()["/Parent"].get_object().get("/T") == name]
+
+
 def test_pdf_incremental_edit_verifies_qpdf_object_stream_input():
     source = _form_pdf()
     with tempfile.TemporaryDirectory(prefix="channel360-qpdf-fixture-") as temporary:

@@ -352,6 +352,7 @@ class PdfAdapter:
         reader = _reader(source)
         targets = {t.id: t for t in self.targets(source)}
         values: dict[str, Any] = {}
+        button_values: dict[str, tuple[str, str]] = {}
         for patch in plan.patches:
             target = targets.get(patch.target_id)
             if target is None:
@@ -363,14 +364,17 @@ class PdfAdapter:
                 on_state = (target.native_locator or {}).get("on_state")
                 if not on_state:
                     raise PdfDocumentError("unsupported_checkbox_appearance")
-                values[name] = "/" + on_state if patch.new_value.value else "/Off"
+                button_values[name] = (target.field_type, on_state if patch.new_value.value else "Off")
+            elif target.field_type == "radio":
+                button_values[name] = (target.field_type, str(patch.new_value.value).lstrip("/"))
             else:
                 values[name] = str(patch.new_value.value)
         writer = _QpdfConformantIncrementalWriter(reader, incremental=True)
         source_acro = _resolve(reader.root_object.get("/AcroForm", {}))
         had_need_appearances = "/NeedAppearances" in source_acro
         need_appearances = source_acro.get("/NeedAppearances")
-        writer.update_page_form_field_values(None, values, auto_regenerate=False)
+        if values:
+            writer.update_page_form_field_values(None, values, auto_regenerate=False)
         # pypdf currently maps auto_regenerate=False to /NeedAppearances false.
         # Restore the source entry exactly (including absence) so the flag never
         # changes and cannot trigger a viewer-wide appearance regeneration.
@@ -380,6 +384,26 @@ class PdfAdapter:
             writer_acro[need_appearances_key] = need_appearances
         else:
             writer_acro.pop(need_appearances_key, None)
+        for name, (field_type, selected_value) in button_values.items():
+            field = _writer_field(writer, name)
+            widgets = _writer_widgets(writer, name)
+            if field is None or not widgets:
+                raise PdfDocumentError("button_widgets_not_found")
+            selected_state = NameObject("/Off" if selected_value == "Off" else f"/{selected_value}")
+            field[NameObject("/V")] = selected_state
+            selected_widgets = 0
+            for widget in widgets:
+                appearance = _resolve(widget.get("/AP", {}))
+                normal = _resolve(appearance.get("/N", {})) if appearance else {}
+                state_names = {str(value) for value in normal.keys()}
+                if field_type == "radio":
+                    widget_selected = str(selected_state) in state_names
+                else:
+                    widget_selected = selected_value != "Off" and str(selected_state) in state_names
+                widget[NameObject("/AS")] = selected_state if widget_selected else NameObject("/Off")
+                selected_widgets += int(widget_selected)
+            if selected_value != "Off" and not selected_widgets:
+                raise PdfDocumentError("selected_button_appearance_missing")
         for patch in plan.patches:
             target = targets[patch.target_id]
             if target.field_type not in {"text", "choice"}:
@@ -508,3 +532,22 @@ def _writer_widgets(writer: PdfWriter, name: str) -> list[Any]:
             if ".".join(pieces) == name:
                 found.append(widget)
     return found
+
+
+def _writer_field(writer: PdfWriter, name: str) -> Any | None:
+    fields = _resolve(_resolve(writer._root_object.get("/AcroForm", {})).get("/Fields", []))
+
+    def find(items, prefix=""):
+        for reference in items:
+            field = _resolve(reference)
+            partial = str(field.get("/T", ""))
+            qualified = f"{prefix}.{partial}" if prefix and partial else partial or prefix
+            if qualified == name:
+                return field
+            child = _resolve(field.get("/Kids", []))
+            found = find(child, qualified) if child else None
+            if found is not None:
+                return found
+        return None
+
+    return find(fields)
