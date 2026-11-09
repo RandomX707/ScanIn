@@ -76,6 +76,36 @@ def _page_content(page) -> bytes:
     return contents.get_data() if contents is not None else b""
 
 
+def _widget_image_rect(page, rect: list[float], image_size: tuple[int, int]) -> tuple[int, int, int, int]:
+    """Map PDF user-space widget coordinates through CropBox and /Rotate."""
+    crop = page.cropbox
+    left, bottom = float(crop.left), float(crop.bottom)
+    right, top = float(crop.right), float(crop.top)
+    width, height = right - left, top - bottom
+    rotation = int(page.get("/Rotate", 0) or 0) % 360
+    if rotation not in {0, 90, 180, 270}:
+        raise ValueError("unsupported_page_rotation")
+    display_width, display_height = (height, width) if rotation in {90, 270} else (width, height)
+    scale_x, scale_y = image_size[0] / display_width, image_size[1] / display_height
+    x0, y0, x1, y1 = rect
+    points = [(x0, y0), (x0, y1), (x1, y0), (x1, y1)]
+    mapped = []
+    for x, y in points:
+        if rotation == 0:
+            px, py = x - left, top - y
+        elif rotation == 90:
+            px, py = y - bottom, x - left
+        elif rotation == 180:
+            px, py = right - x, y - bottom
+        else:  # 270 degrees clockwise
+            px, py = top - y, right - x
+        mapped.append((px * scale_x, py * scale_y))
+    return (max(0, math.floor(min(point[0] for point in mapped)) - 1),
+            max(0, math.floor(min(point[1] for point in mapped)) - 1),
+            min(image_size[0] - 1, math.ceil(max(point[0] for point in mapped)) + 1),
+            min(image_size[1] - 1, math.ceil(max(point[1] for point in mapped)) + 1))
+
+
 def _render(data: bytes, scale: float = 1.0, *, forms_enabled: bool = True) -> list[Image.Image]:
     import pypdfium2 as pdfium
 
@@ -230,14 +260,8 @@ class PdfIndependentVerifier:
                     for widget in _target_widgets(old_reader, patch.target_id.removeprefix("pdf:")):
                         if widget["page"] != page_index + 1:
                             continue
-                        x0, y0, x1, y1 = widget["rect"]
-                        page_width = float(old_reader.pages[page_index].mediabox.width)
-                        page_height = float(old_reader.pages[page_index].mediabox.height)
-                        scale_x, scale_y = old_img.width / page_width, old_img.height / page_height
-                        draw.rectangle((max(0, math.ceil(x0 * scale_x) - 1),
-                                        max(0, math.ceil((page_height - y1) * scale_y) - 1),
-                                        min(old_img.width - 1, math.floor(x1 * scale_x)),
-                                        min(old_img.height - 1, math.floor((page_height - y0) * scale_y))), fill=0)
+                        draw.rectangle(_widget_image_rect(old_reader.pages[page_index], widget["rect"], old_img.size),
+                                       fill=0)
                 diff = ImageChops.multiply(diff, mask)
                 if diff.getbbox() is not None:
                     visual_errors.append(f"page_{page_index + 1}:pixels_changed_outside_target_widgets")

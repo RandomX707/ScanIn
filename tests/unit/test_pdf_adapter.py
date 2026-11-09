@@ -456,3 +456,58 @@ def test_pdf_verifier_fails_if_form_widgets_are_not_drawn(monkeypatch):
     visual = next(item for item in report.checks if item.check == "visual")
     assert report.outcome == "BLOCKED", report.as_dict()
     assert visual.status in {"FAIL", "NOT_VERIFIED"}, report.as_dict()
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_pdf_rotated_widget_regions_map_to_rendered_pixels(rotation):
+    from pypdf import PdfWriter
+    from pypdf.generic import NameObject, NumberObject
+    source_reader = PdfReader(io.BytesIO(_form_pdf(width=180)))
+    writer = PdfWriter(clone_from=source_reader)
+    writer.pages[0][NameObject("/Rotate")] = NumberObject(rotation)
+    out = io.BytesIO(); writer.write(out); source = out.getvalue()
+    adapter = PdfAdapter(); target = adapter.targets(source)[0]
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "Adele"))
+    plan = build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": f"rotated-{rotation}"})
+    candidate = adapter.apply(source, plan)
+    report = PdfIndependentVerifier().verify(source, candidate, plan)
+    assert report.outcome == "VERIFIED", report.as_dict()
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_pdf_rotated_widget_mask_accounts_for_cropbox_offset(rotation):
+    from pypdf import PdfWriter
+    from pypdf.generic import NameObject, NumberObject, RectangleObject
+    writer = PdfWriter(clone_from=PdfReader(io.BytesIO(_form_pdf(width=180))))
+    page = writer.pages[0]
+    page[NameObject("/CropBox")] = RectangleObject([20, 650, 500, 800])
+    page[NameObject("/Rotate")] = NumberObject(rotation)
+    out = io.BytesIO(); writer.write(out); source = out.getvalue()
+    adapter = PdfAdapter(); target = adapter.targets(source)[0]
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "Adele"))
+    plan = build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": f"crop-rotate-{rotation}"})
+    report = PdfIndependentVerifier().verify(source, adapter.apply(source, plan), plan)
+    assert report.outcome == "VERIFIED", report.as_dict()
+
+
+def test_pdf_rotated_page_outside_widget_visual_change_is_blocked():
+    from pypdf import PdfWriter
+    from pypdf.generic import NameObject, NumberObject
+    source_reader = PdfReader(io.BytesIO(_complex_two_page_form_pdf()))
+    writer = PdfWriter(clone_from=source_reader)
+    writer.pages[0][NameObject("/Rotate")] = NumberObject(90)
+    out = io.BytesIO(); writer.write(out); source = out.getvalue()
+    adapter = PdfAdapter(); target = adapter.targets(source)[0]
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "Adele"))
+    plan = build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": "rotated-tamper"})
+    candidate = adapter.apply(source, plan)
+    def add_unrelated_mark(writer):
+        writer.update_page_form_field_values(None, {"untouched": "changed unrelated value"},
+                                             auto_regenerate=False)
+    tampered = _incremental_tamper(candidate, add_unrelated_mark)
+    report = PdfIndependentVerifier().verify(source, tampered, plan)
+    assert report.outcome == "BLOCKED"
+    assert report.check("visual").status == "FAIL"
