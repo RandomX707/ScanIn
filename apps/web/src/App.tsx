@@ -21,39 +21,105 @@ type Field = { field_id: string; target_id: string; label: string; observed_valu
 type Correction = { id: string; field_id: string; label: string; corrected_value: { type: string; value: unknown }; reason: string; actor_id: string; created_at: string; target_id?: string; source_sha256?: string; source_version_id?: string };
 type TextAnchor = { kind: "pdf_page" | "docx_block"; page?: number; block_id?: string; start: number; end: number; text: string };
 
+type PendingAnchor = TextAnchor & { sourceKey: string };
+
+/** Offsets of the current DOM selection inside one extracted-text block, measured with Ranges so it works
+ *  whether the selection boundaries sit in the block's text node or on the block element itself. */
+function readAnchorSelection(container: HTMLElement | null): TextAnchor | "invalid" | null {
+  const selection = window.getSelection();
+  if (!container || !selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  const blockOf = (node: Node | null) => (node instanceof Element ? node : node?.parentElement ?? null)?.closest<HTMLElement>("[data-anchor-source]") ?? null;
+  const anchorBlock = blockOf(selection.anchorNode);
+  const focusBlock = blockOf(selection.focusNode);
+  const anchorInside = !!anchorBlock && container.contains(anchorBlock);
+  const focusInside = !!focusBlock && container.contains(focusBlock);
+  // A selection touching no extracted block (for example text selected or typed in the label input)
+  // neither replaces nor clears the captured selection.
+  if (!anchorInside && !focusInside) return null;
+  if (!anchorInside || !focusInside || anchorBlock !== focusBlock || !anchorBlock) return "invalid";
+  const range = selection.getRangeAt(0);
+  const before = document.createRange();
+  before.setStart(anchorBlock, 0);
+  before.setEnd(range.startContainer, range.startOffset);
+  const start = before.toString().length;
+  const text = range.toString();
+  const end = start + text.length;
+  const blockText = anchorBlock.textContent ?? "";
+  if (!text.trim() || text.length > 500 || blockText.slice(start, end) !== text) return "invalid";
+  const source = anchorBlock.dataset.anchorSource ?? "";
+  if (source.startsWith("page:")) return { kind: "pdf_page", page: Number(source.slice(5)), start, end, text };
+  if (source.startsWith("block:")) return { kind: "docx_block", block_id: source.slice(6), start, end, text };
+  return "invalid";
+}
+
+/** The extracted text currently shown for an anchor, used to reject stale selections before submitting. */
+function anchorSourceText(viewed: Viewed, anchor: TextAnchor): string | null {
+  if (anchor.kind === "pdf_page") return viewed.details?.pages?.find((page) => page.page === anchor.page)?.text ?? null;
+  return viewed.details?.blocks?.find((block) => block.id === anchor.block_id)?.text ?? null;
+}
+
 function TextAnchorPicker({ viewed, disabled, onAnchor }: { viewed: Viewed; disabled: boolean; onAnchor: (anchor: TextAnchor, label: string) => void }) {
   const [label, setLabel] = useState("");
-  const [pending, setPending] = useState<TextAnchor | null>(null);
+  const [pending, setPending] = useState<PendingAnchor | null>(null);
+  const [hint, setHint] = useState("");
   const container = useRef<HTMLElement>(null);
   const pages = viewed.adapter === "pdf" ? viewed.details?.pages ?? [] : [];
   const blocks = viewed.adapter === "docx" ? viewed.details?.blocks ?? [] : [];
-  useEffect(() => { setPending(null); }, [viewed.version_id]);
-  useEffect(() => {
-    // Remember the last selection made inside one extracted text block, so typing a label (which
-    // moves focus and clears the document selection) does not lose it.
-    function capture() {
-      const selection = window.getSelection();
-      if (!selection || selection.isCollapsed || selection.anchorNode !== selection.focusNode) return;
-      const element = selection.anchorNode?.parentElement?.closest<HTMLElement>("[data-anchor-source]");
-      if (!element || !container.current?.contains(element)) return;
-      const start = Math.min(selection.anchorOffset, selection.focusOffset);
-      const end = Math.max(selection.anchorOffset, selection.focusOffset);
-      const text = (selection.anchorNode?.textContent ?? "").slice(start, end);
-      const source = element.dataset.anchorSource ?? "";
-      setPending(source.startsWith("page:") ? { kind: "pdf_page", page: Number(source.slice(5)), start, end, text } : { kind: "docx_block", block_id: source.slice(6), start, end, text });
+  const sourceKey = `${viewed.document_id}:${viewed.version_id}`;
+  const sourceKeyRef = useRef(sourceKey);
+  sourceKeyRef.current = sourceKey;
+  // A selection belongs to one document version: switching document or version discards it.
+  useEffect(() => { setPending(null); setHint(""); setLabel(""); }, [sourceKey]);
+  const capture = useCallback(() => {
+    const result = readAnchorSelection(container.current);
+    if (result === null) return;
+    if (result === "invalid") {
+      setPending(null);
+      setHint("Select non-empty text (up to 500 characters) inside one extracted block. Selections spanning several blocks are not accepted.");
+      return;
     }
+    setPending({ ...result, sourceKey: sourceKeyRef.current });
+    setHint("");
+  }, []);
+  useEffect(() => {
+    // Asynchronous fallback; pointer and keyboard handlers below capture synchronously.
     document.addEventListener("selectionchange", capture);
     return () => document.removeEventListener("selectionchange", capture);
-  }, []);
+  }, [capture]);
+  function selectWholeBlock(event: React.KeyboardEvent<HTMLPreElement>) {
+    if (!((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a")) return;
+    // Keyboard select-all inside a block selects exactly that block (not the whole page).
+    event.preventDefault();
+    const range = document.createRange();
+    range.selectNodeContents(event.currentTarget);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    capture();
+  }
+  function submit() {
+    if (!pending) return;
+    const current = anchorSourceText(viewed, pending);
+    if (pending.sourceKey !== sourceKey || current === null || current.slice(pending.start, pending.end) !== pending.text) {
+      setPending(null);
+      setHint("The selection no longer matches this document version. Select the text again.");
+      return;
+    }
+    const { sourceKey: _ignored, ...anchor } = pending;
+    onAnchor(anchor, label.trim());
+    setPending(null); setLabel("");
+  }
   if (!pages.length && !blocks.length) return null;
-  return <section className="anchor-picker" aria-label="Anchor text from the source" ref={container}><h3 className="subsection-title">Anchor text from the source</h3><p className="tab-description">Select text exactly as extracted from this immutable version. The server re-checks the selection against the source before recording it. No OCR is used.</p>
+  const blockProps = { className: "anchor-text", tabIndex: 0, onKeyDown: selectWholeBlock };
+  return <section className="anchor-picker" aria-label="Anchor text from the source" ref={container} onPointerUp={capture} onMouseUp={capture} onKeyUp={capture}><h3 className="subsection-title">Anchor text from the source</h3><p className="tab-description">Select text exactly as extracted from this immutable version, with the mouse or the keyboard (Ctrl/⌘+A inside a block selects that block). The server re-checks the selection against the source before recording it. No OCR is used.</p>
     <div className="anchor-sources">{pages.map((page) => page.scanned_or_image_only || !page.text.trim()
       ? <p className="preview-note" key={`page-${page.page}`}>Page {page.page}: no extractable text layer (OCR is not enabled), so nothing on this page can be anchored.</p>
-      : <details key={`page-${page.page}`} open={page.page === 1}><summary>Page {page.page} extracted text</summary><pre className="anchor-text" data-anchor-source={`page:${page.page}`}>{page.text}</pre></details>)}
-      {blocks.map((block, index) => <div key={`block-${index}-${block.id}`} className="anchor-block"><small>{pretty(block.kind)} · {block.part.replace("word/", "")}</small><pre className="anchor-text" data-anchor-source={`block:${block.id}`}>{block.text}</pre></div>)}</div>
-    <p className="anchor-pending" role="status">{pending ? <>Selected text: <q>{pending.text.length > 120 ? `${pending.text.slice(0, 120)}…` : pending.text}</q></> : "Select text inside one extracted block above."}</p>
+      : <details key={`page-${page.page}`} open={page.page === 1}><summary>Page {page.page} extracted text</summary><pre {...blockProps} aria-label={`Page ${page.page} extracted text`} data-anchor-source={`page:${page.page}`}>{page.text}</pre></details>)}
+      {blocks.map((block, index) => <div key={`block-${index}-${block.id}`} className="anchor-block"><small>{pretty(block.kind)} · {block.part.replace("word/", "")}</small><pre {...blockProps} aria-label={`${pretty(block.kind)} extracted text`} data-anchor-source={`block:${block.id}`}>{block.text}</pre></div>)}</div>
+    <p className="anchor-pending" role="status">{pending ? `Selected text: “${pending.text.length > 120 ? `${pending.text.slice(0, 120)}…` : pending.text}”` : "Select text inside one extracted block above."}</p>
+    {hint && <p className="notice" role="alert">{hint}</p>}
     <label className="form-label">Field label (optional)<input aria-label="Anchored field label" value={label} maxLength={255} onChange={(event) => setLabel(event.target.value)} placeholder="e.g. Insured name" disabled={disabled} /></label>
-    <button className="secondary full-width" disabled={disabled || !pending} onClick={() => { if (pending) { onAnchor(pending, label.trim()); setPending(null); setLabel(""); } }}>Add selected text as a correction field</button></section>;
+    <button className="secondary full-width" disabled={disabled || !pending} onClick={submit}>Add selected text as a correction field</button></section>;
 }
 type Viewed = { editable_target_count?: number | null; capabilities?: Capabilities; document_id: string; version_id: string; version_kind: string; filename: string; source_sha256: string; adapter: string; docx_verification_mode?: "structural" | "structural_and_visual" | null; capability: { level: string; reasons: string[] }; targets: Target[]; targets_truncated?: boolean; targets_page?: TargetPage | null; details?: DocDetails; structural_summary: StructuralSummary | null };
 type TargetPage = { mode: "page" | "lookup"; offset: number; limit: number; total: number; next_offset: number | null; found?: number };

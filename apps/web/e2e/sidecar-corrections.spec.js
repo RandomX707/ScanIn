@@ -63,6 +63,26 @@ async function selectExtractedText(page, needle) {
     return null;
   }, needle);
   expect(selected).toBe(needle);
+  // Wait for the picker's own confirmation before touching any other control.
+  await expect(page.locator('.anchor-pending')).toHaveText(`Selected text: “${needle}”`);
+}
+
+async function rangeRect(page, needle) {
+  return page.evaluate((text) => {
+    for (const element of document.querySelectorAll('[data-anchor-source]')) {
+      const node = element.firstChild;
+      const index = node?.textContent?.indexOf(text) ?? -1;
+      if (node && index >= 0) {
+        element.closest('details')?.setAttribute('open', '');
+        element.scrollIntoView({ block: 'center' });
+        const first = document.createRange(); first.setStart(node, index); first.setEnd(node, index + 1);
+        const last = document.createRange(); last.setStart(node, index + text.length - 1); last.setEnd(node, index + text.length);
+        const a = first.getBoundingClientRect(), b = last.getBoundingClientRect();
+        return { x1: a.left + 1, y: a.top + a.height / 2, x2: b.right - 0.5 };
+      }
+    }
+    return null;
+  }, needle);
 }
 
 async function saveCorrection(page, label, value, reason) {
@@ -161,4 +181,77 @@ test('text anchors fail closed for scanned pages, edited selections and stale ve
   expect(foreign.status()).toBe(404);
   const fields = await (await apiCall(request, owner, `/api/documents/${invoice.document_id}/fields`)).json();
   expect(fields.items).toEqual([]);
+});
+
+test('mouse selection is captured on release and survives typing a label', async ({ page, request }) => {
+  const uploaded = await uploadFixture(request, 'synthetic-invoice-no-fields.pdf', 'application/pdf');
+  await openDocument(page, uploaded.filename);
+  await page.getByRole('tab', { name: 'Data corrections' }).click();
+  const add = page.getByRole('button', { name: 'Add selected text as a correction field' });
+  await expect(add).toBeDisabled();
+  await expect(page.locator('.anchor-pending')).toHaveText('Select text inside one extracted block above.');
+  const rect = await rangeRect(page, 'Meera Iyer');
+  await page.mouse.move(rect.x1, rect.y);
+  await page.mouse.down();
+  await page.mouse.move(rect.x2, rect.y, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.locator('.anchor-pending')).toHaveText('Selected text: “Meera Iyer”');
+  await page.getByLabel('Anchored field label').fill('Insured');
+  await page.getByLabel('Anchored field label').press('End');
+  await page.getByLabel('Anchored field label').type(' name');
+  await expect(page.locator('.anchor-pending')).toHaveText('Selected text: “Meera Iyer”');
+  await expect(add).toBeEnabled();
+  await add.click();
+  await expect(page.locator('.correction-card').filter({ hasText: 'Insured name' })).toContainText('Meera Iyer');
+  const fields = (await (await apiCall(request, owner, `/api/documents/${uploaded.document_id}/fields`)).json()).items;
+  expect(fields.map((field) => field.observed_value.value)).toEqual(['Meera Iyer']);
+  await expect(add).toBeDisabled();
+});
+
+test('keyboard selection: Ctrl/Cmd+A inside a focused block selects exactly that block', async ({ page, request }) => {
+  const uploaded = await uploadFixture(request, 'synthetic-tracked-changes.docx',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  await openDocument(page, uploaded.filename);
+  await page.getByRole('tab', { name: 'Data corrections' }).click();
+  const block = page.locator('[data-anchor-source]').filter({ hasText: 'Policyholder: Alexander Kumar' });
+  await block.focus();
+  await page.keyboard.press('ControlOrMeta+a');
+  await expect(page.locator('.anchor-pending')).toHaveText('Selected text: “Policyholder: Alexander Kumar”');
+  await page.getByLabel('Anchored field label').fill('Policyholder line');
+  await page.getByRole('button', { name: 'Add selected text as a correction field' }).click();
+  await expect(page.locator('.correction-card').filter({ hasText: 'Policyholder line' })).toContainText('Policyholder: Alexander Kumar');
+  const fields = (await (await apiCall(request, owner, `/api/documents/${uploaded.document_id}/fields`)).json()).items;
+  expect(fields[0]).toMatchObject({ observed_value: { value: 'Policyholder: Alexander Kumar' } });
+  expect(fields[0].target_id).toMatch(new RegExp(`^text:docx:word/document\\.xml:p\\d+:0-${'Policyholder: Alexander Kumar'.length}$`));
+});
+
+test('selections spanning blocks are rejected and switching documents discards a pending selection', async ({ page, request }) => {
+  const docx = await uploadFixture(request, 'synthetic-tracked-changes.docx',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  const pdf = await uploadFixture(request, 'synthetic-invoice-no-fields.pdf', 'application/pdf');
+  await openDocument(page, docx.filename);
+  await page.getByRole('tab', { name: 'Data corrections' }).click();
+  await selectExtractedText(page, 'Alexander Kumar');
+  const spanned = await page.evaluate(() => {
+    const blocks = [...document.querySelectorAll('[data-anchor-source]')];
+    const range = document.createRange();
+    range.setStart(blocks[0].firstChild, 2); range.setEnd(blocks[1].firstChild, 4);
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    return blocks.length;
+  });
+  expect(spanned).toBeGreaterThan(1);
+  await page.locator('.anchor-picker').dispatchEvent('mouseup');
+  await expect(page.locator('.anchor-pending')).toHaveText('Select text inside one extracted block above.');
+  await expect(page.getByRole('alert')).toContainText('Selections spanning several blocks are not accepted');
+  await expect(page.getByRole('button', { name: 'Add selected text as a correction field' })).toBeDisabled();
+  await selectExtractedText(page, 'Alexander Kumar');
+  await expect(page.getByRole('button', { name: 'Add selected text as a correction field' })).toBeEnabled();
+  await openDocument(page, pdf.filename);
+  await page.getByRole('tab', { name: 'Data corrections' }).click();
+  await expect(page.locator('.anchor-pending')).toHaveText('Select text inside one extracted block above.');
+  await expect(page.getByRole('button', { name: 'Add selected text as a correction field' })).toBeDisabled();
+  for (const doc of [docx, pdf]) {
+    const fields = (await (await apiCall(request, owner, `/api/documents/${doc.document_id}/fields`)).json()).items;
+    expect(fields).toEqual([]);
+  }
 });
