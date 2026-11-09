@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,6 +71,13 @@ const fixtures = [
     target: 'pdf:region', oldValue: 'CA', newValue: 'NY', nativeValueType: 'choice',
     unrelated: 'Synthetic continuation page',
   },
+  {
+    name: 'DOCX structurally verified release', filename: 'synthetic-claim.docx',
+    mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    bytes: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-claim.docx')),
+    target: 'docx:word/document.xml:p1:r0:t0', oldValue: 'Policyholder: Alexander Kumar',
+    newValue: 'Policyholder: Alexander Kumar Venkatesh', unrelated: 'CLM-DEMO-360',
+  },
 ];
 
 async function apiCall(request, token, route, options = {}) {
@@ -96,20 +104,25 @@ async function connect(page, role, filename) {
   }
 }
 
-async function selectTarget(page, targetId, adapter) {
+async function selectTarget(page, targetId, adapter, oldValue = 'Policyholder: Ada Example') {
   if (adapter === 'json') {
     await page.getByRole('option').filter({ hasText: targetId.replace('json:', '') }).click();
   } else if (adapter === 'pdf') {
     await page.locator('.pdf-field-row').filter({ hasText: targetId.replace('pdf:', '') }).click();
   } else if (adapter === 'docx') {
-    await page.locator('.docx-block').filter({ hasText: 'Policyholder: Ada Example' }).getByRole('button', { name: /Select .*target|Select for data correction/ }).click();
+    await page.locator('.docx-block').filter({ hasText: oldValue }).getByRole('button', { name: /Select .*target|Select for data correction/ }).click();
   } else {
     await page.locator(`.grid-value[title^="${targetId}"]`).click();
   }
 }
 
 async function readBytes(response) {
-  expect(response.ok()).toBeTruthy();
+  if (!response.ok()) {
+    let detail = '';
+    try { const payload = await response.json(); detail = `${payload.code ?? 'download_error'}: ${payload.message ?? 'Download unavailable'}`; }
+    catch { detail = 'Download unavailable'; }
+    throw new Error(`Download request returned ${response.status()}: ${detail}`);
+  }
   return Buffer.from(await response.body());
 }
 
@@ -161,8 +174,13 @@ async function verifiedRoundTrip({ page, request }, fixture) {
     await page.getByRole('button', { name: 'Previous' }).click();
     await expect(page.getByText('Page 1 of 2')).toBeVisible();
   }
-  await selectTarget(page, fixture.target, adapter);
+  await selectTarget(page, fixture.target, adapter, fixture.oldValue);
   await expect(page.getByText(fixture.target, { exact: false }).first()).toBeVisible();
+  if (adapter === 'docx') {
+    const evidenceDir = path.resolve(here, '../../../artifacts/ui-redesign');
+    fs.mkdirSync(evidenceDir, { recursive: true });
+    await page.screenshot({ path: path.join(evidenceDir, 'docx-structural-preview-selection.png'), fullPage: true });
+  }
 
   const listResponse = await apiCall(request, processor, '/api/documents');
   const docList = await listResponse.json();
@@ -181,7 +199,7 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await expect(page.getByText('Insurer-Authored category')).toBeVisible();
   await connect(page, 'processor', fixture.filename);
 
-  await selectTarget(page, fixture.target, adapter);
+  await selectTarget(page, fixture.target, adapter, fixture.oldValue);
   await page.getByRole('button', { name: /Add to data corrections/ }).click();
   await page.getByRole('tab', { name: 'Data corrections' }).click();
   const fieldCard = page.locator('.correction-card').filter({ hasText: fixture.oldValue });
@@ -189,9 +207,11 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await fieldCard.getByLabel('Correction value type').selectOption('string');
   await fieldCard.getByLabel('Correction reason').fill('Browser E2E sidecar correction');
   await fieldCard.getByRole('button', { name: 'Save data correction' }).click();
-  await expect(page.getByRole('status')).toContainText(/Data correction saved separately/);
+  await expect(page.locator('.toast')).toContainText(/Data correction saved separately/);
 
   await page.getByRole('tab', { name: 'Native changes' }).click();
+  const screenshots = path.resolve(here, '../../../artifacts/ui-redesign');
+  fs.mkdirSync(screenshots, { recursive: true });
   await page.getByLabel('Reason for document change').fill('Browser E2E native correction');
   await page.getByRole('button', { name: 'Create correction draft' }).click();
   const editCard = page.locator('.workflow-status');
@@ -203,11 +223,10 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   }
   await editCard.getByLabel('Native value type').selectOption(fixture.nativeValueType ?? 'string');
   await page.getByRole('button', { name: 'Add selected target patch' }).click();
-  await expect(page.getByRole('status')).toContainText(/Native patch prepared/);
+  await expect(page.locator('.toast')).toContainText(/Native patch prepared/);
   await page.getByRole('button', { name: 'Preflight and freeze' }).click();
-  await expect(page.getByRole('status')).toContainText(/Preflight complete: submitted/);
-  const screenshots = path.resolve(here, '../../../artifacts/ui-redesign');
-  fs.mkdirSync(screenshots, { recursive: true });
+  await expect(page.locator('.toast')).toContainText(/Preflight complete: submitted/);
+  if (adapter === 'docx') await page.screenshot({ path: path.join(screenshots, 'docx-structural-draft.png'), fullPage: true });
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.getByRole('button', { name: 'Dismiss notification' }).click();
   await page.screenshot({ path: path.join(screenshots, 'native-correction-desktop.png'), fullPage: true });
@@ -233,14 +252,16 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await connect(page, 'reviewer');
   await page.getByRole('button', { name: 'Review queue' }).click();
   await expect(page.locator('.approval-card').filter({ hasText: fixture.filename })).toBeVisible();
+  if (adapter === 'docx') await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/docx-structural-review-queue-desktop.png'), fullPage: true });
   fs.mkdirSync(path.resolve(here, '../../../artifacts/ui-redesign'), { recursive: true });
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/approval-queue-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/approval-queue-mobile.png') });
+  if (adapter === 'docx') await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/docx-structural-review-queue-mobile.png'), fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.locator('.approval-card').filter({ hasText: fixture.filename }).getByRole('button', { name: 'Approve change' }).click();
   await page.getByRole('button', { name: 'Confirm approval' }).click();
-  await expect(page.getByRole('status')).toContainText(/approved/);
+  await expect(page.locator('.toast')).toContainText(/approved/);
   await expect(page.locator('.approval-card').filter({ hasText: fixture.filename })).toHaveCount(0);
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/reviewer-approved-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -249,11 +270,27 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   await connect(page, 'processor', fixture.filename);
   await page.getByRole('tab', { name: 'Native changes' }).click();
   await page.getByRole('button', { name: 'Apply, verify and release' }).click();
-  await page.getByRole('button', { name: 'Confirm verified release' }).click();
-  await expect(page.getByRole('status')).toContainText(/Independent verification passed/, { timeout: 30_000 });
+  await page.getByRole('button', { name: 'Confirm release' }).click();
+  await expect(page.locator('.toast')).toContainText(/verification passed/, { timeout: 30_000 });
   const verification = page.locator('.verification-result');
-  await expect(verification).toContainText('VERIFIED');
+  const expectedOutcome = adapter === 'docx' ? 'STRUCTURALLY_VERIFIED' : 'VERIFIED';
+  await expect(verification).toContainText(expectedOutcome);
+  if (adapter === 'docx') {
+    await expect(verification).toContainText('Structural verification: Passed');
+    await expect(verification).toContainText('Visual verification: Not performed');
+    await expect(verification).toContainText('Download structurally verified DOCX');
+  }
   const uiVerification = JSON.parse(await verification.locator('pre').innerText());
+  if (adapter === 'docx') {
+    expect(uiVerification.verification_profile).toBe('structural');
+    expect(uiVerification.structural_checks).toBe('PASS');
+    expect(uiVerification.visual_checks).toBe('NOT_PERFORMED');
+    await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/docx-structural-verification-desktop.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/docx-structural-verification-mobile.png') });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  }
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/verified-release-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/verified-release-mobile.png') });
@@ -263,7 +300,8 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   expect(releaseResponse.ok()).toBeTruthy();
   const release = await releaseResponse.json();
   expect(release.idempotent).toBeTruthy();
-  expect(release.outcome).toBe('VERIFIED');
+  expect(release.outcome).toBe(expectedOutcome);
+  expect(release.download_available).toBeTruthy();
   const derivedVersion = release.version_id;
   const stalePreflight = await apiCall(request, processor, `/api/documents/${documentId}/edit-sets/${staleDraft.edit_set_id}/preflight`, { method: 'POST' });
   expect(stalePreflight.status()).toBe(409);
@@ -292,10 +330,16 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   } else if (adapter === 'pdf') {
     expect(derivedBytes.subarray(0, fixture.bytes.length).equals(fixture.bytes)).toBeTruthy();
     expect(uiVerification.checks.some((check) => check.check === 'visual' && check.status === 'PASS')).toBeTruthy();
+  } else if (adapter === 'docx') {
+    const reopened = execFileSync(path.resolve(here, '../../../.venv/bin/python'), ['-c',
+      'import sys; from io import BytesIO; from docx import Document; d=Document(BytesIO(sys.stdin.buffer.read())); print("FOUND" if any(p.text == "Policyholder: Alexander Kumar Venkatesh" for p in d.paragraphs) else "MISSING")'],
+      { input: derivedBytes, encoding: 'utf8' }).trim();
+    expect(reopened).toBe('FOUND');
+    expect(uiVerification.checks.every((check) => check.status === 'PASS' || (!check.critical && check.status === 'NOT_VERIFIED'))).toBeTruthy();
   }
   const history = await (await apiCall(request, processor, `/api/documents/${documentId}/versions`)).json();
   expect(history.items.some((item) => item.version_id === originalVersion && item.sha256 === originalSha)).toBeTruthy();
-  expect(history.items.some((item) => item.version_id === derivedVersion && item.verification_outcome === 'VERIFIED')).toBeTruthy();
+  expect(history.items.some((item) => item.version_id === derivedVersion && item.verification_outcome === expectedOutcome && item.download_available)).toBeTruthy();
   const audit = await (await apiCall(request, processor, `/api/documents/${documentId}/audit`)).json();
   expect(audit.items.length).toBeGreaterThan(0);
 
@@ -309,12 +353,13 @@ async function verifiedRoundTrip({ page, request }, fixture) {
   const versionArticle = page.locator('.version-card').filter({ hasText: 'Derived version' });
   const [browserDownload] = await Promise.all([
     page.waitForEvent('download'),
-    versionArticle.getByRole('button', { name: 'Download' }).click(),
+    versionArticle.getByRole('button', { name: /Download/ }).click(),
   ]);
   const browserPath = path.resolve(here, '../../../artifacts/host-integration/browser', `${adapter}-${browserDownload.suggestedFilename()}`);
   fs.mkdirSync(path.dirname(browserPath), { recursive: true });
   await browserDownload.saveAs(browserPath);
   expect(fs.readFileSync(browserPath).equals(derivedBytes)).toBeTruthy();
+  if (adapter === 'docx') await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/docx-structural-download-desktop.png'), fullPage: true });
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/host-integration/browser', `${adapter}-verified.png`), fullPage: true });
 
   return { documentId, originalSha, derivedVersion, target: fixture.target, value: fixture.newValue,
@@ -362,7 +407,7 @@ test('local demo sign-in, navigation, upload and document inspection', async ({ 
   await page.screenshot({ path: path.join(screenshots, 'summary-json-switch.png'), fullPage: true });
   await page.getByRole('button', { name: 'Switch identity' }).click();
   await expect(page.getByRole('heading', { name: 'Choose your demo identity' })).toBeVisible();
-  await expect(page.getByRole('status')).toHaveCount(0);
+  await expect(page.locator('.toast')).toHaveCount(0);
 });
 
 test('Summary defaults to No AI and explicit AI generation is cached and comparable', async ({ page, request }) => {
@@ -468,83 +513,6 @@ test('No AI summary remains usable after provider credential and outage errors',
   expect(calls).toBe(2);
 });
 
-test('DOCX preview remains read only until critical verification is available', async ({ page, request }) => {
-  const fixture = fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-claim.docx'));
-  const filename = uniqueFixtureFilename('synthetic-claim.docx');
-  await page.goto('/');
-  await connect(page, 'processor');
-  await page.getByRole('button', { name: 'Documents' }).click();
-  await page.getByLabel('Choose a document to upload').setInputFiles({ name: filename,
-    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: fixture });
-  await page.getByRole('button', { name: 'Upload securely' }).click();
-  await expect(page.getByRole('heading', { name: filename })).toBeVisible();
-  await expect(page.getByText('Read-only extracted text')).toBeVisible();
-  await expect(page.getByRole('tab', { name: 'Summary' })).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByTestId('structural-summary')).toContainText('Deterministic summary');
-  await expect(page.getByText('DOCX · Read only', { exact: true })).toBeVisible();
-  await expect(page.getByText('Policyholder: Ada Example')).toBeVisible();
-  const docxBlock = page.locator('.docx-block').filter({ hasText: 'Policyholder: Ada Example' });
-  await docxBlock.getByRole('button', { name: 'Select for data correction' }).click();
-  await expect(docxBlock.getByRole('button', { name: 'Select for data correction' })).toHaveClass(/selected/);
-  const screenshots = path.resolve(here, '../../../artifacts/ui-redesign');
-  fs.mkdirSync(screenshots, { recursive: true });
-  const notification = page.getByRole('button', { name: 'Dismiss notification' });
-  if (await notification.count()) await notification.click();
-  await page.screenshot({ path: path.join(screenshots, 'summary-docx.png'), fullPage: true });
-  await page.screenshot({ path: path.join(screenshots, 'docx-workspace-desktop.png'), fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.screenshot({ path: path.join(screenshots, 'docx-workspace-mobile.png') });
-  await page.setViewportSize({ width: 1440, height: 1000 });
-
-  const list = await (await apiCall(request, processor, '/api/documents')).json();
-  const uploaded = list.items.find((item) => item.filename === filename);
-  expect(uploaded).toBeTruthy();
-  const docId = uploaded.id;
-  const original = Buffer.from(await (await apiCall(request, processor, `/api/documents/${docId}/original`)).body());
-  expect(original.equals(fixture)).toBeTruthy();
-  const view = await (await apiCall(request, processor, `/api/documents/${docId}/versions/${uploaded.current_version_id}/view`)).json();
-  expect(view.capability.level).toBe('read_only');
-  const target = view.targets.find((entry) => entry.id.includes('document.xml:p1:'));
-  expect(target.editable).toBeTruthy();
-  const classified = await apiCall(request, administrator, `/api/documents/${docId}/category`, {
-    method: 'PUT', data: { category: 'insurer-authored' },
-  });
-  expect(classified.ok()).toBeTruthy();
-  const draftResponse = await apiCall(request, processor, `/api/documents/${docId}/edit-sets`, {
-    method: 'POST', data: { reason: 'Synthetic DOCX browser correction' },
-  });
-  expect(draftResponse.ok()).toBeTruthy();
-  const draft = await draftResponse.json();
-  const patched = await apiCall(request, processor, `/api/documents/${docId}/edit-sets/${draft.edit_set_id}/patches`, {
-    method: 'PUT', data: { patches: [{ target_id: target.id, fingerprint: target.fingerprint,
-      new_value: { type: 'string', value: 'Policyholder: Casey Demo' } }] },
-  });
-  expect(patched.ok()).toBeTruthy();
-  const preflight = await apiCall(request, processor, `/api/documents/${docId}/edit-sets/${draft.edit_set_id}/preflight`, { method: 'POST' });
-  await page.getByRole('tab', { name: 'Native changes' }).click();
-  await expect(page.getByText(/Native DOCX changes are disabled/)).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Create correction draft' })).toHaveCount(0);
-  expect(preflight.status()).toBe(422);
-  expect((await preflight.json()).code).toBe('critical_docx_verification_unavailable');
-  const edits = await (await apiCall(request, processor, `/api/documents/${docId}/edit-sets`)).json();
-  expect(edits.items.find((item) => item.edit_set_id === draft.edit_set_id).status).toBe('draft');
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.screenshot({ path: path.join(screenshots, 'docx-blocked-verification-desktop.png'), fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.screenshot({ path: path.join(screenshots, 'docx-blocked-verification-mobile.png') });
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  await connect(page, 'reviewer');
-  await page.getByRole('button', { name: 'Review queue' }).click();
-  await expect(page.locator('.approval-card').filter({ hasText: filename })).toHaveCount(0);
-  const after = Buffer.from(await (await apiCall(request, processor, `/api/documents/${docId}/original`)).body());
-  expect(after.equals(original)).toBeTruthy();
-  const versions = await (await apiCall(request, processor, `/api/documents/${docId}/versions`)).json();
-  expect(versions.items).toHaveLength(1);
-  await page.screenshot({ path: path.join(screenshots, 'docx-review-queue-desktop.png'), fullPage: true });
-});
-
 test('unsupported encrypted PDF and tracked-change DOCX remain read only in the browser', async ({ page }) => {
   const screenshots = path.resolve(here, '../../../artifacts/ui-redesign');
   fs.mkdirSync(screenshots, { recursive: true });
@@ -607,7 +575,7 @@ test('unsupported encrypted PDF and tracked-change DOCX remain read only in the 
     buffer: fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-tracked-changes.docx')) });
   await page.getByRole('button', { name: 'Upload securely' }).click();
   await expect(page.getByRole('heading', { name: trackedName })).toBeVisible();
-  await expect(page.getByText('Read-only extracted text')).toBeVisible();
+  await expect(page.getByText('Extracted Word text preview')).toBeVisible();
   const blockedTargets = page.locator('.text-target');
   await expect(blockedTargets).not.toHaveCount(0);
   for (const button of await blockedTargets.all()) await expect(button).toBeDisabled();
@@ -656,7 +624,7 @@ test('independent reviewer can reject a submitted change', async ({ page, reques
   await card.getByRole('button', { name: 'Reject' }).click();
   await expect(page.getByRole('dialog')).toContainText('Your independent reviewer decision will be recorded');
   await page.getByRole('button', { name: 'Confirm rejection' }).click();
-  await expect(page.getByRole('status')).toContainText(/rejected/);
+  await expect(page.locator('.toast')).toContainText(/rejected/);
   await expect(card).toHaveCount(0);
   await page.screenshot({ path: path.join(screenshots, 'reviewer-rejection-outcome-desktop.png'), fullPage: true });
   await expect(card).toHaveCount(0);
@@ -703,12 +671,12 @@ test('formula-dependent XLSX release is incomplete and cannot be downloaded', as
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/formula-approval-desktop.png'), fullPage: true });
   await approvalCard.getByRole('button', { name: 'Approve change' }).click();
   await page.getByRole('button', { name: 'Confirm approval' }).click();
-  await expect(page.getByRole('status')).toContainText(/approved/);
+  await expect(page.locator('.toast')).toContainText(/approved/);
   await connect(page, 'processor', formulaFilename);
   await page.getByRole('tab', { name: 'Native changes' }).click();
   await page.getByRole('button', { name: 'Apply, verify and release' }).click();
-  await page.getByRole('button', { name: 'Confirm verified release' }).click();
-  await expect(page.getByRole('status')).toContainText(/Verification incomplete/i, { timeout: 30_000 });
+  await page.getByRole('button', { name: 'Confirm release' }).click();
+  await expect(page.locator('.toast')).toContainText(/Verification incomplete/i, { timeout: 30_000 });
   await expect(page.locator('.verification-result')).toContainText('INCOMPLETE');
   await expect(page.locator('.workflow-status')).toContainText('Verification incomplete');
   await page.screenshot({ path: path.resolve(here, '../../../artifacts/ui-redesign/incomplete-verification-desktop.png'), fullPage: true });

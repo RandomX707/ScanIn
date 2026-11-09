@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     channel360_llm_base_url: str | None = Field(default=None, validation_alias="CHANNEL360_LLM_BASE_URL")
     channel360_llm_timeout_seconds: int = Field(default=20, validation_alias="CHANNEL360_LLM_TIMEOUT_SECONDS")
     channel360_llm_max_output_tokens: int = Field(default=500, validation_alias="CHANNEL360_LLM_MAX_OUTPUT_TOKENS")
+    channel360_docx_verification_mode: Literal["structural", "structural_and_visual"] = Field(
+        default="structural", validation_alias="CHANNEL360_DOCX_VERIFICATION_MODE")
 
     @field_validator("database_url")
     @classmethod

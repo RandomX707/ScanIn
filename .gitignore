@@ -32,6 +32,13 @@ test-results/
 !/artifacts/ui-redesign/native-correction-mobile.png
 !/artifacts/ui-redesign/docx-workspace-desktop.png
 !/artifacts/ui-redesign/docx-workspace-mobile.png
+!/artifacts/ui-redesign/docx-structural-preview-selection.png
+!/artifacts/ui-redesign/docx-structural-draft.png
+!/artifacts/ui-redesign/docx-structural-verification-desktop.png
+!/artifacts/ui-redesign/docx-structural-verification-mobile.png
+!/artifacts/ui-redesign/docx-structural-review-queue-desktop.png
+!/artifacts/ui-redesign/docx-structural-review-queue-mobile.png
+!/artifacts/ui-redesign/docx-structural-download-desktop.png
 !/artifacts/ui-redesign/docx-blocked-verification-desktop.png
 !/artifacts/ui-redesign/docx-blocked-verification-mobile.png
 !/artifacts/ui-redesign/encrypted-pdf-read-only.png

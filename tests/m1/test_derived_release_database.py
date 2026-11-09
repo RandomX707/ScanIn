@@ -13,7 +13,12 @@ from packages.storage.local import StoredFile
 pytestmark = pytest.mark.postgres
 
 
-def test_approved_release_lineage_retry_and_fk_safe_cleanup(postgres_engines, tenant_pair, tmp_path):
+@pytest.mark.parametrize("outcome,adapter,profile", [
+    ("VERIFIED", "csv", None),
+    ("STRUCTURALLY_VERIFIED", "docx", "structural"),
+])
+def test_approved_release_lineage_retry_and_fk_safe_cleanup(postgres_engines, tenant_pair, tmp_path,
+                                                            outcome, adapter, profile):
     owner, app = postgres_engines
     tenant = tenant_pair[0]
     document, edit_set = uuid4(), uuid4()
@@ -49,20 +54,33 @@ def test_approved_release_lineage_retry_and_fk_safe_cleanup(postgres_engines, te
     derived_path.write_bytes(derived)
     derived_stored = StoredFile(tenant, document, derived_path,
         f"{tenant}/derived/{document}/{edit_set}/{derived_hash}", len(derived), derived_hash)
-    manifest = {"source_sha256": original_hash, "media_type": "text/csv", "outcome": "VERIFIED"}
+    manifest = {"source_sha256": original_hash, "media_type": "text/csv", "outcome": outcome}
+    if profile:
+        manifest.update({"verification_profile": profile, "structural_checks": "PASS",
+                         "visual_checks": "NOT_PERFORMED"})
+        invalid_manifest = {key: value for key, value in manifest.items() if key != "visual_checks"}
+        with app.connect() as connection, tenant_transaction(connection, tenant):
+            with pytest.raises(ValueError, match="candidate_outcome_not_releasable"):
+                DocumentRepository(connection, tenant).commit_derived_release(edit_set_id=edit_set,
+                    stored=derived_stored, outcome=outcome, adapter=adapter,
+                    adapter_version="test", manifest=invalid_manifest, actor_id="processor")
     with app.connect() as connection, tenant_transaction(connection, tenant):
         repo = DocumentRepository(connection, tenant)
         first_version = repo.commit_derived_release(edit_set_id=edit_set, stored=derived_stored,
-            outcome="VERIFIED", adapter="csv", adapter_version="test", manifest=manifest, actor_id="processor")
+            outcome=outcome, adapter=adapter, adapter_version="test", manifest=manifest, actor_id="processor")
     with app.connect() as connection, tenant_transaction(connection, tenant):
         repo = DocumentRepository(connection, tenant)
         second_version = repo.commit_derived_release(edit_set_id=edit_set, stored=derived_stored,
-            outcome="VERIFIED", adapter="csv", adapter_version="test", manifest=manifest, actor_id="processor")
+            outcome=outcome, adapter=adapter, adapter_version="test", manifest=manifest, actor_id="processor")
         assert first_version == second_version
         assert repo.get_original(document)["sha256"].strip() == original_hash
         assert repo.get(document)["sha256"].strip() == derived_hash
         versions = repo.list_versions(document)
         assert len(versions) == 2
-        assert next(item for item in versions if item["kind"] == "derived")["verification_outcome"] == "VERIFIED"
+        derived_version = next(item for item in versions if item["kind"] == "derived")
+        assert derived_version["verification_outcome"] == outcome
+        assert derived_version["download_available"] is True
+        if profile:
+            assert derived_version["verification_profile"] == profile
     # tenant_pair teardown then exercises FK-safe cleanup of this approved edit
     # set, its review/manifest, and the derived version linked back to the set.

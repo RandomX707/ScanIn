@@ -362,12 +362,15 @@ Five editable adapters ship in v1. Each one states what it rejects as clearly as
 
 ### DOCX
 
+**Product verification decision:** Standard supported DOCX corrections require structural and content verification. Visual layout verification is an optional stricter profile, not a mandatory requirement for ordinary structural-only releases.
+
 - **Inspect:** tracked changes, document protection or a macro project make the file Read-only.
 - **Targets:** text spans that lie entirely inside a single `w:t` within one `w:r`, in the body, tables, headers and footers. v1 excludes spans in field codes, hyperlinks, content controls and text boxes, and any span crossing runs (`multi_run_span`).
 - **Write:** replace the substring inside that `w:t`. Set `xml:space="preserve"` when the new value has leading or trailing spaces. Run properties are never touched.
 - **Permitted changes:** the target `w:t` elements and the provenance parts.
-- **Verify:** part-level comparison as for XLSX. C14N `document.xml` differs only in target text. LibreOffice renders PDFs before and after.
-- **Reflow:** the visual check compares line breaks per paragraph and the page count, not only pixels. If the edited paragraph wraps differently, or any later content moves, the visual check FAILs and the outcome is BLOCKED. The user is told the new value changes the layout. For DOCX the visual check is critical.
+- **Structural verification profile (default):** part-level comparison as for XLSX. C14N of supported target parts differs only at intended text nodes; unlisted parts, styles, relationships, media, member order and compression methods remain unchanged; provenance, source hash, target fingerprints, expected old text, exact new text and package readability are checked. A pass is `STRUCTURALLY_VERIFIED`. LibreOffice, PDF conversion, pixel comparison and layout geometry are not run.
+- **Strict visual profile (optional):** `structural_and_visual` runs every structural check plus the independent before/after render, page-count, line-wrap, glyph-position and outside-target pixel checks. If the isolated renderer or any critical visual check is unavailable or fails, the result is `BLOCKED`; the server never downgrades this profile.
+- **Layout limitation:** structural verification does not guarantee pagination, line wrapping, font rendering or appearance across Word processors. Longer text may reflow. Only the strict profile evaluates rendered layout.
 - **Later:** multi-run spans only after a dedicated test corpus exists.
 
 ### OOXML packaging (XLSX and DOCX)
@@ -421,11 +424,12 @@ A document correction becomes a downloadable copy only after policy, preflight a
 | Policy | Were signatures, permissions and authority respected? | Re-run policy on the released edit set; signature status unchanged |
 | Provenance | Is the copy linked to its source and approvals? | Manifest complete; provenance embedded; hashes match |
 
-**Outcomes.** Integrity, intent, preservation, policy and provenance are critical for every adapter. Each adapter may mark more checks critical: visual is critical for PDF forms and DOCX. Dependents is never critical. No configuration can make a critical check non-critical.
+**Outcomes.** Integrity, intent, preservation, policy and provenance are critical for every adapter. Visual is critical for PDF forms and is critical for DOCX when the server selects `structural_and_visual`; it is explicitly not performed in the DOCX `structural` profile. Dependents is never critical. Browser requests cannot select or weaken the server profile.
 
 | Outcome | When | Download |
 | --- | --- | --- |
 | VERIFIED | Every check PASS | Released as a verified copy |
+| STRUCTURALLY_VERIFIED | Every mandatory DOCX structural/content check PASS under the `structural` profile; visual checks explicitly `NOT_PERFORMED` | Released as a structurally verified DOCX with an explicit visual-not-checked warning |
 | INCOMPLETE | No FAIL; every critical check PASS; at least one non-critical check NOT\_VERIFIED | Only if tenant policy allows unverified derivatives; labelled verification incomplete, with the unverified items listed |
 | BLOCKED | Any FAIL, or any critical check NOT\_VERIFIED | None; the report is shown |
 
@@ -644,7 +648,7 @@ These tests are the specification. An implementation that passes by weakening a 
 | PDF-2 | PDF form | Edit a checkbox, a radio group and a dropdown | Correct values and appearances |
 | PDF-3 | PDF form | Signed PDF; certified PDF; XFA form | All Read-only |
 | PDF-4 | PDF form | Value over `MaxLen` or wider than the widget | Preflight rejects with a reason |
-| DOCX-1 | DOCX | Single-run edit in body, table cell, header and footer | Run properties unchanged; unlisted parts identical; render matches outside the edited line |
+| DOCX-1 | DOCX structural profile | Single-run edit in body, table cell, header and footer | Run properties unchanged; unlisted parts identical; exact targets and provenance pass; outcome `STRUCTURALLY_VERIFIED` |
 | DOCX-2 | DOCX | Span crossing two runs; span in a hyperlink or field code | Not editable, with the right reason |
 | DOCX-3 | DOCX | Tracked changes; protected document | Read-only |
 | DOCX-4 | DOCX | First edit adds `docProps/custom.xml` | Only that part, `[Content_Types].xml` and `_rels/.rels` change |
@@ -666,7 +670,7 @@ These tests are the specification. An implementation that passes by weakening a 
 | FLOW-7 | Concurrency | Two edit sets from the same base verified at the same time | Exactly one becomes current; the other is recorded as a branch; no lost update |
 | FLOW-8 | Crash | Kill the worker after staging, before commit | No version row and no download link; a retry creates exactly one version; the sweeper removes the orphan |
 | FLOW-9 | Idempotency | Retry an export that already committed | The same version is returned; no duplicate |
-| VERIFY-1 | Outcomes | A critical check cannot run, such as the DOCX renderer being unavailable | BLOCKED; no download |
+| VERIFY-1 | Outcomes | A critical check cannot run, such as a PDF visual check or a DOCX strict-profile renderer | BLOCKED; no download |
 | VERIFY-2 | Outcomes | XLSX edit with dependents, with the unverified-derivatives policy on and then off | On: INCOMPLETE, labelled, items listed. Off: no download |
 | XLSX-8 | XLSX | Empty edit set on a workbook with no custom properties part | Base version returned; no derived file; no part added |
 | XLSX-9 | XLSX | Edit a cell read by an `INDIRECT` formula | Dependents unknowable; outcome INCOMPLETE, never VERIFIED |
@@ -674,7 +678,7 @@ These tests are the specification. An implementation that passes by weakening a 
 | JSON-2 | JSON | Edit inside an object with duplicate keys | Not editable, reason `duplicate_keys` |
 | JSON-3 | JSON | Edit strings next to non-ASCII and escaped characters | Byte spans correct; escaping style kept |
 | CSV-3 | CSV | New values beginning with `=`, `+`, `@`, and a decimal -500 | The first three rejected with `unsafe_csv_value`; -500 accepted |
-| DOCX-5 | DOCX | Single-run replacement long enough to wrap its paragraph | Visual check FAIL; outcome BLOCKED |
+| DOCX-5 | DOCX strict visual profile | Single-run replacement long enough to wrap its paragraph | Visual check FAIL; outcome BLOCKED. Under structural-only mode, no layout-equivalence claim is made |
 | PDF-5 | PDF form | Any field edit | Original bytes are an exact prefix of the output |
 
 ## Milestones
@@ -687,7 +691,7 @@ Each milestone closes when its gate tests pass, and every earlier gate must stil
 4. **M3 XLSX.** The M0 adapter wired into the pipeline, plus the display checks and rich-text handling. **Gate:** XLSX-1 to XLSX-10, VERIFY-2.
 5. **M4 Templates and rules.** Template format and matching, rules engine, findings, structural summary, one demo motor-claim worksheet template. **Gate:** TPL-1, and SEC-1 re-run through a template match.
 6. **M5 Fillable PDF.** A fixture proof of pypdf's incremental mode and appearance regeneration first, then the full adapter: signature and certification detection, rendering diff. **Gate:** PDF-1 to PDF-5.
-7. **M6 DOCX.** Single-run targets, exclusions, provenance parts, rendering and reflow checks. **Gate:** DOCX-1 to DOCX-5.
+7. **M6 DOCX.** Single-run targets, exclusions, provenance and structural verification are the standard release path. Optional strict rendered-layout verification is server-selected and fail-closed. **Gate:** DOCX-1 to DOCX-4 cover structural behavior; DOCX-5 covers the strict visual profile.
 8. **M7 Optional plugins.** OCR for scans, Docling parsing, LLM field discovery and summary, each behind its interface. **Gate:** FLOW-5 still passes with plugins disabled; plugin field proposals are measured against labelled fixtures for precision and recall per field.
 
 When handing a milestone to Claude Code or Codex, give it this document, the milestone's scope, and its gate test IDs. State that the tests define done and that no test may be weakened or skipped to make it pass.
@@ -722,7 +726,7 @@ This revision fixes the contradictions and gaps found in the v2.1 technical revi
 | CSV | Formula-injection policy (CSV-3) |
 | JSON | UTF-8 only, duplicate keys not editable, byte-accurate spans (JSON-2, JSON-3) |
 | XLSX | Defined formula subset, unknowable dependents, precision limit, rich text excluded, display checks, Excel qualification (XLSX-9, XLSX-10) |
-| DOCX | Reflow detection; visual check critical (DOCX-5) |
+| DOCX | Structural verification is mandatory by default; reflow detection is critical only under `structural_and_visual` (DOCX-5) |
 | PDF | pypdf incremental mode adopted, proven on fixtures first (PDF-5) |
 | Tenancy | RLS with `USING` and `WITH CHECK`, `FORCE ROW LEVEL SECURITY`, non-owner `NOBYPASSRLS` application role, transaction-local tenant context set by workers too (SEC-2, SEC-3) |
 | Milestones | New M0 XLSX proof spike before any infrastructure; new tests added to gates |

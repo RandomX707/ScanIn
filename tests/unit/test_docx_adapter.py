@@ -51,13 +51,60 @@ def test_docx_single_node_edits_cover_body_table_header_footer_and_package_prove
                             "docProps/custom.xml", "[Content_Types].xml", "_rels/.rels"}:
                 assert before.read(part) == after.read(part)
     result = DocxIndependentVerifier().verify(source, candidate, plan)
-    assert result.outcome == "BLOCKED"
+    assert result.outcome == "STRUCTURALLY_VERIFIED"
     assert {check.check: check.status for check in result.checks} == {
         "integrity": "PASS", "policy": "PASS", "intent": "PASS", "preservation": "PASS",
         "provenance": "PASS", "visual": "NOT_VERIFIED",
     }
     visual = next(check for check in result.checks if check.check == "visual")
     assert visual.status == "NOT_VERIFIED", result.as_dict()
+    assert result.verification_profile == "structural"
+    assert result.structural_checks == "PASS"
+    assert result.visual_checks == "NOT_PERFORMED"
+
+
+def test_docx_structural_release_never_attempts_rendering(monkeypatch):
+    import packages.core.verification.docx as verifier
+    from packages.workflow.release import NativeReleaseWorkflow
+
+    source = _docx()
+    adapter = DocxAdapter()
+    target = next(item for item in adapter.targets(source) if item.value.value == "Policyholder: Ada")
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "Policyholder: Amy"))
+    attempts = []
+
+    def forbidden_render(*args, **kwargs):
+        attempts.append(True)
+        raise RuntimeError("renderer must not run in structural mode")
+
+    monkeypatch.setattr(verifier, "render_docx_pdf", forbidden_render)
+    workflow = NativeReleaseWorkflow(adapter, verifier.DocxIndependentVerifier(mode="structural"))
+    frozen = workflow.freeze(source=source, document_id="synthetic-doc", base_version_id=hashlib.sha256(source).hexdigest(),
+        actor_id="processor", role="processor", authorized_category="insurer-authored",
+        reason="Synthetic correction", patches=[patch], edit_set_id="structural-release")
+    result = workflow.release(source=source, edit_set=frozen)
+    assert result.status == "STRUCTURALLY_VERIFIED"
+    assert result.derived_bytes is not None
+    assert result.verification is not None and result.verification.visual_checks == "NOT_PERFORMED"
+    assert attempts == []
+
+
+def test_docx_strict_visual_profile_blocks_when_renderer_is_unavailable(monkeypatch):
+    import packages.core.verification.docx as verifier
+
+    source = _docx()
+    adapter = DocxAdapter()
+    target = next(item for item in adapter.targets(source) if item.value.value == "Policyholder: Ada")
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "Policyholder: Amy"))
+    plan = build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": "strict-release"})
+    monkeypatch.setattr(verifier, "render_docx_pdf", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("renderer unavailable")))
+    report = verifier.DocxIndependentVerifier(mode="structural_and_visual").verify(
+        source, adapter.apply(source, plan), plan)
+    assert report.outcome == "BLOCKED"
+    assert report.verification_profile == "structural_and_visual"
+    assert report.visual_checks == "NOT_VERIFIED"
 
 
 def test_docx_marks_multi_run_spans_and_hyperlinks_noneditable():
@@ -161,6 +208,18 @@ def test_docx_malformed_zip_is_rejected():
     from packages.core.adapters.docx.adapter import DocxDocumentError
     with pytest.raises(DocxDocumentError):
         DocxAdapter().inspect(b"not a word document")
+
+
+def test_docx_structural_verifier_blocks_corrupt_candidate_bytes():
+    source = _docx()
+    adapter = DocxAdapter()
+    target = next(item for item in adapter.targets(source) if item.value.value == "Policyholder: Ada")
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "Policyholder: Amy"))
+    plan = build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": "corrupt-candidate"})
+    report = DocxIndependentVerifier(mode="structural").verify(source, b"corrupt candidate", plan)
+    assert report.outcome == "BLOCKED"
+    assert report.check("integrity").status == "FAIL"
 
 
 def _render_test_pages(pages: list[list[tuple[float, str]]]) -> bytes:

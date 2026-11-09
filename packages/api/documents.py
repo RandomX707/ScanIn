@@ -149,14 +149,10 @@ def _source_version(request: Request, identity: AuthenticatedIdentity, document_
 
 
 def _presentation_capability(report: object) -> dict[str, object]:
-    capability = dict(getattr(report, "capability"))
-    if getattr(report, "adapter") == "docx":
-        capability["level"] = "read_only"
-        capability["reasons"] = list(capability.get("reasons", [])) + ["critical_visual_verifier_unavailable"]
-    return capability
+    return dict(getattr(report, "capability"))
 
 
-def _release_workflow(adapter_name: str) -> NativeReleaseWorkflow:
+def _release_workflow(adapter_name: str, *, docx_mode: str = "structural") -> NativeReleaseWorkflow:
     if adapter_name == "csv":
         return NativeReleaseWorkflow(CsvAdapter(), CsvIndependentVerifier())
     if adapter_name == "json":
@@ -166,7 +162,7 @@ def _release_workflow(adapter_name: str) -> NativeReleaseWorkflow:
     if adapter_name == "pdf":
         return NativeReleaseWorkflow(PdfAdapter(), PdfIndependentVerifier())
     if adapter_name == "docx":
-        return NativeReleaseWorkflow(DocxAdapter(), DocxIndependentVerifier())
+        return NativeReleaseWorkflow(DocxAdapter(), DocxIndependentVerifier(mode=docx_mode))
     raise APIError(415, "native_adapter_unsupported", "This document format does not support native editing.")
 
 
@@ -387,6 +383,8 @@ def view_document_version(document_id: str, version_id: str, request: Request,
         "version_kind": row["kind"], "filename": filename, "source_sha256": report.sha256,
         "size_bytes": len(source), "media_type": report.media_type,
         "capability": _presentation_capability(report), "adapter": report.adapter,
+        "docx_verification_mode": request.app.state.settings.channel360_docx_verification_mode
+        if report.adapter == "docx" else None,
         "features": list(report.features), "targets": list(report.targets), "details": report.details,
         "structural_summary": ({**report.structural_summary, "source_document_id": str(parsed_id),
                                 "source_version_id": str(parsed_version_id)} if report.structural_summary else None),
@@ -761,7 +759,8 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
         raise APIError(503, "preflight_not_verified", "Restricted preflight is unavailable.") from None
     if report.sha256 != version["sha256"]:
         raise APIError(409, "stale_base_version", "The base version failed its source fingerprint check.")
-    workflow = _release_workflow(str(report.adapter))
+    docx_mode = request.app.state.settings.channel360_docx_verification_mode
+    workflow = _release_workflow(str(report.adapter), docx_mode=docx_mode)
     target_map = {item["id"]: item for item in report.targets}
     patch_values: list[Patch] = []
     for item in stored_patches:
@@ -781,13 +780,13 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
             actor_id=identity.subject, role=identity.role, authorized_category="insurer-authored",
             reason=str(edit_set["reason"]), patches=patch_values, edit_set_id=str(parsed_edit_id))
         if report.adapter == "docx":
-            # DOCX is not reviewable until its critical isolated render/layout
-            # verifier has completed. Keep the edit as a draft on hosts where
-            # that boundary is unavailable; never queue an unreleasable plan.
             readiness = workflow.release(source=source, edit_set=frozen)
-            if readiness.status != "VERIFIED":
-                raise APIError(422, "critical_docx_verification_unavailable",
-                               "DOCX preflight requires a verified isolated render and layout check.")
+            expected = "STRUCTURALLY_VERIFIED" if docx_mode == "structural" else "VERIFIED"
+            if readiness.status != expected:
+                code = "docx_structural_preflight_failed" if docx_mode == "structural" else "critical_docx_visual_verification_unavailable"
+                message = ("DOCX structural preflight failed." if docx_mode == "structural" else
+                           "The configured strict DOCX profile requires successful independent visual verification.")
+                raise APIError(422, code, message)
         plan_payload = serialize_frozen_edit_set(frozen)
     except APIError:
         raise
@@ -812,7 +811,8 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
             "changes": [{"target_id": patch.target_id, "old": patch.expected_old_value.canonical(),
                          "proposed": patch.new_value.canonical()} for patch in frozen.plan.patches],
             "dependents": list(frozen.plan.dependents), "dependencies_unknown": frozen.plan.dependencies_unknown,
-            "approval_required": True}
+            "approval_required": True,
+            "verification_profile": docx_mode if report.adapter == "docx" else None}
 
 
 @router.post("/{document_id}/edit-sets/{edit_set_id}/rebase")
@@ -931,7 +931,8 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
             versions = repo.list_versions(parsed_document)
             released = next((v for v in versions if str(v["version_id"]) == str(edit_set["released_version_id"])), None)
             return {"edit_set_id": str(parsed_edit_set), "version_id": str(edit_set["released_version_id"]),
-                    "outcome": (released or {}).get("verification_outcome", "INCOMPLETE"), "idempotent": True}
+                    "outcome": (released or {}).get("verification_outcome", "INCOMPLETE"),
+                    "download_available": bool((released or {}).get("download_available")), "idempotent": True}
         if edit_set["status"] != "approved":
             raise APIError(409, "approval_required", "A reviewer must approve the frozen edit set before release.")
         if str(edit_set["current_version_id"]) != str(edit_set["base_version_id"]):
@@ -946,7 +947,8 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
     if frozen.edit_set_id != str(parsed_edit_set) or frozen.document_id != str(parsed_document):
         raise APIError(409, "frozen_plan_identity_mismatch", "The frozen plan is bound to a different edit set.")
     version, source = _source_version(request, identity, parsed_document, UUID(str(edit_set["base_version_id"])))
-    workflow = _release_workflow(adapter_name)
+    docx_mode = request.app.state.settings.channel360_docx_verification_mode
+    workflow = _release_workflow(adapter_name, docx_mode=docx_mode)
     result = workflow.release(source=source, edit_set=frozen, allow_incomplete=True)
     base_manifest: dict[str, object] = {
         "source_sha256": str(version["sha256"]), "adapter": adapter_name,
@@ -955,10 +957,14 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
     }
     if result.verification is not None:
         base_manifest["verification"] = result.verification.as_dict()
+    if adapter_name == "docx":
+        base_manifest.update({"verification_profile": docx_mode,
+                              "structural_checks": (result.verification.structural_checks if result.verification else "FAIL"),
+                              "visual_checks": (result.verification.visual_checks if result.verification else "NOT_VERIFIED")})
     outcome = result.status
     staged = None
     stored = None
-    if outcome in {"VERIFIED", "INCOMPLETE"} and result.derived_bytes is not None:
+    if outcome in {"VERIFIED", "STRUCTURALLY_VERIFIED", "INCOMPLETE"} and result.derived_bytes is not None:
         storage: ImmutableLocalStorage = request.app.state.document_storage
         staged = storage.stage(identity.tenant_id, parsed_document, uuid4(), io.BytesIO(result.derived_bytes),
                                max_bytes=request.app.state.settings.max_upload_bytes)
@@ -1005,7 +1011,8 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
         # The content-addressed object remains private and is harmlessly reusable on retry.
         raise APIError(409, "release_commit_failed", "The verified candidate was not registered; retry after checking the document version.") from None
     return {"edit_set_id": str(parsed_edit_set), "outcome": outcome, "version_id": str(new_version),
-            "download_available": outcome == "VERIFIED", "verification": result.verification.as_dict() if result.verification else None}
+            "download_available": outcome in {"VERIFIED", "STRUCTURALLY_VERIFIED"},
+            "verification": result.verification.as_dict() if result.verification else None}
 
 
 @router.get("/{document_id}/versions/{version_id}/download")
@@ -1024,7 +1031,14 @@ def download_document_version(document_id: str, version_id: str, request: Reques
         if version["kind"] == "derived":
             versions = repo.list_versions(parsed_document)
             item = next((entry for entry in versions if str(entry["version_id"]) == str(parsed_version)), None)
-            if item is None or item.get("verification_outcome") != "VERIFIED":
+            allowed = bool(item and (item.get("verification_outcome") == "VERIFIED" or
+                (item.get("verification_outcome") == "STRUCTURALLY_VERIFIED" and
+                 item.get("verification_adapter") == "docx" and
+                 item.get("verification_profile") == "structural" and
+                 item.get("structural_checks") == "PASS" and
+                 item.get("visual_checks") == "NOT_PERFORMED" and
+                 request.app.state.settings.channel360_docx_verification_mode == "structural")))
+            if not allowed:
                 raise APIError(409, "verified_download_required", "Only independently verified derived files may be downloaded.")
         stored = StoredFile(identity.tenant_id, parsed_document, storage.root / str(version["storage_key"]),
                             str(version["storage_key"]), int(version["size_bytes"]), str(version["sha256"]))

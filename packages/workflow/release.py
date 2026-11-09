@@ -50,7 +50,7 @@ class FrozenEditSet:
 
 @dataclass(frozen=True)
 class ReleaseResult:
-    status: Literal["NO_CHANGE", "VERIFIED", "INCOMPLETE", "BLOCKED"]
+    status: Literal["NO_CHANGE", "VERIFIED", "STRUCTURALLY_VERIFIED", "INCOMPLETE", "BLOCKED"]
     edit_set_id: str
     verification: VerifyReport | None
     derived_bytes: bytes | None
@@ -136,7 +136,7 @@ class NativeReleaseWorkflow:
         if candidate is None:
             return ReleaseResult("BLOCKED", edit_set.edit_set_id, None, None, None)
         report = self.verifier.verify(source, candidate, edit_set.plan)
-        if report.outcome == "VERIFIED" or (report.outcome == "INCOMPLETE" and allow_incomplete):
+        if report.outcome in {"VERIFIED", "STRUCTURALLY_VERIFIED"} or (report.outcome == "INCOMPLETE" and allow_incomplete):
             return ReleaseResult(report.outcome, edit_set.edit_set_id, report, candidate,
                                  hashlib.sha256(candidate).hexdigest())
         return ReleaseResult(report.outcome, edit_set.edit_set_id, report, None, None)

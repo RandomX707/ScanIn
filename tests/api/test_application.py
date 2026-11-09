@@ -48,6 +48,13 @@ def _test_app(settings: Settings) -> FastAPI:
     return app
 
 
+def test_docx_verification_profile_defaults_to_structural_and_rejects_unknown_modes():
+    assert _settings().channel360_docx_verification_mode == "structural"
+    assert _settings(channel360_docx_verification_mode="structural_and_visual").channel360_docx_verification_mode == "structural_and_visual"
+    with pytest.raises(ValidationError):
+        _settings(channel360_docx_verification_mode="skip_visual")
+
+
 def test_live_health_is_available_without_database():
     with TestClient(_test_app(_settings())) as client:
         response = client.get("/health/live")

@@ -43,7 +43,7 @@ def create_pdf() -> bytes:
 def create_docx() -> bytes:
     document = Document()
     document.add_heading("Synthetic Claim Summary", level=1)
-    document.add_paragraph("Policyholder: Ada Example")
+    document.add_paragraph("Policyholder: Alexander Kumar")
     table = document.add_table(rows=2, cols=2)
     table.cell(0, 0).text = "Claim number"
     table.cell(0, 1).text = "CLM-DEMO-360"

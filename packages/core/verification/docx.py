@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 from packages.core.models.contracts import CheckResult, PatchPlan, VerifyReport
-from packages.workers.office import OfficeRenderError, render_docx_pdf
+from packages.workers.office import render_docx_pdf
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 XML = "http://www.w3.org/XML/1998/namespace"
@@ -282,7 +282,12 @@ def _compare_rendered_layout(source_pdf: bytes, candidate_pdf: bytes,
 
 
 class DocxIndependentVerifier:
-    """OOXML part verifier plus mandatory isolated LibreOffice reflow/render checks."""
+    """Structural OOXML verifier with an optional strict rendered-layout profile."""
+
+    def __init__(self, mode: str = "structural") -> None:
+        if mode not in {"structural", "structural_and_visual"}:
+            raise ValueError("unsupported_docx_verification_mode")
+        self.mode = mode
 
     def verify(self, source: bytes, candidate: bytes, plan: PatchPlan) -> VerifyReport:
         source_hash, output_hash = _hash(source), _hash(candidate)
@@ -292,6 +297,14 @@ class DocxIndependentVerifier:
         try:
             old_order, old_parts = _parts(source)
             new_order, new_parts = _parts(candidate)
+            # Reopen through the supported parser and parse every XML package
+            # member. ZIP integrity alone does not establish readable OOXML.
+            from packages.core.adapters.docx.adapter import DocxAdapter
+            if DocxAdapter().inspect(candidate).level != "editable":
+                raise ValueError("candidate_not_readable_or_supported")
+            for name, content in new_parts.items():
+                if name.endswith((".xml", ".rels")):
+                    _xml(content)
         except Exception:
             return _blocked(source_hash, output_hash, "malformed_ooxml")
         if [name for name, _ in old_order] != [name for name, _ in new_order[:len(old_order)]]:
@@ -353,19 +366,34 @@ class DocxIndependentVerifier:
             CheckResult("provenance", "PASS" if not provenance_errors else "FAIL", True,
                         {"errors": provenance_errors}),
         ]
-        try:
-            old_pdf, new_pdf = render_docx_pdf(source), render_docx_pdf(candidate)
-            visual = _compare_rendered_layout(
-                old_pdf, new_pdf,
-                [(str(patch.expected_old_value.value), str(patch.new_value.value)) for patch in plan.patches],
-            )
-            results.append(CheckResult("visual", "PASS" if not visual["errors"] else "FAIL", True,
-                                       {"renderer": "LibreOffice + PDFium glyph geometry", **visual}))
-        except (OfficeRenderError, Exception) as exc:
-            results.append(CheckResult("visual", "NOT_VERIFIED", True,
-                                       {"reason": f"critical_render_check_unavailable:{type(exc).__name__}"}))
-        outcome = "BLOCKED" if any(item.critical and item.status != "PASS" for item in results) else "VERIFIED"
-        return VerifyReport(tuple(results), outcome, source_hash, output_hash)
+        if self.mode == "structural_and_visual":
+            try:
+                old_pdf, new_pdf = render_docx_pdf(source), render_docx_pdf(candidate)
+                visual = _compare_rendered_layout(
+                    old_pdf, new_pdf,
+                    [(str(patch.expected_old_value.value), str(patch.new_value.value)) for patch in plan.patches],
+                )
+                results.append(CheckResult("visual", "PASS" if not visual["errors"] else "FAIL", True,
+                                           {"renderer": "LibreOffice + PDFium glyph geometry", **visual}))
+                visual_status = "PASS" if not visual["errors"] else "FAIL"
+            except Exception as exc:
+                results.append(CheckResult("visual", "NOT_VERIFIED", True,
+                                           {"reason": f"critical_render_check_unavailable:{type(exc).__name__}"}))
+                visual_status = "NOT_VERIFIED"
+            outcome = "BLOCKED" if any(item.critical and item.status != "PASS" for item in results) else "VERIFIED"
+            return VerifyReport(tuple(results), outcome, source_hash, output_hash,
+                                "structural_and_visual", "PASS", visual_status)
+
+        results.append(CheckResult("visual", "NOT_VERIFIED", False,
+                                   {"reason": "not_performed_by_structural_profile"}))
+        if any(item.critical and item.status != "PASS" for item in results):
+            outcome = "BLOCKED"
+            structural_status = "FAIL"
+        else:
+            outcome = "STRUCTURALLY_VERIFIED"
+            structural_status = "PASS"
+        return VerifyReport(tuple(results), outcome, source_hash, output_hash,
+                            "structural", structural_status, "NOT_PERFORMED")
 
 
 def _plan_hash(plan: PatchPlan) -> str:

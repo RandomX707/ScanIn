@@ -93,7 +93,7 @@ class DocumentRepository:
                 JOIN fields f ON f.tenant_id=c.tenant_id AND f.id=c.field_id
                 WHERE c.tenant_id=:tenant) AS documents_with_corrections,
             (SELECT count(*) FROM edit_sets WHERE tenant_id=:tenant AND status='submitted') AS pending_approvals,
-            (SELECT count(*) FROM verification_manifests WHERE tenant_id=:tenant AND outcome='VERIFIED') AS verified_versions"""),
+            (SELECT count(*) FROM verification_manifests WHERE tenant_id=:tenant AND outcome IN ('VERIFIED','STRUCTURALLY_VERIFIED')) AS verified_versions"""),
             {"tenant": self.tenant_id}).mappings().one()
         activity = self.connection.execute(text("""SELECT sequence,ts,actor_id,action,subject
             FROM audit_events WHERE tenant_id=:tenant ORDER BY sequence DESC LIMIT 8"""),
@@ -127,17 +127,34 @@ class DocumentRepository:
     def list_versions(self, document_id: UUID) -> list[dict[str, object]]:
         rows = self.connection.execute(text("""SELECT v.id AS version_id,v.parent_version_id,v.kind,
             v.sha256,v.created_at,f.size_bytes,f.mime,d.current_version_id=(v.id) AS is_current
-            ,e.id AS edit_set_id,e.status AS edit_set_status,m.outcome AS verification_outcome
+            ,e.id AS edit_set_id,e.status AS edit_set_status,m.outcome AS verification_outcome,
+            m.adapter AS verification_adapter,m.manifest AS verification_manifest
             FROM document_versions AS v JOIN documents AS d
               ON d.tenant_id=v.tenant_id AND d.id=v.document_id
             JOIN files AS f ON f.tenant_id=v.tenant_id AND f.id=v.file_id
             LEFT JOIN edit_sets AS e ON e.tenant_id=v.tenant_id AND e.id=v.edit_set_id
-            LEFT JOIN LATERAL (SELECT outcome FROM verification_manifests vm
+            LEFT JOIN LATERAL (SELECT outcome,adapter,manifest FROM verification_manifests vm
               WHERE vm.tenant_id=e.tenant_id AND vm.edit_set_id=e.id ORDER BY vm.created_at DESC LIMIT 1) m ON true
             WHERE v.tenant_id=:tenant AND v.document_id=:document
             ORDER BY v.created_at,v.id"""),
             {"tenant": self.tenant_id, "document": document_id}).mappings()
-        return [dict(row) for row in rows]
+        items = []
+        for row in rows:
+            item = dict(row)
+            manifest = item.get("verification_manifest") or {}
+            item["verification_profile"] = manifest.get("verification_profile")
+            item["structural_checks"] = manifest.get("structural_checks")
+            item["visual_checks"] = manifest.get("visual_checks")
+            item["download_available"] = bool(
+                item.get("verification_outcome") == "VERIFIED" or
+                (item.get("verification_outcome") == "STRUCTURALLY_VERIFIED" and
+                 item.get("verification_adapter") == "docx" and
+                 manifest.get("verification_profile") == "structural" and
+                 manifest.get("structural_checks") == "PASS" and
+                 manifest.get("visual_checks") == "NOT_PERFORMED"))
+            item.pop("verification_manifest", None)
+            items.append(item)
+        return items
 
     def set_document_category(self, document_id: UUID, *, category: str, actor_id: str) -> None:
         result = self.connection.execute(text("""UPDATE documents SET document_category=:category
@@ -257,7 +274,11 @@ class DocumentRepository:
                                outcome: str, adapter: str, adapter_version: str,
                                manifest: dict[str, object], actor_id: str) -> UUID:
         """Atomically attach a verifier report and a derived version to an approved edit set."""
-        if outcome not in {"VERIFIED", "INCOMPLETE"}:
+        structural_docx = (outcome == "STRUCTURALLY_VERIFIED" and adapter == "docx" and
+                           manifest.get("verification_profile") == "structural" and
+                           manifest.get("structural_checks") == "PASS" and
+                           manifest.get("visual_checks") == "NOT_PERFORMED")
+        if outcome not in {"VERIFIED", "INCOMPLETE"} and not structural_docx:
             raise ValueError("candidate_outcome_not_releasable")
         if stored.tenant_id != self.tenant_id:
             raise PermissionError("stored file tenant does not match transaction context")

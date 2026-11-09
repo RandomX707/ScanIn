@@ -108,17 +108,25 @@ class CheckResult:
 @dataclass(frozen=True)
 class VerifyReport:
     checks: tuple[CheckResult, ...]
-    outcome: Literal["VERIFIED", "INCOMPLETE", "BLOCKED"]
+    outcome: Literal["VERIFIED", "STRUCTURALLY_VERIFIED", "INCOMPLETE", "BLOCKED"]
     source_sha256: str
     output_sha256: str
+    verification_profile: str | None = None
+    structural_checks: str | None = None
+    visual_checks: str | None = None
 
     def check(self, name: str) -> CheckResult:
         return next(c for c in self.checks if c.check == name)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "outcome": self.outcome,
             "source_sha256": self.source_sha256,
             "output_sha256": self.output_sha256,
             "checks": [{"check": c.check, "status": c.status, "critical": c.critical, "detail": c.detail} for c in self.checks],
         }
+        if self.verification_profile is not None:
+            result.update({"verification_profile": self.verification_profile,
+                           "structural_checks": self.structural_checks,
+                           "visual_checks": self.visual_checks})
+        return result
