@@ -267,12 +267,19 @@ class PdfAdapter:
                 reason = reason or "widget_not_found"
             elif any(not _has_normal_appearance(widget) for _, widget in widget_list):
                 reason = reason or "unsupported_appearance"
+            if kind in {"text", "choice"}:
+                for _, widget in widget_list:
+                    reason = reason or _appearance_chrome_reason(widget)
             page = widget_list[0][0] if widget_list else 0
             rect = [float(x) for x in widget_list[0][1].get("/Rect", [])] if widget_list else []
             da = str((widget_list[0][1].get("/DA") if widget_list else None) or field_obj.get("/DA") or acro.get("/DA", ""))
             font_match = __import__("re").search(r"/(\S+)\s+([0-9]+(?:\.[0-9]+)?)\s+Tf", da)
             font_size = float(font_match.group(2)) if font_match else None
             if kind in {"text", "choice"}:
+                if any(not _supported_default_appearance(
+                        str((widget.get("/DA") or field_obj.get("/DA") or acro.get("/DA", ""))))
+                       for _, widget in widget_list):
+                    reason = reason or "unsupported_default_appearance"
                 font_resources = _resolve(_resolve(acro.get("/DR", {})).get("/Font", {}))
                 font = _resolve(font_resources.get("/" + font_match.group(1))) if font_match and font_resources else None
                 standard_fonts = {"/Courier", "/Courier-Bold", "/Courier-Oblique", "/Courier-BoldOblique",
@@ -360,7 +367,26 @@ class PdfAdapter:
             else:
                 values[name] = str(patch.new_value.value)
         writer = _QpdfConformantIncrementalWriter(reader, incremental=True)
-        writer.update_page_form_field_values(None, values, auto_regenerate=True)
+        source_acro = _resolve(reader.root_object.get("/AcroForm", {}))
+        had_need_appearances = "/NeedAppearances" in source_acro
+        need_appearances = source_acro.get("/NeedAppearances")
+        writer.update_page_form_field_values(None, values, auto_regenerate=False)
+        # pypdf currently maps auto_regenerate=False to /NeedAppearances false.
+        # Restore the source entry exactly (including absence) so the flag never
+        # changes and cannot trigger a viewer-wide appearance regeneration.
+        writer_acro = _resolve(writer._root_object.get("/AcroForm", {}))
+        need_appearances_key = NameObject("/NeedAppearances")
+        if had_need_appearances:
+            writer_acro[need_appearances_key] = need_appearances
+        else:
+            writer_acro.pop(need_appearances_key, None)
+        for patch in plan.patches:
+            target = targets[patch.target_id]
+            if target.field_type not in {"text", "choice"}:
+                continue
+            name = (target.native_locator or {})["field_name"]
+            for widget in _writer_widgets(writer, name):
+                _restore_widget_chrome(widget)
         provenance = plan.provenance_dict()
         writer.add_metadata({
             "/Channel360_Source_SHA256": plan.source_sha256,
@@ -381,3 +407,104 @@ def _has_normal_appearance(widget: Any) -> bool:
         return False
     normal = _resolve(appearances.get("/N"))
     return normal is not None
+
+
+def _appearance_chrome_reason(widget: Any) -> str | None:
+    mk = _resolve(widget.get("/MK", {}))
+    for key in ("/BG", "/BC"):
+        if key in mk and _color_operator(mk[key], fill=(key == "/BG")) is None:
+            return "unsupported_widget_appearance_color"
+    if "/BC" in mk:
+        border_style = _resolve(widget.get("/BS", {}))
+        if border_style.get("/S", "/S") != "/S":
+            return "unsupported_widget_border_style"
+        border = widget.get("/Border")
+        if border is not None and len(_resolve(border)) > 3 and _resolve(border)[3]:
+            return "unsupported_widget_border_style"
+        try:
+            border_width = float(border_style.get("/W", 1))
+            old_border = _resolve(border) if border is not None else []
+            if "/W" not in border_style and len(old_border) > 2:
+                border_width = float(old_border[2])
+        except (TypeError, ValueError):
+            return "unsupported_widget_border_width"
+        if border_width < 0:
+            return "unsupported_widget_border_width"
+    return None
+
+
+def _supported_default_appearance(appearance: str) -> bool:
+    import re
+
+    font = re.search(r"/[A-Za-z0-9_.+-]+\s+[0-9]+(?:\.[0-9]+)?\s+Tf", appearance)
+    if font is None:
+        return False
+    remaining = appearance[:font.start()] + appearance[font.end():]
+    number = r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?"
+    colors = re.compile(rf"(?:{number}\s+[gG]|{number}(?:\s+{number}){{2}}\s+[rR][gG]|"
+                        rf"{number}(?:\s+{number}){{3}}\s+[kK])\b")
+    return not colors.sub("", remaining).strip()
+
+
+def _color_operator(value: Any, *, fill: bool) -> bytes | None:
+    color = _resolve(value)
+    try:
+        components = [float(item) for item in color]
+    except (TypeError, ValueError):
+        return None
+    if len(components) not in {1, 3, 4} or any(not 0 <= item <= 1 for item in components):
+        return None
+    suffix = {(1, True): "g", (3, True): "rg", (4, True): "k",
+              (1, False): "G", (3, False): "RG", (4, False): "K"}[(len(components), fill)]
+    return (" ".join(f"{item:g}" for item in components) + f" {suffix}\n").encode("ascii")
+
+
+def _restore_widget_chrome(widget: Any) -> None:
+    mk = _resolve(widget.get("/MK", {}))
+    normal = _resolve(_resolve(widget["/AP"]).get("/N"))
+    if not hasattr(normal, "get_data") or not hasattr(normal, "set_data"):
+        raise PdfDocumentError("unsupported_widget_appearance_stream")
+    rect = [float(item) for item in widget.get("/Rect", [])]
+    if len(rect) != 4:
+        raise PdfDocumentError("unsupported_widget_rectangle")
+    width, height = abs(rect[2] - rect[0]), abs(rect[3] - rect[1])
+    background = _color_operator(mk["/BG"], fill=True) if "/BG" in mk else None
+    border = _color_operator(mk["/BC"], fill=False) if "/BC" in mk else None
+    before = bytearray(b"q\n")
+    if background is not None:
+        before.extend(background)
+        before.extend(f"0 0 {width:g} {height:g} re f\n".encode("ascii"))
+    before.extend(b"Q\n")
+    after = bytearray()
+    if border is not None:
+        border_style = _resolve(widget.get("/BS", {}))
+        border_width = float(border_style.get("/W", 1))
+        old_border = _resolve(widget.get("/Border", []))
+        if "/W" not in border_style and len(old_border) > 2:
+            border_width = float(old_border[2])
+        if border_width > 0:
+            inset = border_width / 2
+            after.extend(b"q\n")
+            after.extend(border)
+            after.extend(f"{border_width:g} w\n{inset:g} {inset:g} "
+                         f"{max(0, width - border_width):g} {max(0, height - border_width):g} re S\nQ\n".encode("ascii"))
+    normal.set_data(bytes(before) + normal.get_data() + bytes(after))
+
+
+def _writer_widgets(writer: PdfWriter, name: str) -> list[Any]:
+    found = []
+    for page in writer.pages:
+        for reference in page.get("/Annots", []):
+            widget = _resolve(reference)
+            if str(widget.get("/Subtype", "")) != "/Widget":
+                continue
+            pieces = [str(widget["/T"])] if widget.get("/T") is not None else []
+            parent = widget.get("/Parent")
+            while parent is not None:
+                parent = _resolve(parent)
+                if parent.get("/T") is not None:
+                    pieces.insert(0, str(parent["/T"]))
+                parent = parent.get("/Parent")
+            if ".".join(pieces) == name:
+                found.append(widget)
+    return found

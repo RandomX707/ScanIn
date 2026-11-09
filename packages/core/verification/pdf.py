@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import shutil
 import subprocess
 import tempfile
@@ -57,8 +58,11 @@ def _canonical_pdf_object(value: Any) -> Any:
     if hasattr(value, "get_object"):
         value = value.get_object()
     if isinstance(value, dict):
-        return {str(k): _canonical_pdf_object(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))
-                if str(k) not in {"/P", "/Parent"}}
+        result = {str(k): _canonical_pdf_object(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+                  if str(k) not in {"/P", "/Parent"}}
+        if hasattr(value, "get_data"):
+            result["__streamdata__"] = value.get_data().hex()
+        return result
     if isinstance(value, (list, tuple)):
         return [_canonical_pdf_object(item) for item in value]
     if isinstance(value, bytes):
@@ -71,14 +75,17 @@ def _page_content(page) -> bytes:
     return contents.get_data() if contents is not None else b""
 
 
-def _render(data: bytes, scale: float = 1.0) -> list[Image.Image]:
+def _render(data: bytes, scale: float = 1.0, *, forms_enabled: bool = True) -> list[Image.Image]:
     import pypdfium2 as pdfium
 
     document = pdfium.PdfDocument(data)
     try:
+        if forms_enabled:
+            document.init_forms()
         result: list[Image.Image] = []
         for page in document:
-            result.append(page.render(scale=scale, rev_byteorder=True).to_pil().convert("RGB"))
+            result.append(page.render(scale=scale, may_draw_forms=forms_enabled,
+                                      rev_byteorder=True).to_pil().convert("RGB"))
         return result
     finally:
         document.close()
@@ -168,16 +175,30 @@ class PdfIndependentVerifier:
             # Stable annotation geometry/order and all non-widget annotations must remain.
             if old_annots != new_annots:
                 annotation_errors.append(f"page_{page_index + 1}:unrelated_annotation_changed")
+        old_acro = _resolve(old_reader.root_object.get("/AcroForm", {}))
+        new_acro = _resolve(new_reader.root_object.get("/AcroForm", {}))
+        if ("/NeedAppearances" in old_acro) != ("/NeedAppearances" in new_acro) or (
+                _canonical_pdf_object(old_acro.get("/NeedAppearances")) !=
+                _canonical_pdf_object(new_acro.get("/NeedAppearances"))):
+            annotation_errors.append("acroform:/NeedAppearances:changed")
+        annotation_errors.extend(_widget_appearance_errors(old_reader, new_reader, target_names))
 
         try:
-            before, after = _render(source), _render(candidate)
+            before, after = _render(source, forms_enabled=True), _render(candidate, forms_enabled=True)
             if len(before) != len(after):
                 raise ValueError("render_page_count_changed")
             visual_errors: list[str] = []
+            widgets_before = _render(source, forms_enabled=False)
+            widgets_after = _render(candidate, forms_enabled=False)
             for page_index, (old_img, new_img) in enumerate(zip(before, after)):
                 if old_img.size != new_img.size:
                     visual_errors.append(f"page_{page_index + 1}:render_size_changed")
                     continue
+                if (_page_has_widgets(old_reader.pages[page_index]) or
+                        _page_has_widgets(new_reader.pages[page_index])) and (
+                        ImageChops.difference(old_img, widgets_before[page_index]).getbbox() is None or
+                        ImageChops.difference(new_img, widgets_after[page_index]).getbbox() is None):
+                    visual_errors.append(f"page_{page_index + 1}:form_widgets_not_rendered")
                 diff = ImageChops.difference(old_img, new_img).convert("L")
                 mask = Image.new("L", old_img.size, 255)
                 draw = ImageDraw.Draw(mask)
@@ -186,10 +207,13 @@ class PdfIndependentVerifier:
                         if widget["page"] != page_index + 1:
                             continue
                         x0, y0, x1, y1 = widget["rect"]
-                        pad = 3
-                        draw.rectangle((max(0, int(x0) - pad), max(0, int(old_img.height - y1) - pad),
-                                        min(old_img.width, int(x1) + pad), min(old_img.height, int(old_img.height - y0) + pad)),
-                                       fill=0)
+                        page_width = float(old_reader.pages[page_index].mediabox.width)
+                        page_height = float(old_reader.pages[page_index].mediabox.height)
+                        scale_x, scale_y = old_img.width / page_width, old_img.height / page_height
+                        draw.rectangle((max(0, math.ceil(x0 * scale_x) - 1),
+                                        max(0, math.ceil((page_height - y1) * scale_y) - 1),
+                                        min(old_img.width - 1, math.floor(x1 * scale_x)),
+                                        min(old_img.height - 1, math.floor((page_height - y0) * scale_y))), fill=0)
                 diff = ImageChops.multiply(diff, mask)
                 if diff.getbbox() is not None:
                     visual_errors.append(f"page_{page_index + 1}:pixels_changed_outside_target_widgets")
@@ -268,6 +292,34 @@ def _widget_field_name(widget) -> str:
             pieces.insert(0, str(parent["/T"]))
         parent = parent.get("/Parent")
     return ".".join(pieces)
+
+
+def _page_has_widgets(page) -> bool:
+    return any(str(reference.get_object().get("/Subtype", "")) == "/Widget"
+               for reference in page.get("/Annots", []))
+
+
+def _widget_appearance_errors(old_reader: PdfReader, new_reader: PdfReader,
+                              target_names: set[str]) -> list[str]:
+    errors: list[str] = []
+    for page_index, (old_page, new_page) in enumerate(zip(old_reader.pages, new_reader.pages), start=1):
+        old_annots = list(old_page.get("/Annots", []))
+        new_annots = list(new_page.get("/Annots", []))
+        for old_ref, new_ref in zip(old_annots, new_annots):
+            old_widget, new_widget = _resolve(old_ref), _resolve(new_ref)
+            if (str(old_widget.get("/Subtype", "")) != "/Widget" or
+                    str(new_widget.get("/Subtype", "")) != "/Widget"):
+                continue
+            name = _widget_field_name(old_widget)
+            if name != _widget_field_name(new_widget):
+                continue
+            target = name in target_names
+            for key in ("/AP", "/MK", "/DA", "/V"):
+                if target and key in {"/AP", "/V"}:
+                    continue
+                if _canonical_pdf_object(old_widget.get(key)) != _canonical_pdf_object(new_widget.get(key)):
+                    errors.append(f"page_{page_index}:pdf:{name}:{key}:changed")
+    return errors
 
 
 def _provenance_matches(reader: PdfReader, plan: PatchPlan) -> bool:

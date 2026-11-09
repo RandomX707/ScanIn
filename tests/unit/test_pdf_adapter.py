@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import io
 import hashlib
+import math
 import subprocess
 import tempfile
 from pathlib import Path
 
 import pytest
 from pypdf import PdfReader
+from reportlab.lib.colors import black, white
 from reportlab.pdfgen import canvas
 
 from packages.core.adapters.pdf.adapter import PdfAdapter, PdfDocumentError
 from packages.core.models.contracts import Patch, TypedValue
 from packages.core.planning.planner import build_patch_plan
 from packages.core.verification.pdf import PdfIndependentVerifier
+from packages.core.verification import pdf as pdf_verification
 from packages.workflow.release import NativeReleaseWorkflow
 
 
@@ -23,6 +26,37 @@ def _form_pdf(*, value: str = "Ada", maxlen: int = 20, width: int = 180) -> byte
     pdf.drawString(32, 760, "Synthetic insurance form")
     pdf.acroForm.textfield(name="claimant", x=40, y=700, width=width, height=24,
                            value=value, maxlen=maxlen)
+    pdf.showPage()
+    pdf.save()
+    return output.getvalue()
+
+
+def _complex_two_page_form_pdf() -> bytes:
+    output = io.BytesIO()
+    pdf = canvas.Canvas(output)
+    form = pdf.acroForm
+    form.textfield(name="target", x=40, y=700, width=210, height=26, value="Ada",
+                   borderStyle="solid", borderWidth=1, borderColor=black, fillColor=white,
+                   textColor=black, forceBorder=True, fontName="Helvetica", fontSize=12)
+    form.textfield(name="untouched", x=40, y=655, width=210, height=26, value="Keep this",
+                   borderStyle="solid", borderWidth=1, borderColor=black, fillColor=white,
+                   textColor=black, forceBorder=True, fontName="Helvetica", fontSize=12)
+    form.checkbox(name="consent", x=40, y=610, checked=True, buttonStyle="check",
+                  borderWidth=1, borderColor=black, fillColor=white, forceBorder=True)
+    form.radio(name="coverage", value="basic", x=40, y=570, selected=True,
+               borderWidth=1, borderColor=black, fillColor=white, forceBorder=True)
+    form.radio(name="coverage", value="standard", x=70, y=570,
+               borderWidth=1, borderColor=black, fillColor=white, forceBorder=True)
+    form.radio(name="coverage", value="premium", x=100, y=570,
+               borderWidth=1, borderColor=black, fillColor=white, forceBorder=True)
+    form.choice(name="region", x=40, y=520, width=150, height=24, value="CA", options=["CA", "NY", "TX"],
+                borderWidth=1, borderColor=black, fillColor=white, forceBorder=True)
+    pdf.drawString(32, 760, "Synthetic claim form, page one")
+    pdf.showPage()
+    form.textfield(name="page_two", x=40, y=700, width=210, height=26, value="Unchanged page",
+                   borderStyle="solid", borderWidth=1, borderColor=black, fillColor=white,
+                   textColor=black, forceBorder=True, fontName="Helvetica", fontSize=12)
+    pdf.drawString(32, 760, "Synthetic claim form, page two")
     pdf.showPage()
     pdf.save()
     return output.getvalue()
@@ -148,3 +182,107 @@ def test_pdf_xfa_certified_and_signed_sources_are_read_only(restriction: str):
     targets = PdfAdapter().targets(source)
     assert targets and all(not target.editable for target in targets)
     assert PdfAdapter().inspect(source).level == "read_only"
+
+
+def test_form_appearance_edit_changes_only_target_widget_pixels_and_keeps_chrome():
+    from PIL import ImageChops
+    from packages.core.verification.pdf import _render
+
+    source = _complex_two_page_form_pdf()
+    adapter = PdfAdapter()
+    target = next(item for item in adapter.targets(source) if item.id == "pdf:target")
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "Alexandra"))
+    plan = build_patch_plan(adapter, source, [patch],
+                            provenance={"edit_set_id": "synthetic-form-chrome", "actor_id": "synthetic-owner"})
+    candidate = adapter.apply(source, plan)
+
+    source_acro = PdfReader(io.BytesIO(source)).root_object["/AcroForm"].get_object()
+    candidate_acro = PdfReader(io.BytesIO(candidate)).root_object["/AcroForm"].get_object()
+    assert ("/NeedAppearances" in source_acro) == ("/NeedAppearances" in candidate_acro)
+    if "/NeedAppearances" in source_acro:
+        assert candidate_acro["/NeedAppearances"] == source_acro["/NeedAppearances"]
+
+    before, after = _render(source, forms_enabled=True), _render(candidate, forms_enabled=True)
+    assert len(before) == len(after) == 2
+    assert ImageChops.difference(before[1], after[1]).getbbox() is None
+    bbox = ImageChops.difference(before[0], after[0]).getbbox()
+    x0, y0, x1, y1 = bbox
+    widget = target.native_locator["widgets"][0]
+    wx0, wy0, wx1, wy1 = widget["rect"]
+    page_width = float(PdfReader(io.BytesIO(source)).pages[0].mediabox.width)
+    page_height = float(PdfReader(io.BytesIO(source)).pages[0].mediabox.height)
+    px0, px1 = math.ceil(wx0 * before[0].width / page_width) - 1, math.floor(wx1 * before[0].width / page_width)
+    py0 = math.ceil((page_height - wy1) * before[0].height / page_height) - 1
+    py1 = math.floor((page_height - wy0) * before[0].height / page_height)
+    assert px0 <= x0 and x1 - 1 <= px1
+    assert py0 <= y0 and y1 - 1 <= py1
+
+    # The reportlab /MK border is black and the interior background is white.
+    field_widget = next(ref.get_object() for ref in PdfReader(io.BytesIO(candidate)).pages[0]["/Annots"]
+                        if ref.get_object().get("/T") == "target")
+    mk = field_widget["/MK"]
+    assert list(mk["/BC"]) == [0, 0, 0]
+    assert list(mk["/BG"]) == [1, 1, 1]
+    rendered = after[0]
+    assert rendered.getpixel((int(wx0), int(rendered.height - wy0 - 1))) != (255, 255, 255)
+    assert rendered.getpixel((int(wx1 - 8), int(rendered.height - (wy0 + wy1) / 2))) == (255, 255, 255)
+    report = PdfIndependentVerifier().verify(source, candidate, plan)
+    assert report.outcome == "VERIFIED", report.as_dict()
+
+
+def _incremental_tamper(data: bytes, mutate) -> bytes:
+    from packages.core.adapters.pdf.adapter import _QpdfConformantIncrementalWriter
+
+    writer = _QpdfConformantIncrementalWriter(PdfReader(io.BytesIO(data)), incremental=True)
+    mutate(writer)
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize("tamper", ["need_appearances", "non_target_appearance"])
+def test_pdf_preservation_blocks_global_or_non_target_appearance_changes(tamper: str):
+    source = _complex_two_page_form_pdf()
+    adapter = PdfAdapter()
+    target = next(item for item in adapter.targets(source) if item.id == "pdf:target")
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "Alexandra"))
+    plan = build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": "synthetic-preservation"})
+    candidate = adapter.apply(source, plan)
+
+    def mutate(writer):
+        if tamper == "need_appearances":
+            from pypdf.generic import BooleanObject, NameObject
+            writer._root_object[NameObject("/AcroForm")].get_object()[NameObject("/NeedAppearances")] = BooleanObject(True)
+            return
+        widget = next(ref.get_object() for ref in writer.pages[0]["/Annots"]
+                      if ref.get_object().get("/T") == "untouched")
+        appearance = widget["/AP"].get_object()["/N"].get_object()
+        appearance.set_data(appearance.get_data() + b"\n% unrelated widget changed\n")
+
+    tampered = _incremental_tamper(candidate, mutate)
+    report = PdfIndependentVerifier().verify(source, tampered, plan)
+    preservation = next(item for item in report.checks if item.check == "preservation")
+    assert report.outcome == "BLOCKED", report.as_dict()
+    assert preservation.status == "FAIL", report.as_dict()
+
+
+def test_pdf_verifier_fails_if_form_widgets_are_not_drawn(monkeypatch):
+    source = _complex_two_page_form_pdf()
+    adapter = PdfAdapter()
+    target = next(item for item in adapter.targets(source) if item.id == "pdf:target")
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "Alexandra"))
+    plan = build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": "synthetic-no-form-render"})
+    candidate = adapter.apply(source, plan)
+    render = pdf_verification._render
+
+    def without_forms(data, scale=1.0, forms_enabled=True):
+        return render(data, scale=scale, forms_enabled=False)
+
+    monkeypatch.setattr(pdf_verification, "_render", without_forms)
+    report = PdfIndependentVerifier().verify(source, candidate, plan)
+    visual = next(item for item in report.checks if item.check == "visual")
+    assert report.outcome == "BLOCKED", report.as_dict()
+    assert visual.status in {"FAIL", "NOT_VERIFIED"}, report.as_dict()
