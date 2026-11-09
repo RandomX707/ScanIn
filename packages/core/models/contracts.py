@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 
-ValueType = Literal["string", "integer", "decimal", "date", "datetime", "boolean", "choice", "null"]
+ValueType = Literal["string", "integer", "decimal", "date", "datetime", "time", "boolean", "choice", "null"]
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,8 @@ class TypedValue:
             "decimal": isinstance(self.value, (int, float, Decimal)) and not isinstance(self.value, bool),
             "date": isinstance(self.value, str),
             "datetime": isinstance(self.value, str),
+            # Time of day without a date (e.g. a time-only spreadsheet cell); never carries a timezone.
+            "time": isinstance(self.value, str),
             "boolean": isinstance(self.value, bool),
             "null": self.value is None,
         }

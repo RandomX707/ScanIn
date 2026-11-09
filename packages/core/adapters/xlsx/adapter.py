@@ -95,9 +95,32 @@ def _shared_strings(parts: dict[str, tuple[zipfile.ZipInfo, bytes]]) -> tuple[li
     return strings, rich
 
 
-def _date_styles(parts: dict[str, tuple[zipfile.ZipInfo, bytes]]) -> set[int]:
+_BUILTIN_DATE_KINDS = {**{fmt: "date" for fmt in (*range(14, 18), *range(27, 37), *range(50, 59))},
+                       **{fmt: "time" for fmt in (18, 19, 20, 21, 45, 46, 47)}, 22: "datetime"}
+
+
+def _format_kind(fmt_id: int, code: str) -> str | None:
+    """'date', 'datetime' or 'time' for a date/time number format, otherwise None."""
+    if fmt_id in _BUILTIN_DATE_KINDS:
+        return _BUILTIN_DATE_KINDS[fmt_id]
+    if not code or not is_date_format(code):
+        return None
+    cleaned = re.sub(r'"[^"]*"|\\.|_.|\*.', "", code.split(";")[0]).lower()
+    elapsed = bool(re.search(r"\[(?:h+|m+|s+)\]", cleaned))
+    cleaned = re.sub(r"\[[^\]]*\]", "", cleaned)
+    has_time = elapsed or bool(re.search(r"[hs]|am/pm|a/p", cleaned))
+    has_date = bool(re.search(r"[yd]", cleaned)) or (not has_time and "m" in cleaned)
+    if has_date and has_time:
+        return "datetime"
+    if has_time:
+        return "time"
+    return "date" if has_date else None
+
+
+def _date_styles(parts: dict[str, tuple[zipfile.ZipInfo, bytes]]) -> dict[int, str]:
+    """Map cellXfs style index -> 'date' | 'datetime' | 'time' for date/time number formats."""
     if "xl/styles.xml" not in parts:
-        return set()
+        return {}
     styles = _xml(parts["xl/styles.xml"][1])
     custom: dict[int, str] = {}
     for n in styles.xpath("./m:numFmts/m:numFmt", namespaces=NS):
@@ -105,15 +128,16 @@ def _date_styles(parts: dict[str, tuple[zipfile.ZipInfo, bytes]]) -> set[int]:
             custom[int(n.get("numFmtId", "0"))] = n.get("formatCode", "")
         except ValueError:
             continue
-    ids: set[int] = set()
+    kinds: dict[int, str] = {}
     for i, xf in enumerate(styles.xpath("./m:cellXfs/m:xf", namespaces=NS)):
         try:
             fmt = int(xf.get("numFmtId", "0"))
         except ValueError:
             continue
-        if 14 <= fmt <= 22 or 27 <= fmt <= 36 or 45 <= fmt <= 47 or 50 <= fmt <= 58 or is_date_format(custom.get(fmt, "")):
-            ids.add(i)
-    return ids
+        kind = _format_kind(fmt, custom.get(fmt, ""))
+        if kind:
+            kinds[i] = kind
+    return kinds
 
 
 def _rich_text_value(cell: etree._Element, shared: list[str]) -> TypedValue:
@@ -130,7 +154,31 @@ def _rich_text_value(cell: etree._Element, shared: list[str]) -> TypedValue:
     return TypedValue("string", text_value, native=text_value)
 
 
-def _cell_value(cell: etree._Element, shared: list[str], rich: set[int], dates: set[int], epoch) -> tuple[TypedValue | None, str | None]:
+def _date_time_value(number: Decimal, raw: str, kind: str, epoch) -> tuple[TypedValue | None, str | None]:
+    """Type a date/time-formatted serial without losing its fractional day or adding a timezone.
+
+    The raw serial is kept as the native representation. Excel's fictitious 29 Feb 1900 (serials
+    60 <= n < 61 in the 1900 system) does not round-trip and is rejected as ambiguous."""
+    if number < 0 or (epoch == WINDOWS_EPOCH and 60 <= number < 61):
+        return None, "ambiguous_excel_date_serial"
+    try:
+        parsed = from_excel(float(number), epoch=epoch)
+    except (ValueError, OverflowError):
+        return None, "invalid_date"
+    has_time = number != number.to_integral_value()
+    if kind == "time":
+        if number < 1:
+            # A time of day with no date. Shown as a value, but there is no safe native writer for it.
+            return TypedValue("time", parsed.isoformat(), native=raw), "time_value_read_only"
+        return TypedValue("datetime", parsed.isoformat(), native=raw), "ambiguous_time_format"
+    if not isinstance(parsed, datetime):
+        return None, "ambiguous_excel_date_serial"
+    if kind == "datetime" or has_time:
+        return TypedValue("datetime", parsed.isoformat(), native=raw), None
+    return TypedValue("date", parsed.date().isoformat(), native=raw), None
+
+
+def _cell_value(cell: etree._Element, shared: list[str], rich: set[int], dates: dict[int, str], epoch) -> tuple[TypedValue | None, str | None]:
     f = cell.find(f"{{{MAIN}}}f")
     if f is not None:
         return None, "array_formula" if f.get("t") in {"array", "dataTable"} else "formula_cell"
@@ -173,14 +221,13 @@ def _cell_value(cell: etree._Element, shared: list[str], rich: set[int], dates: 
         return None, "invalid_number"
     style = int(cell.get("s", "0")) if cell.get("s", "0").isdigit() else 0
     if style in dates:
-        parsed = from_excel(float(number), epoch=epoch)
-        as_date = parsed.date().isoformat() if isinstance(parsed, datetime) else parsed.isoformat()
-        return TypedValue("date", as_date, native=raw), None
+        return _date_time_value(number, raw, dates[style], epoch)
     if number == number.to_integral_value() and "e" not in raw.lower() and "." not in raw:
         return TypedValue("integer", int(number), native=raw), None
     return TypedValue("decimal", float(number), native=raw), None
 
 
+READ_ONLY_DATE_TIME_REASONS = frozenset({"time_value_read_only", "ambiguous_time_format"})
 CELL_REF = re.compile(r"(?:(?:'((?:[^']|'')+)'|([A-Za-z_][A-Za-z0-9_. ]*))!)?(\$?[A-Z]{1,3}\$?[1-9][0-9]*)(?::(\$?[A-Z]{1,3}\$?[1-9][0-9]*))?", re.I)
 UNSAFE_FORMULA = re.compile(r"\b(?:INDIRECT|OFFSET)\s*\(|\[[^\]]+\]|\bR\[?-?\d", re.I)
 CELL_COORD = re.compile(r"^\$?([A-Z]{1,3})\$?([1-9][0-9]*)$", re.I)
@@ -543,7 +590,12 @@ class XlsxAdapter:
             seen: set[str] = set()
             for cell in root.xpath(".//m:c", namespaces=NS):
                 value, reason = _cell_value(cell, shared, rich, dates, epoch)
-                if value is None and reason in {"formula_cell", "array_formula", "rich_text", "error_cell", "invalid_number", "invalid_date", "invalid_shared_string"}:
+                if value is not None and reason in READ_ONLY_DATE_TIME_REASONS and cell.find(f"{{{MAIN}}}f") is None:
+                    result.append(EditTarget(f"xlsx:{sheet}!{cell.get('r', '')}", hashlib.sha256(source).hexdigest(), sheet,
+                                             cell.get("r", ""), value, _fingerprint(cell), cell.get("s"), False, reason,
+                                             None if unknown_formula else ()))
+                    continue
+                if value is None and reason in {"formula_cell", "array_formula", "rich_text", "error_cell", "invalid_number", "invalid_date", "invalid_shared_string", "ambiguous_excel_date_serial"}:
                     ref = cell.get("r", "")
                     if cell.find(f"{{{MAIN}}}f") is not None:
                         formula = cell.find(f"{{{MAIN}}}f")

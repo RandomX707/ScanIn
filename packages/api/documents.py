@@ -124,6 +124,11 @@ def _typed_correction(value: dict[str, Any], *, allow_metadata: bool = False) ->
         if kind == "datetime":
             from datetime import datetime
             datetime.fromisoformat(str(value["value"]))
+        if kind == "time":
+            from datetime import time
+            parsed_time = time.fromisoformat(str(value["value"]))
+            if parsed_time.tzinfo is not None:
+                raise ValueError("time_with_timezone")
     except (ValueError, TypeError, KeyError):
         raise APIError(422, "invalid_correction_value", "The correction type and value are incompatible.") from None
     return typed
