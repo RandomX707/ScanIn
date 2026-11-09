@@ -49,7 +49,9 @@ def _reportlab_controls(index: int) -> tuple[bytes, str, str, str]:
     output = io.BytesIO()
     pdf = canvas.Canvas(output, pagesize=(612, 792))
     form = pdf.acroForm
-    form.checkbox(name=f"consent_{index:03d}", x=38, y=720, checked=bool(index % 2))
+    # The corpus toggles both states, so model these controls as optional rather
+    # than inheriting ReportLab's default REQUIRED flag.
+    form.checkbox(name=f"consent_{index:03d}", x=38, y=720, checked=bool(index % 2), fieldFlags="")
     form.radio(name=f"coverage_{index:03d}", value="basic", x=38, y=670, selected=True)
     form.radio(name=f"coverage_{index:03d}", value="extended", x=90, y=670)
     form.choice(name=f"region_{index:03d}", x=38, y=620, value="CA", options=["CA", "NY", "TX"],

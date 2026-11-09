@@ -275,6 +275,7 @@ class PdfAdapter:
             da = str((widget_list[0][1].get("/DA") if widget_list else None) or field_obj.get("/DA") or acro.get("/DA", ""))
             font_match = __import__("re").search(r"/(\S+)\s+([0-9]+(?:\.[0-9]+)?)\s+Tf", da)
             font_size = float(font_match.group(2)) if font_match else None
+            font_name = ""
             if kind in {"text", "choice"}:
                 if any(not _supported_default_appearance(
                         str((widget.get("/DA") or field_obj.get("/DA") or acro.get("/DA", ""))))
@@ -282,6 +283,7 @@ class PdfAdapter:
                     reason = reason or "unsupported_default_appearance"
                 font_resources = _resolve(_resolve(acro.get("/DR", {})).get("/Font", {}))
                 font = _resolve(font_resources.get("/" + font_match.group(1))) if font_match and font_resources else None
+                font_name = str(font.get("/BaseFont", "")).lstrip("/") if font else ""
                 standard_fonts = {"/Courier", "/Courier-Bold", "/Courier-Oblique", "/Courier-BoldOblique",
                                   "/Helvetica", "/Helvetica-Bold", "/Helvetica-Oblique", "/Helvetica-BoldOblique",
                                   "/Times-Roman", "/Times-Bold", "/Times-Italic", "/Times-BoldItalic",
@@ -292,7 +294,10 @@ class PdfAdapter:
             maxlen = int(maxlen) if maxlen is not None else None
             fingerprint = _field_fingerprint(name, field_obj, widget_list)
             locator = {"field_name": name, "field_type": kind, "pages": [p for p, _ in widget_list],
-                       "widgets": [{"page": p, "rect": [float(x) for x in w.get("/Rect", [])]} for p, w in widget_list]}
+                       "widgets": [{"page": p, "rect": [float(x) for x in w.get("/Rect", [])]} for p, w in widget_list],
+                       "required": bool(flags & int(FieldFlag.REQUIRED)),
+                       "multiline": bool(flags & (1 << 12)),
+                       "font_name": font_name}
             if kind == "checkbox" and len(state_values) == 1:
                 locator["on_state"] = next(iter(state_values))
             result.append(PdfTarget(f"pdf:{name}", "", name, str(page), value, fingerprint,
@@ -329,22 +334,42 @@ class PdfAdapter:
             raise PdfDocumentError("expected_value_mismatch")
         if not self.type_compatible(fresh.value, patch.new_value):
             raise PdfDocumentError("pdf_field_type_mismatch")
+        locator = fresh.native_locator or {}
         if fresh.field_type == "text":
             text = str(patch.new_value.value)
+            if locator.get("required") and not text.strip():
+                raise PdfDocumentError("required_field_empty")
             if fresh.max_length is not None and len(text) > fresh.max_length:
                 raise PdfDocumentError("max_length_exceeded")
-            widget = (fresh.native_locator or {}).get("widgets", [{}])[0].get("rect", [])
-            width = abs(widget[2] - widget[0]) if len(widget) == 4 else 0
-            # Conservative estimate: unsupported if the selected font is ambiguous, and
-            # reject overflows rather than shrinking/reflowing the field implicitly.
-            if not text.isascii() or any(ord(char) < 32 for char in text):
+            multiline = bool(locator.get("multiline"))
+            normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+            if ("\n" in normalized and not multiline) or any(ord(char) < 32 and char != "\n" for char in normalized):
+                raise PdfDocumentError("unsupported_control_character")
+            try:
+                normalized.encode("cp1252")
+            except UnicodeEncodeError:
                 raise PdfDocumentError("unsupported_glyph")
-            if not fresh.font_size or width <= 0 or len(text) * fresh.font_size > width - 4:
-                raise PdfDocumentError("widget_overflow")
+            from reportlab.pdfbase.pdfmetrics import stringWidth
+            font_name = str(locator.get("font_name") or "")
+            if not fresh.font_size or not font_name:
+                raise PdfDocumentError("ambiguous_appearance")
+            lines = normalized.split("\n")
+            for widget in locator.get("widgets", []):
+                rect = widget.get("rect", [])
+                width = abs(rect[2] - rect[0]) if len(rect) == 4 else 0
+                height = abs(rect[3] - rect[1]) if len(rect) == 4 else 0
+                if width <= 4 or height <= 4 or any(stringWidth(line, font_name, fresh.font_size) > width - 4 for line in lines):
+                    raise PdfDocumentError("widget_overflow")
+                if multiline and len(lines) * fresh.font_size * 1.2 > height - 4:
+                    raise PdfDocumentError("widget_overflow")
         if fresh.field_type == "checkbox" and not isinstance(patch.new_value.value, bool):
             raise PdfDocumentError("invalid_checkbox_value")
+        if locator.get("required") and fresh.field_type == "checkbox" and not patch.new_value.value:
+            raise PdfDocumentError("required_field_empty")
         if fresh.field_type in {"choice", "radio"} and str(patch.new_value.value) not in fresh.options:
             raise PdfDocumentError("invalid_choice")
+        if locator.get("required") and fresh.field_type in {"choice", "radio"} and not str(patch.new_value.value).strip():
+            raise PdfDocumentError("required_field_empty")
 
     def apply(self, source: bytes, plan: PatchPlan) -> bytes:
         if not plan.patches or plan.no_change:
@@ -368,7 +393,7 @@ class PdfAdapter:
             elif target.field_type == "radio":
                 button_values[name] = (target.field_type, str(patch.new_value.value).lstrip("/"))
             else:
-                values[name] = str(patch.new_value.value)
+                values[name] = str(patch.new_value.value).replace("\r\n", "\n").replace("\r", "\n")
         writer = _QpdfConformantIncrementalWriter(reader, incremental=True)
         source_acro = _resolve(reader.root_object.get("/AcroForm", {}))
         had_need_appearances = "/NeedAppearances" in source_acro

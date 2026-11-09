@@ -92,6 +92,70 @@ def test_pdf_preflight_rejects_maxlen_and_widget_overflow():
                      narrow_target.fingerprint, TypedValue("string", "A value too wide"))
     with pytest.raises(PdfDocumentError, match="widget_overflow"):
         adapter.preflight(narrow_source, narrow_target, overflow)
+    too_long_patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value,
+                           target.fingerprint, TypedValue("string", "longer"))
+    from packages.core.planning.planner import PlanError
+    with pytest.raises(PlanError, match="max_length_exceeded"):
+        build_patch_plan(adapter, source, [too_long_patch], provenance={"edit_set_id": "maxlen-before-freeze"})
+
+
+@pytest.mark.parametrize(("value", "reason"), [
+    ("Café", None),
+    ("😀", "unsupported_glyph"),
+    ("A", None),
+    ("A\nB", "unsupported_control_character"),
+])
+def test_pdf_text_preflight_uses_font_metrics_and_supported_encoding(value, reason):
+    source = _form_pdf(width=100, maxlen=40)
+    adapter = PdfAdapter()
+    target = adapter.targets(source)[0]
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", value))
+    if reason:
+        with pytest.raises(PdfDocumentError, match=reason):
+            adapter.preflight(source, target, patch)
+    else:
+        adapter.preflight(source, target, patch)
+
+
+def test_pdf_required_field_empty_is_rejected_before_plan_freeze():
+    from pypdf.constants import FieldFlag
+    reader = PdfReader(io.BytesIO(_form_pdf()))
+    writer = __import__("pypdf").PdfWriter(clone_from=reader)
+    writer.update_page_form_field_values(None, {"claimant": "Ada"}, auto_regenerate=False,
+                                         flags=FieldFlag.REQUIRED)
+    output = io.BytesIO(); writer.write(output)
+    source = output.getvalue()
+    adapter = PdfAdapter()
+    target = adapter.targets(source)[0]
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", ""))
+    from packages.core.planning.planner import PlanError
+    with pytest.raises(PlanError, match="required_field_empty"):
+        build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": "required-field"})
+
+
+def test_pdf_preflight_rejects_multiline_when_widget_is_not_multiline():
+    source = _form_pdf()
+    adapter = PdfAdapter()
+    target = adapter.targets(source)[0]
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "line one\nline two"))
+    with pytest.raises(PdfDocumentError, match="unsupported_control_character"):
+        adapter.preflight(source, target, patch)
+
+
+def test_pdf_multiline_field_accepts_bounded_supported_lines():
+    output = io.BytesIO(); pdf = canvas.Canvas(output)
+    pdf.acroForm.textfield(name="notes", x=30, y=680, width=180, height=54, value="old",
+                           fieldFlags="multiline", fontName="Helvetica", fontSize=10)
+    pdf.showPage(); pdf.save(); source = output.getvalue()
+    adapter = PdfAdapter(); target = adapter.targets(source)[0]
+    patch = Patch(hashlib.sha256(source).hexdigest(), target.id, target.value, target.fingerprint,
+                  TypedValue("string", "first line\nsecond line"))
+    plan = build_patch_plan(adapter, source, [patch], provenance={"edit_set_id": "multiline"})
+    candidate = adapter.apply(source, plan)
+    assert PdfReader(io.BytesIO(candidate)).get_fields()["notes"]["/V"] == "first line\nsecond line"
 
 
 def test_pdf_checkbox_radio_and_dropdown_updates_use_real_appearance_options():
@@ -129,7 +193,7 @@ def test_pdf_radio_and_checkbox_values_are_name_objects_and_widget_states_match(
 
     output = io.BytesIO()
     pdf = canvas.Canvas(output)
-    pdf.acroForm.checkbox(name="consent", x=40, y=700, checked=not checked,
+    pdf.acroForm.checkbox(name="consent", x=40, y=700, checked=not checked, fieldFlags="",
                           borderWidth=1, forceBorder=True)
     pdf.acroForm.radio(name="coverage", value="basic", x=40, y=650, selected=True, forceBorder=True)
     pdf.acroForm.radio(name="coverage", value="standard", x=75, y=650, forceBorder=True)
