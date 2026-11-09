@@ -461,7 +461,7 @@ def generate_ai_summary(document_id: str, version_id: str, request: Request,
             "provider_rate_limited": ("The AI provider is rate limiting requests. Try again later.", 429),
             "provider_credentials_rejected": ("The configured AI provider credentials were rejected.", 503),
             "provider_unavailable": ("The AI provider is temporarily unavailable.", 503),
-            "provider_response_not_grounded": ("The AI response could not be grounded in extracted evidence.", 502),
+            "provider_response_not_grounded": ("The AI response did not pass source-reference and text-overlap checks. Those checks do not verify factual accuracy.", 502),
             "insufficient_readable_evidence": ("There is not enough readable content to explain.", 422),
         }
         message, status = messages.get(error.code, ("The AI provider returned an invalid response.", error.status_code))

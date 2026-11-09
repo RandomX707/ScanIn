@@ -438,6 +438,36 @@ test('Summary defaults to No AI and explicit AI generation is cached and compara
   expect(calls).toBe(1);
 });
 
+test('No AI summary remains usable after provider credential and outage errors', async ({ page }) => {
+  let providerFailure = { code: 'provider_credentials_rejected', message: 'The configured AI provider credentials were rejected.' };
+  let calls = 0;
+  await page.route(/\/api\/documents\/[^/]+\/versions\/[^/]+\/ai-summary$/, async (route) => {
+    calls += 1;
+    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify(providerFailure) });
+  });
+  await page.goto('/');
+  await connect(page, 'processor');
+  await page.getByRole('button', { name: 'Documents' }).click();
+  const filename = `channel360-ai-failure-${crypto.randomUUID()}.csv`;
+  await page.getByLabel('Choose a document to upload').setInputFiles({ name: filename, mimeType: 'text/csv',
+    buffer: Buffer.from('claim_number,policyholder\nSYN-FAIL-1,Example Person\n') });
+  await page.getByRole('button', { name: 'Upload securely' }).click();
+  await expect(page.getByRole('heading', { name: filename })).toBeVisible();
+  await page.getByRole('button', { name: 'AI', exact: true }).click();
+  await page.getByRole('button', { name: 'Generate AI Explanation' }).click();
+  await expect(page.getByRole('alert')).toContainText('credentials were rejected');
+  await page.getByRole('button', { name: 'No AI' }).click();
+  await expect(page.getByTestId('structural-summary')).toContainText('claim_number');
+
+  providerFailure = { code: 'provider_unavailable', message: 'The AI provider is temporarily unavailable.' };
+  await page.getByRole('button', { name: 'AI', exact: true }).click();
+  await page.getByRole('button', { name: 'Generate AI Explanation' }).click();
+  await expect(page.getByRole('alert')).toContainText('temporarily unavailable');
+  await page.getByRole('button', { name: 'No AI' }).click();
+  await expect(page.getByTestId('structural-summary')).toContainText('claim_number');
+  expect(calls).toBe(2);
+});
+
 test('DOCX preview remains read only until critical verification is available', async ({ page, request }) => {
   const fixture = fs.readFileSync(path.resolve(here, '../../../.runtime/browser-fixtures/synthetic-claim.docx'));
   const filename = uniqueFixtureFilename('synthetic-claim.docx');

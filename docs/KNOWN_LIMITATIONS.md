@@ -1,6 +1,7 @@
 # Known Limitations
 
 - Optional AI explanation uses a process-local five-requests-per-user-per-minute limiter; multiple API worker processes do not share counters. Configure only an approved HTTPS-compatible provider, and use synthetic documents for development. Standard tests mock the provider; no live provider response has been validated. No AI remains available without provider configuration.
+- AI evidence identifiers and locations are checked against extracted source evidence. A lexical-overlap heuristic may reject unrelated claims, but it cannot establish that a model statement is factually correct; users must verify important details against the document.
 
 Channel360 is a validated local prototype, not production-ready software.
 
@@ -26,13 +27,14 @@ Channel360 is a validated local prototype, not production-ready software.
 
 ## Current local evidence — 2026-11-09
 
-- Python regression: 195 passed, 22 skipped, 0 failed. The skips are service-dependent and are not counted as passes.
+- Python regression: 223 passed, 22 skipped, 0 failed. The skips are service-dependent and are not counted as passes.
 - PostgreSQL integration/security: 22 passed against `channel360_test`.
 - ClamAV: 4/4 passed (clean, EICAR quarantine, rejected executable, scanner unavailable fail-closed).
-- Playwright Chromium: 13/13 passed, including PDF text, checkbox, radio and dropdown verified downloads, existing CSV/JSON/XLSX workflows, DOCX read-only/preflight guard and formula-dependent `INCOMPLETE` download denial.
+- Playwright Chromium: 15/15 passed, including PDF text, checkbox, radio and dropdown verified downloads, existing CSV/JSON/XLSX workflows, explicit AI/no-AI/compare interaction, mocked provider credential/outage handling, DOCX read-only/preflight guard and formula-dependent `INCOMPLETE` download denial.
 - React TypeScript/Vite production build: passed.
 - M0 workbook source fixture hashes: 2/2 passed; full M0 acceptance tests are included in Python regression.
 - Parser loopback probe passed on the current host. Darwin memory enforcement remains sampled parent-side RSS monitoring (up to about 50 ms overshoot); it is not a kernel `RLIMIT_AS` cap.
+- LLM credentials were not configured for this validation, so no external provider request was made. JSON-mode fallback, IP-pinned HTTPS connection behavior, structured parsing and evidence-reference checks were validated with mocks/unit tests only.
 - DOCX visual verification returns critical `NOT_VERIFIED`; the workflow remains blocked and native controls are disabled.
 - The exact supplied DOCX pair passes the offline structural diagnostic; local visual remains `NOT_VERIFIED`. Eight generated structural surfaces plus repeated targets and negative integrity cases are covered by new tests.
 - LibreOffice sandbox diagnostics: ordinary invocation is denied before launch; host-authorized diagnostics show a repeatable startup SIGSEGV in `macxp_resolveAlias → osl::realpath → osl_setCommandArgs` after Seatbelt application. A minimal deny-default probe confirms outside-tree reads and loopback access return `EPERM`. No alternative isolated office runtime is installed.

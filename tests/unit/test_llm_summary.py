@@ -4,6 +4,7 @@ import json
 import socket
 
 import httpx
+import httpcore
 import pytest
 from pydantic import SecretStr, ValidationError
 
@@ -40,6 +41,8 @@ def test_provider_returns_only_claims_with_server_issued_evidence(monkeypatch):
     assert result["explanation"] == "This is a synthetic claim form."
     assert [item["text"] for item in result["key_points"]] == ["This is a synthetic claim form."]
     assert result["evidence_references"] == [{"reference": "docx:body:p0", "label": "Body paragraph 1"}]
+    assert any("heuristic" in limitation.lower() and "factual accuracy" in limitation.lower()
+               for limitation in result["limitations"])
 
 
 def test_provider_rejects_fabricated_only_evidence_and_never_echoes_credentials(monkeypatch):
@@ -53,6 +56,18 @@ def test_provider_rejects_fabricated_only_evidence_and_never_echoes_credentials(
     assert "test-secret" not in str(error.value)
 
 
+def test_provider_rejects_a_claim_if_any_cited_evidence_identifier_is_fabricated(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
+    body = {"claims": [{"text": "The synthetic claim includes a number.",
+                        "evidence_ids": ["known", "invented"]}]}
+    provider = OpenAICompatibleExplanationProvider(_settings(), transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})))
+    with pytest.raises(LLMProviderError, match="grounded"):
+        provider.explain(source_document_id="doc", source_version_id="version", source_sha256="a" * 64,
+                         structural_summary={}, evidence=[{"id": "known", "location": "p1",
+                                                           "text": "The synthetic claim includes a number."}])
+
+
 def test_provider_drops_claim_that_cites_real_but_unrelated_evidence(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
     body = {"claims": [{"text": "The requested claim was approved for payment.", "evidence_ids": ["known"]}]}
@@ -63,7 +78,11 @@ def test_provider_drops_claim_that_cites_real_but_unrelated_evidence(monkeypatch
                          structural_summary={}, evidence=[{"id": "known", "location": "p1", "text": "Claim number and policyholder"}])
 
 
-@pytest.mark.parametrize("status,code,expected_status", [(429, "provider_rate_limited", 429), (401, "provider_credentials_rejected", 503)])
+@pytest.mark.parametrize("status,code,expected_status", [
+    (429, "provider_rate_limited", 429),
+    (401, "provider_credentials_rejected", 503),
+    (503, "provider_request_failed", 502),
+])
 def test_provider_maps_rate_limit_and_credential_failures_without_echoing_body(monkeypatch, status, code, expected_status):
     monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
     provider = OpenAICompatibleExplanationProvider(_settings(), transport=httpx.MockTransport(
@@ -126,3 +145,49 @@ def test_provider_rejects_private_dns_resolution(monkeypatch):
     with pytest.raises(LLMConfigurationError, match="public addresses"):
         provider.explain(source_document_id="doc", source_version_id="version", source_sha256="a" * 64,
                          structural_summary={}, evidence=[{"id": "known", "location": "p1", "text": "claim number"}])
+
+
+def test_pinned_network_backend_connects_to_validated_ip_and_rejects_other_origins():
+    from packages.core.summaries.llm import _PinnedNetworkBackend
+
+    class StubBackend:
+        def __init__(self): self.hosts = []
+        def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+            self.hosts.append((host, port)); return object()
+
+    delegate = StubBackend()
+    backend = _PinnedNetworkBackend("api.example.com", ["8.8.8.8"], delegate=delegate)
+    assert backend.connect_tcp("api.example.com", 443) is not None
+    assert delegate.hosts == [("8.8.8.8", 443)]
+    with pytest.raises(httpcore.ConnectError):
+        backend.connect_tcp("169.254.169.254", 443)
+
+
+def test_provider_retries_without_only_unsupported_response_format_but_keeps_strict_json_validation(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
+    seen = []
+    def handler(request):
+        payload = json.loads(request.content)
+        seen.append(payload)
+        if len(seen) == 1:
+            return httpx.Response(400, json={"error": {"param": "response_format", "type": "invalid_request_error"}})
+        body = {"claims": [{"text": "Claim number is present.", "evidence_ids": ["known"]}]}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
+    provider = OpenAICompatibleExplanationProvider(_settings(), transport=httpx.MockTransport(handler))
+    result = provider.explain(source_document_id="doc", source_version_id="version", source_sha256="a" * 64,
+                             structural_summary={}, evidence=[{"id": "known", "location": "p1", "text": "Claim number"}])
+    assert "response_format" in seen[0] and "response_format" not in seen[1]
+    assert result["explanation"] == "Claim number is present."
+
+
+def test_provider_does_not_retry_generic_bad_request(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(400, json={"error": {"param": "model", "type": "invalid_request_error"}})
+    provider = OpenAICompatibleExplanationProvider(_settings(), transport=httpx.MockTransport(handler))
+    with pytest.raises(LLMProviderError):
+        provider.explain(source_document_id="doc", source_version_id="version", source_sha256="a" * 64,
+                         structural_summary={}, evidence=[{"id": "known", "location": "p1", "text": "Claim number"}])
+    assert len(calls) == 1
