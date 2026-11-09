@@ -536,7 +536,14 @@ test('unsupported encrypted PDF and tracked-change DOCX remain read only in the 
     await expectPdfCanvasRendered(page);
     const restrictedFields = page.locator('.pdf-field-row');
     await expect(restrictedFields).not.toHaveCount(0);
-    for (const button of await restrictedFields.all()) await expect(button).toBeDisabled();
+    // Phase 3A: read-only fields stay selectable for sidecar data corrections only; they are marked
+    // read only and never offer native editing.
+    for (const button of await restrictedFields.all()) {
+      await expect(button).toHaveClass(/read-only-target/);
+      await expect(button.locator('.field-capability')).toHaveClass(/denied/);
+    }
+    await restrictedFields.first().click();
+    await expect(page.locator('.selected-source')).toContainText('Read only · data corrections only');
     await page.getByRole('tab', { name: 'Native changes' }).click();
     await expect(page.getByRole('button', { name: 'Create correction draft' })).toHaveCount(0);
   }
@@ -551,7 +558,11 @@ test('unsupported encrypted PDF and tracked-change DOCX remain read only in the 
   await expectPdfCanvasRendered(page);
   const xfaFields = page.locator('.pdf-field-row');
   await expect(xfaFields).not.toHaveCount(0);
-  for (const button of await xfaFields.all()) await expect(button).toBeDisabled();
+  // Phase 3A: XFA fields are selectable only for sidecar data corrections; they stay read only.
+  for (const button of await xfaFields.all()) {
+    await expect(button).toHaveClass(/read-only-target/);
+    await expect(button.locator('.field-capability')).toHaveClass(/denied/);
+  }
   await page.screenshot({ path: path.join(screenshots, 'xfa-pdf-read-only.png'), fullPage: true });
 
   await page.getByRole('button', { name: 'Documents' }).click();
@@ -574,7 +585,11 @@ test('unsupported encrypted PDF and tracked-change DOCX remain read only in the 
   await expect(page.getByText('Extracted Word text preview')).toBeVisible();
   const blockedTargets = page.locator('.text-target');
   await expect(blockedTargets).not.toHaveCount(0);
-  for (const button of await blockedTargets.all()) await expect(button).toBeDisabled();
+  // Phase 3A: tracked-change targets are selectable only for sidecar data corrections; they stay read only.
+  for (const button of await blockedTargets.all()) {
+    await expect(button).toHaveClass(/read-only-target/);
+    await expect(button).toContainText('Read only');
+  }
   await page.getByRole('tab', { name: 'Native changes' }).click();
   await expect(page.getByRole('button', { name: 'Create correction draft' })).toHaveCount(0);
   await page.screenshot({ path: path.join(screenshots, 'tracked-docx-read-only.png'), fullPage: true });

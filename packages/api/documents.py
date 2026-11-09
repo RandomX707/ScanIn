@@ -167,6 +167,41 @@ def _presentation_capability(report: object) -> dict[str, object]:
     return dict(getattr(report, "capability"))
 
 
+VIEWABLE_ADAPTERS = frozenset({"csv", "json", "xlsx", "pdf", "docx"})
+
+
+def _capabilities(report: Any) -> dict[str, dict[str, object]]:
+    """Three independent capabilities: viewable, natively editable, eligible for sidecar corrections."""
+    capability = dict(report.capability or {})
+    reasons = list(capability.get("reasons") or [])
+    level = capability.get("level")
+    if level == "rejected":
+        viewable, view_reason = False, reasons[0] if reasons else "document_rejected"
+    elif report.status != "inspected" or report.adapter not in VIEWABLE_ADAPTERS:
+        viewable, view_reason = False, reasons[0] if reasons else "viewer_not_supported"
+    else:
+        viewable, view_reason = True, None
+    native = viewable and level == "editable"
+    details = report.details or {}
+    if not viewable:
+        anchorable, anchor_reason = False, view_reason
+    elif report.adapter == "pdf":
+        anchorable = bool(details.get("fields")) or any(
+            not page.get("scanned_or_image_only") and str(page.get("text", "")).strip() for page in details.get("pages", []))
+        anchor_reason = None if anchorable else "no_extractable_text_or_fields"
+    elif report.adapter == "docx":
+        anchorable = bool(details.get("blocks"))
+        anchor_reason = None if anchorable else "no_extractable_text"
+    else:
+        page = report.targets_page or {}
+        total = page.get("total") if page.get("total") is not None else len(report.targets or ())
+        anchorable = bool(total)
+        anchor_reason = None if anchorable else "no_values_found"
+    return {"viewable": {"available": viewable, "reason": view_reason},
+            "native_editing": {"available": native, "reason": None if native else (view_reason if not viewable else reasons[0] if reasons else "document_not_editable")},
+            "data_corrections": {"available": anchorable, "reason": anchor_reason}}
+
+
 def _release_workflow(adapter_name: str, *, docx_mode: str = "structural", pdf_verifier=None) -> NativeReleaseWorkflow:
     if adapter_name == "csv":
         return NativeReleaseWorkflow(CsvAdapter(), CsvIndependentVerifier())
@@ -341,7 +376,11 @@ def inspect_document(
         "capability": _presentation_capability(report), "adapter": report.adapter,
         "adapter_version": report.adapter_version, "sheets": list(report.sheets),
         "features": list(report.features), "findings": list(report.findings),
-        "inspection_score": report.score, "state": state, "viewing_ready": state == "ready",
+        "inspection_score": report.score, "state": state,
+        # Ready for viewing only when a safe viewer exists for this file (a legacy .doc is inspected
+        # but has no viewer, so it is never reported as viewable).
+        "viewing_ready": state == "ready" and _capabilities(report)["viewable"]["available"],
+        "capabilities": _capabilities(report),
         "targets": list(report.targets), "targets_truncated": report.targets_truncated,
         "targets_page": report.targets_page, "details": report.details,
     }
@@ -398,8 +437,9 @@ def view_document_version(document_id: str, version_id: str, request: Request,
         raise APIError(503, "view_not_verified", "Safe document viewing is unavailable.") from None
     if report.sha256 != row["sha256"]:
         raise APIError(409, "source_version_changed", "The requested version failed integrity validation.")
-    if report.adapter not in {"csv", "json", "xlsx", "pdf", "docx"} or report.status != "inspected":
-        raise APIError(415, "viewer_not_supported", "This file type has no supported read-only viewer.")
+    if report.adapter not in VIEWABLE_ADAPTERS or report.status != "inspected":
+        raise APIError(415, "viewer_not_supported", "This file type has no supported read-only viewer.",
+                       details=[{"capability": _presentation_capability(report), "capabilities": _capabilities(report)}])
     page = report.targets_page or {}
     if target_offset and page.get("total") is not None and target_offset >= int(page["total"]):
         raise APIError(416, "target_page_out_of_range", "The requested target page is beyond the document.")
@@ -412,6 +452,7 @@ def view_document_version(document_id: str, version_id: str, request: Request,
         "docx_verification_mode": request.app.state.settings.channel360_docx_verification_mode
         if report.adapter == "docx" else None,
         "features": list(report.features), "targets": list(report.targets),
+        "capabilities": _capabilities(report),
         "targets_truncated": report.targets_truncated, "targets_page": report.targets_page,
         "details": report.details,
         "structural_summary": ({**report.structural_summary, "source_document_id": str(parsed_id),

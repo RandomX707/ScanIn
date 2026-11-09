@@ -55,6 +55,46 @@ def create_text_only_pdf() -> bytes:
     return output.getvalue()
 
 
+def _rewrite_zip(source: bytes, edit, extra: dict[str, bytes] | None = None) -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(source)) as zin, zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            zout.writestr(info, edit(info.filename, zin.read(info.filename)))
+        for name, data in (extra or {}).items():
+            zout.writestr(name, data)
+    return output.getvalue()
+
+
+def _claim_workbook() -> bytes:
+    from openpyxl import Workbook
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Claim"
+    for row in (("Field", "Value"), ("Insured", "RICH_PLACEHOLDER"), ("Status", "Open"), ("Amount", 18250)):
+        sheet.append(row)
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def create_rich_text_xlsx() -> bytes:
+    """Editable workbook whose B2 is an inline rich-text cell (read-only target with visible text)."""
+    def edit(name: str, data: bytes) -> bytes:
+        if name != "xl/worksheets/sheet1.xml":
+            return data
+        start = data.find(b'<c r="B2"')
+        end = data.find(b"</c>", start) + 4
+        return data[:start] + (b'<c r="B2" t="inlineStr"><is><r><rPr><b/></rPr><t>Meera</t></r>'
+                               b'<r><t xml:space="preserve"> Iyer</t></r></is></c>') + data[end:]
+    return _rewrite_zip(_claim_workbook(), edit)
+
+
+def create_macro_xlsm() -> bytes:
+    """Workbook with a (synthetic, non-executable) vbaProject part: read-only, values still viewable."""
+    return _rewrite_zip(_claim_workbook(), lambda name, data: data.replace(b"RICH_PLACEHOLDER", b"Meera Iyer"),
+                        {"xl/vbaProject.bin": b"synthetic placeholder, not a macro project"})
+
+
 def create_docx() -> bytes:
     document = Document()
     document.add_heading("Synthetic Claim Summary", level=1)
@@ -167,6 +207,8 @@ def main() -> None:
     (output / "synthetic-signed.pdf").write_bytes(create_restricted_pdf("signed"))
     (output / "synthetic-scanned.pdf").write_bytes(create_scanned_pdf())
     (output / "synthetic-invoice-no-fields.pdf").write_bytes(create_text_only_pdf())
+    (output / "synthetic-rich-text.xlsx").write_bytes(create_rich_text_xlsx())
+    (output / "synthetic-macro.xlsm").write_bytes(create_macro_xlsm())
     (output / "synthetic-claim.docx").write_bytes(create_docx())
     (output / "synthetic-tracked-changes.docx").write_bytes(create_tracked_change_docx())
 

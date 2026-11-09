@@ -116,6 +116,20 @@ def _date_styles(parts: dict[str, tuple[zipfile.ZipInfo, bytes]]) -> set[int]:
     return ids
 
 
+def _rich_text_value(cell: etree._Element, shared: list[str]) -> TypedValue:
+    """Plain text of a rich-text cell (all runs concatenated) for display and sidecar corrections.
+
+    The cell stays read-only for native editing: rewriting it would drop its run formatting."""
+    if cell.get("t") == "s":
+        try:
+            return TypedValue("string", shared[int(cell.findtext(f"{{{MAIN}}}v") or "")], native=cell.findtext(f"{{{MAIN}}}v"))
+        except (ValueError, IndexError):
+            return TypedValue("null", None)
+    inline = cell.find(f"{{{MAIN}}}is")
+    text_value = "".join(inline.xpath(".//m:t/text()", namespaces=NS)) if inline is not None else ""
+    return TypedValue("string", text_value, native=text_value)
+
+
 def _cell_value(cell: etree._Element, shared: list[str], rich: set[int], dates: set[int], epoch) -> tuple[TypedValue | None, str | None]:
     f = cell.find(f"{{{MAIN}}}f")
     if f is not None:
@@ -446,6 +460,7 @@ class XlsxAdapter:
                                              (TypedValue("string", "=" + (cell.find(f"{{{MAIN}}}f").text or ""),
                                                           native=cell.find(f"{{{MAIN}}}f").text or "")
                                               if cell.find(f"{{{MAIN}}}f") is not None
+                                              else _rich_text_value(cell, shared) if reason == "rich_text"
                                               else TypedValue("null", None)),
                                              _fingerprint(cell), cell.get("s"), False, reason,
                                              None if unknown_formula else ()))

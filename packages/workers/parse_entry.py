@@ -121,6 +121,7 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
     elif supported and profile.adapter == "docx":
         result["details"] = registry.docx.details(data, include_targets=include_targets)
     from packages.core.summaries.structural import StructuralSummaryProvider
+    _apply_document_level_editability(result, profile)
     if profile.adapter == "csv":
         # The CSV summary is computed from the parsed document, never from target dictionaries.
         summary_targets: list[Any] = []
@@ -135,6 +136,24 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
     if include_summary_evidence and structure_available:
         result["summary_evidence"] = _summary_evidence(data, profile.adapter, result.get("details"), source_adapter)
     return result
+
+
+def _apply_document_level_editability(result: dict[str, Any], profile: Any) -> None:
+    """A document that is not natively editable has no natively editable targets.
+
+    Targets keep their values (they remain viewable and eligible for sidecar data corrections), but
+    every target, PDF field and DOCX target reports editable=false with the document-level reason."""
+    if profile.level == "editable":
+        return
+    reason = profile.reasons[0] if profile.reasons else "document_not_editable"
+    for target in result.get("targets", []) or []:
+        if target.get("editable"):
+            target["editable"], target["reason"] = False, reason
+    details = result.get("details") or {}
+    for key in ("fields", "targets"):
+        for item in details.get(key, []) or []:
+            if isinstance(item, dict) and item.get("editable"):
+                item["editable"], item["reason"] = False, reason
 
 
 def _summary_evidence(data: bytes, adapter: str, details: dict[str, Any] | None, source_adapter: Any) -> list[dict[str, str]]:

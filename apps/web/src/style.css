@@ -51,3 +51,7 @@
 .anchor-block small, .field-provenance { display: block; color: var(--muted, #5b6472); font-size: 12px; }
 .read-only-target { opacity: .78; border-style: dashed; }
 .anchor-pending { font-size: 13px; color: var(--muted, #5b6472); margin: 6px 0; }
+.read-only-chip { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--surface-muted, #f1f3f6); color: var(--muted, #5b6472); }
+.grid-value.read-only-target { color: var(--muted, #5b6472); background: repeating-linear-gradient(135deg, transparent 0 6px, rgba(91, 100, 114, .06) 6px 12px); }
+.empty-value { color: var(--muted, #8a93a1); }
+.unavailable-reason code { font-size: 12px; }
