@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import codecs
+
 import csv
 import hashlib
 import io
@@ -139,12 +141,17 @@ def _csv_document(data: bytes) -> dict[tuple[int, int], tuple[int, int, bytes, s
     bom = data.startswith(b"\xef\xbb\xbf")
     start = 3 if bom else 0
     payload = data[start:]
-    encoding = "utf-8" if bom else "utf-8"
+    # Independent encoding decision: the whole payload must decode strictly as UTF-8 (always when a
+    # BOM is present) or, failing that, as Windows-1252. Nothing is ever decoded with replacement.
+    encoding = "utf-8"
     try:
-        sample = payload[:8192].decode(encoding)
+        payload.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
+        if bom:
+            raise
         encoding = "cp1252"
-        sample = payload[:8192].decode(encoding)
+        payload.decode(encoding, errors="strict")
+    sample = codecs.getincrementaldecoder(encoding)(errors="strict").decode(payload[:8192], final=False)
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
     except csv.Error:

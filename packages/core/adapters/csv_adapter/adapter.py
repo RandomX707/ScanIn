@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import csv
 import hashlib
 import io
@@ -57,8 +58,12 @@ class CsvAdapter:
             level = "read_only" if error.code in {"unsupported_encoding", "mixed_line_endings", "unsupported_dialect"} else "rejected"
             return CapabilityProfile(level, (error.code,), (), (), self.name, self.version)
         features = {"utf8_bom" if doc.bom else doc.encoding, self._delimiter_name(doc.delimiter), self._line_name(doc.line_ending)}
-        reasons = ("mixed_line_endings",) if doc.mixed_line_endings else ()
-        return CapabilityProfile("read_only" if reasons else "editable", reasons, tuple(sorted(features)), (), self.name, self.version)
+        blocking = ("mixed_line_endings",) if doc.mixed_line_endings else ()
+        # Agreed policy: bytes that are not UTF-8 but decode strictly as Windows-1252 stay editable,
+        # but the guess is always reported so the OWNER sees it before any edit is prepared.
+        notices = ("encoding_guessed_cp1252",) if doc.encoding == "cp1252" else ()
+        return CapabilityProfile("read_only" if blocking else "editable", blocking + notices,
+                                 tuple(sorted(features)), (), self.name, self.version)
 
     def targets(self, source: bytes) -> list[EditTarget]:
         doc = self._parse(source)
@@ -237,7 +242,9 @@ class CsvAdapter:
                            tuple(cells), tuple(row_lengths))
 
     def _dialect(self, payload: bytes, encoding: str) -> tuple[int, int]:
-        sample = payload[:8192].decode(encoding, errors="strict")
+        # Incremental decoding drops only a multi-byte sequence cut by the sample boundary; any
+        # genuinely undecodable byte still raises (the whole payload was already decoded strictly).
+        sample = codecs.getincrementaldecoder(encoding)(errors="strict").decode(payload[:8192], final=False)
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
         except csv.Error:
