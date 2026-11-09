@@ -106,6 +106,7 @@ class PdfIndependentVerifier:
         qpdf = shutil.which("qpdf")
         if not qpdf:
             return _blocked(source_hash, output_hash, "qpdf_unavailable")
+        qpdf = str(Path(qpdf).resolve())
         try:
             with tempfile.TemporaryDirectory(prefix="channel360-pdf-verify-") as temp_dir:
                 path = Path(temp_dir) / "candidate.pdf"
@@ -113,8 +114,9 @@ class PdfIndependentVerifier:
                 qcheck = subprocess.run([qpdf, "--check", str(path)], capture_output=True, timeout=15, check=False)
             if qcheck.returncode != 0:
                 return _blocked(source_hash, output_hash, "qpdf_check_failed")
-        except (OSError, subprocess.TimeoutExpired):
-            return _blocked(source_hash, output_hash, "qpdf_check_unavailable")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            suffix = "timeout" if isinstance(exc, subprocess.TimeoutExpired) else type(exc).__name__.lower()
+            return _blocked(source_hash, output_hash, f"qpdf_check_unavailable:{suffix}")
 
         try:
             old_reader, old_fields = _read_fields(source)

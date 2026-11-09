@@ -20,7 +20,7 @@ from packages.api.errors import APIError
 from packages.ingestion.pipeline import IngestionOrchestrator
 from packages.registry.documents import DocumentRepository, is_download_eligible
 from packages.storage.local import ImmutableLocalStorage, StoredFile
-from packages.workers.parser import ParserNotVerified
+from packages.workers.parser import ParserNotVerified, PdfVerificationWorkerUnavailable, RestrictedPdfVerifier
 from packages.core.models.contracts import TypedValue
 from packages.db.worker_context import ValidatedJobContext, worker_tenant_transaction
 from packages.workers.lifecycle import WorkerLifecycleRepository
@@ -146,7 +146,7 @@ def _presentation_capability(report: object) -> dict[str, object]:
     return dict(getattr(report, "capability"))
 
 
-def _release_workflow(adapter_name: str, *, docx_mode: str = "structural") -> NativeReleaseWorkflow:
+def _release_workflow(adapter_name: str, *, docx_mode: str = "structural", pdf_verifier=None) -> NativeReleaseWorkflow:
     if adapter_name == "csv":
         return NativeReleaseWorkflow(CsvAdapter(), CsvIndependentVerifier())
     if adapter_name == "json":
@@ -154,7 +154,7 @@ def _release_workflow(adapter_name: str, *, docx_mode: str = "structural") -> Na
     if adapter_name == "xlsx":
         return XlsxReleaseWorkflow()
     if adapter_name == "pdf":
-        return NativeReleaseWorkflow(PdfAdapter(), PdfIndependentVerifier())
+        return NativeReleaseWorkflow(PdfAdapter(), pdf_verifier or PdfIndependentVerifier())
     if adapter_name == "docx":
         return NativeReleaseWorkflow(DocxAdapter(), DocxIndependentVerifier(mode=docx_mode))
     raise APIError(415, "native_adapter_unsupported", "This document format does not support native editing.")
@@ -917,8 +917,14 @@ def release_edit_set(document_id: str, edit_set_id: str, request: Request,
         raise APIError(409, "frozen_plan_identity_mismatch", "The frozen plan is bound to a different edit set.")
     version, source = _source_version(request, identity, parsed_document, UUID(str(edit_set["base_version_id"])))
     docx_mode = request.app.state.settings.channel360_docx_verification_mode
-    workflow = _release_workflow(adapter_name, docx_mode=docx_mode)
-    result = workflow.release(source=source, edit_set=frozen, allow_incomplete=True)
+    workflow = _release_workflow(adapter_name, docx_mode=docx_mode,
+                                 pdf_verifier=RestrictedPdfVerifier(request.app.state.restricted_parser))
+    try:
+        result = workflow.release(source=source, edit_set=frozen, allow_incomplete=True)
+    except PdfVerificationWorkerUnavailable as error:
+        raise APIError(503, "pdf_verification_worker_unavailable",
+                       "Isolated PDF verification could not complete; the frozen edit set is available for retry.",
+                       details=[{"reason_code": error.reason_code}]) from None
     base_manifest: dict[str, object] = {
         "source_sha256": str(version["sha256"]), "adapter": adapter_name,
         "adapter_version": adapter_version, "edit_set_id": str(parsed_edit_set),
