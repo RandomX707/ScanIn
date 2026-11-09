@@ -57,6 +57,19 @@ def test_structural_summary_for_csv_uses_real_rows_and_recognized_headers():
     assert "1 data record across" in single["description"]
 
 
+def test_ragged_csv_summary_keeps_inspection_available():
+    for source in (b"claim_number,policy_number,insured_name\nC-1,P-1,Ada\nC-2,P-2\nC-3,P-3,Bea,extra\n",
+                   b"claim,insured\nC-1,Ada,extra\nC-2\n",
+                   b"claim,insured,unused\nC-1,Ada\n"):
+        result = inspect_bytes(source, filename="ragged.csv", include_targets=True,
+                               include_summary_evidence=True)
+        assert result["status"] == "inspected"
+        assert result["structural_summary"]["statistics"]["column_count"] == max(
+            len(line.split(b",")) for line in source.splitlines() if line)
+        assert result["structural_summary"]["limitations"]
+        assert result["targets"]
+
+
 def test_structural_summary_for_json_describes_shape_without_inventing_a_type():
     result = inspect_bytes(b'{"envelope":{"items":[{"reference":"X-1"}]},"enabled":true,"loss_amount":125.5}', filename="payload.json")
     summary = result["structural_summary"]

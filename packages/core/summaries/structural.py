@@ -66,12 +66,16 @@ class StructuralSummaryProvider:
             document = CsvAdapter()._parse(source)
             nonempty_rows = sum(1 for row in range(1, len(document.row_lengths) + 1)
                                 if any(cell.row == row and cell.value.strip() for cell in document.cells))
-            headers = [document.cell(1, col).value.strip() for col in range(1, max(document.row_lengths, default=0) + 1)]
+            width = max(document.row_lengths, default=0)
+            headers = [(cell.value.strip() if cell else "") for col in range(1, width + 1)
+                       for cell in (document.cell(1, col),)]
             has_header = bool(headers and any(not _looks_data_like(value) for value in headers))
             record_count = max(0, nonempty_rows - (1 if has_header else 0))
             record_word = "record" if record_count == 1 else "records"
-            stats = {"record_count": record_count, "column_count": len([name for name in headers if name])}
-            names = headers if has_header else [f"Column {index}" for index in range(1, max(document.row_lengths, default=0) + 1)]
+            stats = {"record_count": record_count, "column_count": width}
+            names = [(name or f"Column {index}") for index, name in enumerate(headers, 1)] if has_header else [f"Column {index}" for index in range(1, width + 1)]
+            if has_header and len(document.row_lengths) > 1 and any(length != document.row_lengths[0] for length in document.row_lengths[1:]):
+                limitations.append("Rows have different column counts; unnamed columns are labeled by position.")
             for index, name in enumerate(names, start=1):
                 if not name:
                     continue

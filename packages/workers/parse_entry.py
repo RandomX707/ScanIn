@@ -74,11 +74,13 @@ def _summary_evidence(data: bytes, adapter: str, details: dict[str, Any] | None,
     if adapter == "csv":
         document = source_adapter._parse(data)
         max_col = max(document.row_lengths, default=0)
-        headers = [document.cell(1, col).value.strip()[:400] for col in range(1, max_col + 1)]
+        headers = [(cell.value.strip()[:400] if cell else "") for col in range(1, max_col + 1)
+                   for cell in (document.cell(1, col),)]
         if headers:
             items.append({"id": "csv:header", "location": "CSV header", "text": " | ".join(headers)})
             for row in range(2, min(len(document.row_lengths), 8) + 1):
-                cells = [document.cell(row, col).value.strip()[:400] for col in range(1, max_col + 1)]
+                cells = [(cell.value.strip()[:400] if cell else "") for col in range(1, max_col + 1)
+                         for cell in (document.cell(row, col),)]
                 items.append({"id": f"csv:row:{row}", "location": f"CSV record {row - 1}",
                               "text": "; ".join(f"{headers[col - 1] or f'Column {col}'}: {value}"
                                                  for col, value in enumerate(cells, 1) if value)})
