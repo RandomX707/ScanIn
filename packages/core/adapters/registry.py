@@ -55,6 +55,14 @@ class AdapterRegistry:
             return self._unsupported("image", "image/gif", "read_only", "adapter_not_implemented", extension)
         if source.startswith(b"PK\x03\x04"):
             return self._inspect_zip(source, extension, max_expansion_ratio=max_expansion_ratio)
+        if source.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+            encrypted = "EncryptedPackage".encode("utf-16le") in source
+            if encrypted:
+                return self._unsupported("office", "application/x-ole-storage", "rejected",
+                                         "encrypted_office_package", extension)
+            if extension in {".doc", ".xls", ".ppt"}:
+                return self._unsupported("office", "application/x-ole-storage", "read_only",
+                                         "legacy_office_unsupported", extension)
 
         prefix = source.lstrip(b"\xef\xbb\xbf \t\r\n")
         if prefix.startswith((b"{", b"[")):

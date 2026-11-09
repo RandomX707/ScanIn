@@ -70,6 +70,20 @@ def test_ragged_csv_summary_keeps_inspection_available():
         assert result["targets"]
 
 
+def test_rejected_pdf_keeps_a_complete_inspection_envelope(tmp_path, monkeypatch, capsys):
+    from scripts.host.create_browser_fixtures import create_encrypted_pdf
+    from packages.workers.parse_entry import main
+    data = create_encrypted_pdf()
+    path = tmp_path / "encrypted.pdf"
+    path.write_bytes(data)
+    monkeypatch.setattr("sys.argv", ["parse_entry", "--input", str(path)])
+    assert main() == 0
+    result = __import__("json").loads(capsys.readouterr().out)
+    assert result["status"] == "rejected"
+    assert result["capability"]["reasons"] == ["encrypted_pdf"]
+    assert result["sha256"] == __import__("hashlib").sha256(data).hexdigest()
+
+
 def test_structural_summary_for_json_describes_shape_without_inventing_a_type():
     result = inspect_bytes(b'{"envelope":{"items":[{"reference":"X-1"}]},"enabled":true,"loss_amount":125.5}', filename="payload.json")
     summary = result["structural_summary"]

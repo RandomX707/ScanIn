@@ -14,9 +14,12 @@ from packages.core.adapters.registry import AdapterRegistry
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_TARGETS = 2000
 class ParserRejected(ValueError):
-    def __init__(self, reason_code: str):
+    def __init__(self, reason_code: str, selection=None, digest: str | None = None, size_bytes: int | None = None):
         super().__init__(reason_code)
         self.reason_code = reason_code
+        self.selection = selection
+        self.digest = digest
+        self.size_bytes = size_bytes
 
 
 def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int = 100,
@@ -29,7 +32,7 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
     profile = selection.profile
     if profile.level == "rejected":
         reason = profile.reasons[0] if profile.reasons else "invalid_document"
-        raise ParserRejected(reason)
+        raise ParserRejected(reason, selection, digest, len(data))
     supported = profile.adapter in {"xlsx", "csv", "json", "pdf", "docx"}
     source_adapter = ({"xlsx": registry.xlsx, "csv": registry.csv, "json": registry.json,
                        "pdf": registry.pdf, "docx": registry.docx}.get(profile.adapter) if supported else None)
@@ -232,7 +235,16 @@ def main() -> int:
         result = inspect_bytes(path.read_bytes(), filename=args.filename or path.name,
                                include_targets=args.targets, include_summary_evidence=args.summary_evidence)
     except ParserRejected as error:
-        result = {"status": "rejected", "reason": error.reason_code}
+        selection = error.selection
+        result = {"status": "rejected", "reason": error.reason_code,
+                  "sha256": error.digest, "size_bytes": error.size_bytes,
+                  "media_type": selection.media_type if selection else "application/octet-stream",
+                  "capability": {"level": "rejected", "reasons": [error.reason_code]},
+                  "adapter": selection.profile.adapter if selection else None,
+                  "adapter_version": selection.profile.adapter_version if selection else None,
+                  "sheets": [], "features": [],
+                  "findings": list(selection.findings) if selection else [],
+                  "score": selection.score if selection else 0.0}
     except (OSError, ValueError):
         result = {"status": "rejected", "reason": "parser_input_unavailable"}
     sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False))
