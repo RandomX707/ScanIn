@@ -34,7 +34,8 @@ for (const [name, steps] of Object.entries(scenarios)) {
       await page.goto(url);
       await page.waitForTimeout(900);
       for (const [kind, a] of steps) {
-        if (kind === "click") await page.locator(a).first().click();
+        // "Try demo" is hidden on narrow screens in both the prototype and the app; dispatch the click there.
+        if (kind === "click") { const l = page.locator(a).first(); if (await l.isVisible()) await l.click(); else await l.dispatchEvent("click"); }
         else await page.waitForTimeout(a);
       }
       await page.waitForTimeout(700);

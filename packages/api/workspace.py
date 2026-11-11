@@ -176,7 +176,10 @@ def open_demo(request: Request, identity: AuthenticatedIdentity = Depends(requir
     """Open the Meridian Group Coverage Agreement sample (created once per tenant) with its v2 and v3."""
     opened = _open_sample(request, identity, DEMO_FILENAME, SAMPLES_DIR / DEMO_FILENAME)
     _ensure_demo_versions(request, identity, str(opened["document_id"]))
-    return {"document_id": opened["document_id"], "version_id": opened["version_id"], "created": opened["created"]}
+    folder = next(f for f in list_folder_payloads(request, identity) if f["document_id"] == opened["document_id"])
+    # Like the prototype, the demo opens on the original (v1); v2 and v3 are in the folder strip.
+    return {"document_id": opened["document_id"], "version_id": folder["versions"][0]["version_id"],  # type: ignore[index]
+            "created": opened["created"]}
 
 
 @router.post("/documents/{document_id}/versions/{version_id}/save")
