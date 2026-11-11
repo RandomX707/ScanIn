@@ -17,6 +17,7 @@ from packages.api.auth import AuthenticatedIdentity, require_identity
 from packages.api.db_context import api_tenant_transaction
 from packages.api.documents import _filename, _source_version, ingest_stream, inspect_document
 from packages.api.errors import APIError
+from packages.api.save_flow import SaveRequest, json_value_changes, save_native, save_text, suffix_of, _guard_latest
 from packages.core import extraction
 from packages.core.chunking import chunkify
 from packages.registry.documents import DocumentRepository
@@ -153,10 +154,66 @@ def open_sample(key: str, request: Request,
     return _open_sample(request, identity, name, SAMPLES_DIR / name)
 
 
+DEMO_EDITS = (("within 60 calendar days", "within 45 calendar days", "INR 8,000", "INR 9,000"),
+              ("within 45 calendar days", "within 40 calendar days", "INR 9,000", "INR 10,000"))
+
+
+def _ensure_demo_versions(request: Request, identity: AuthenticatedIdentity, document_id: str) -> None:
+    """The demo folder carries v2 and v3 so the version timeline can be explored immediately."""
+    parsed = UUID(document_id)
+    for index, (old_days, new_days, old_cap, new_cap) in enumerate(DEMO_EDITS, start=2):
+        folder = next((f for f in list_folder_payloads(request, identity) if f["document_id"] == document_id), None)
+        if folder is None or len(folder["versions"]) >= index:  # type: ignore[arg-type]
+            continue
+        latest = UUID(str(folder["latest_version_id"]))
+        _version, source = _source_version(request, identity, parsed, latest)
+        text = source.decode("utf-8").replace(old_days, new_days).replace(old_cap, new_cap)
+        save_text(request, identity, parsed, latest, text, ".md")
+
+
 @router.post("/demo")
 def open_demo(request: Request, identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    """Open the Meridian Group Coverage Agreement sample (created once per tenant)."""
-    return _open_sample(request, identity, DEMO_FILENAME, SAMPLES_DIR / DEMO_FILENAME)
+    """Open the Meridian Group Coverage Agreement sample (created once per tenant) with its v2 and v3."""
+    opened = _open_sample(request, identity, DEMO_FILENAME, SAMPLES_DIR / DEMO_FILENAME)
+    _ensure_demo_versions(request, identity, str(opened["document_id"]))
+    return {"document_id": opened["document_id"], "version_id": opened["version_id"], "created": opened["created"]}
+
+
+@router.post("/documents/{document_id}/versions/{version_id}/save")
+def save_version(document_id: str, version_id: str, payload: SaveRequest, request: Request,
+                 identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
+    """Save the edited values as the next version, in the same format as the original, in one call."""
+    try:
+        parsed_document, parsed_version = UUID(document_id), UUID(version_id)
+    except ValueError:
+        raise APIError(404, "not_found", "The requested version was not found.") from None
+    _guard_latest(request, identity, parsed_document, parsed_version)
+    with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
+        original = DocumentRepository(connection, identity.tenant_id).get_original(parsed_document)
+    if original is None:
+        raise APIError(404, "not_found", "The requested document was not found.")
+    suffix = suffix_of(str(original["filename"]))
+    if suffix in extraction.TEXT_EXTENSIONS:
+        if payload.text is None:
+            raise APIError(422, "text_required", "Nothing changed, so there is no new version to save.")
+        result = save_text(request, identity, parsed_document, parsed_version, payload.text, suffix)
+    elif suffix == ".json":
+        changes = payload.changes or (json_value_changes(request, identity, parsed_document, parsed_version, payload.text)
+                                      if payload.text is not None else None)
+        if changes:
+            result = save_native(request, identity, parsed_document, parsed_version, changes)
+        elif payload.text is not None:
+            result = save_text(request, identity, parsed_document, parsed_version, payload.text, suffix)
+        else:
+            raise APIError(422, "patch_set_empty", "Nothing changed, so there is no new version to save.")
+    elif suffix in {".csv", ".xlsx", ".docx", ".pdf"}:
+        result = save_native(request, identity, parsed_document, parsed_version, payload.changes)
+    else:
+        raise APIError(415, "native_adapter_unsupported", "This file type can't be edited.")
+    folder = next((f for f in list_folder_payloads(request, identity) if f["document_id"] == document_id), None)
+    version = next((v for v in folder["versions"] if v["version_id"] == str(result["version_id"])), None) if folder else None  # type: ignore[union-attr]
+    request.app.state.__dict__.get("chunk_text_cache", {}).clear()
+    return {**result, "version": version}
 
 
 def _version_text(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID) -> str:
@@ -309,7 +366,7 @@ def _grid(targets: list[dict[str, object]], sheets: list[str]) -> list[dict[str,
             continue
         value = (target.get("value") or {})
         raw = value.get("value")
-        by_sheet.setdefault(str(target["sheet"]), {})[(row, column)] = {
+        by_sheet.setdefault(str(target["sheet"]) or sheets[0], {})[(row, column)] = {
             "v": "" if raw is None else (str(raw).lower() if isinstance(raw, bool) else str(raw)),
             "t": value.get("type"), "id": target["id"], "fp": target["fingerprint"],
             "e": bool(target.get("editable")),

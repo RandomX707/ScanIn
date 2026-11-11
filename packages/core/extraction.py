@@ -103,6 +103,10 @@ def docx_text(details: dict[str, Any]) -> str:
 
 
 def _column_number(cell: str) -> tuple[int, int]:
+    """(row, column) of an A1 reference or of the CSV adapter's ``row,column`` form."""
+    pair = re.fullmatch(r"(\d+),(\d+)", cell)
+    if pair:
+        return int(pair.group(1)), int(pair.group(2))
     match = re.fullmatch(r"([A-Za-z]+)(\d+)", cell)
     if not match:
         return 0, 0

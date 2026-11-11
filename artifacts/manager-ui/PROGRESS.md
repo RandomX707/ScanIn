@@ -5,4 +5,6 @@ Environment note: clamd was not running (stale socket); started /opt/homebrew/sb
 
 - M1 done: Prototype CSS and layout shell (commit 907f443)
 - Push blocked: no GitHub credentials in this environment (git push fails with 'Invalid username or token'; gh not logged in). Commits are local on feat/manager-ui; run `git push -u origin feat/manager-ui` after `gh auth login`.
-- M2 done: Workspace (Original, Chunks, map, pulse), /chunks and /preview endpoints (commit M2HASH)
+- M2 done: Workspace (Original, Chunks, map, pulse), /chunks and /preview endpoints (commit ed3959f)
+- M3 done: POST /versions/{v}/save one-call flow, same-format text writer, demo v2/v3 (commit M3HASH)
+- M4 in progress: Edits tab per format

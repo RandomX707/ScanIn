@@ -203,6 +203,48 @@ class DocumentRepository:
         append_event(connection=self.connection, actor_id=actor_id, action="document.category_classified",
                      subject=str(document_id), payload={"category": category})
 
+    def authorize_owner_upload(self, document_id: UUID, *, actor_id: str) -> None:
+        """Single-owner mode: the owner's own upload is authorised for document corrections.
+
+        File-level safety (signed, encrypted, protected, macro and tracked-change files) is enforced by the
+        adapters and verifiers, not by this category.
+        """
+        changed = self.connection.execute(text("""UPDATE documents SET document_category='insurer-authored'
+            WHERE tenant_id=:tenant AND id=:document AND document_category<>'insurer-authored' RETURNING id"""),
+            {"tenant": self.tenant_id, "document": document_id}).scalar_one_or_none()
+        if changed is not None:
+            append_event(connection=self.connection, actor_id=actor_id, action="document.owner_upload_authorized",
+                         subject=str(document_id), payload={"mode": "single_owner"})
+
+    def commit_text_version(self, *, document_id: UUID, base_version_id: UUID, stored: StoredFile,
+                            media_type: str, actor_id: str, details: dict[str, object]) -> UUID:
+        """Attach a same-format text version (no native adapter path) with a parent link and SHA-256."""
+        if stored.tenant_id != self.tenant_id or stored.document_id != document_id:
+            raise PermissionError("stored file does not match the document")
+        current = self.connection.execute(text("""SELECT current_version_id FROM documents
+            WHERE tenant_id=:tenant AND id=:document AND ingestion_state='ready' FOR UPDATE"""),
+            {"tenant": self.tenant_id, "document": document_id}).scalar_one_or_none()
+        if current is None or current != base_version_id:
+            raise ValueError("stale_base_version")
+        file_id, version_id = uuid4(), uuid4()
+        self.connection.execute(text("""INSERT INTO files
+            (id,tenant_id,sha256,size_bytes,mime,storage_key,file_role)
+            VALUES (:id,:tenant,:sha256,:size,:mime,:key,'derived')"""),
+            {"id": file_id, "tenant": self.tenant_id, "sha256": stored.sha256,
+             "size": stored.size_bytes, "mime": media_type, "key": stored.key})
+        self.connection.execute(text("""INSERT INTO document_versions
+            (id,tenant_id,document_id,parent_version_id,file_id,kind,sha256)
+            VALUES (:id,:tenant,:document,:parent,:file,'derived',:sha256)"""),
+            {"id": version_id, "tenant": self.tenant_id, "document": document_id,
+             "parent": base_version_id, "file": file_id, "sha256": stored.sha256})
+        self.connection.execute(text("""UPDATE documents SET current_version_id=:version
+            WHERE tenant_id=:tenant AND id=:document AND current_version_id=:base"""),
+            {"version": version_id, "tenant": self.tenant_id, "document": document_id, "base": base_version_id})
+        append_event(connection=self.connection, actor_id=actor_id, action="document.text_version_saved",
+                     subject=str(document_id), payload={"version_id": str(version_id), "parent_version_id": str(base_version_id),
+                                                         "output_sha256": stored.sha256, **details})
+        return version_id
+
     def create_edit_set(self, *, edit_set_id: UUID, document_id: UUID, base_version_id: UUID,
                         category: str, actor_id: str, reason: str) -> None:
         result = self.connection.execute(text("""INSERT INTO edit_sets
