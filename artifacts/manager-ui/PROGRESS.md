@@ -7,5 +7,6 @@ Environment note: clamd was not running (stale socket); started /opt/homebrew/sb
 - Push blocked: no GitHub credentials in this environment (git push fails with 'Invalid username or token'; gh not logged in). Commits are local on feat/manager-ui; run `git push -u origin feat/manager-ui` after `gh auth login`.
 - M2 done: Workspace (Original, Chunks, map, pulse), /chunks and /preview endpoints (commit ed3959f)
 - M3 done: POST /versions/{v}/save one-call flow, same-format text writer, demo v2/v3 (commit a40efe0)
-- M4 done: Edits tab per format (text, CSV/XLSX grid, DOCX, PDF forms, read-only states); 18 Playwright flows pass (commit M4HASH)
-- M5 in progress: UI removals and single-owner simplification
+- M4 done: Edits tab per format (text, CSV/XLSX grid, DOCX, PDF forms, read-only states); 18 Playwright flows pass (commit dc06416)
+- M5 done: classification, drafts, patches, preflight, release, sidecars, capability panels, audit, AI, identity and paging controls are absent from the UI (grep-verified); backend routes/tables untouched; owner uploads authorised server-side in the save flow (commit M5HASH)
+- M6 in progress: visual comparison, README status
