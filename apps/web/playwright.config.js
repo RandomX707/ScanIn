@@ -5,6 +5,8 @@ export default defineConfig({
   timeout: 120_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
+  workers: 1,
+  globalSetup: './e2e/global-setup.js',
   retries: 0,
   reporter: [['list'], ['junit', { outputFile: '../../artifacts/host-integration/browser-results.xml' }]],
   use: {

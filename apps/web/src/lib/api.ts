@@ -3,7 +3,7 @@ const SESSION_KEY = "channel360.demo.session";
 
 export type FolderVersion = {
   version_id: string; number: number; kind: "original" | "derived"; name: string; created_at: string;
-  size_bytes: number; parent_number: number | null; status: string;
+  size_bytes: number; parent_number: number | null; status: string; outcome: string | null;
 };
 export type Folder = {
   document_id: string; name: string; created_at: string; latest_version_id: string; demo: boolean; versions: FolderVersion[];
@@ -104,12 +104,12 @@ export type PdfField = { id: string; name: string; type: string; value: unknown;
 export type Preview = {
   name: string; is_latest: boolean; size_bytes: number; format: string;
   edit: { mode: "text" | "grid" | "docx" | "pdf" | "none"; reason: string | null };
-  text?: string; encoding?: string; kind?: string; sheets?: Sheet[]; blocks?: DocxBlock[]; slides?: string[][];
+  text?: string; html?: string | null; encoding?: string; kind?: string; sheets?: Sheet[]; blocks?: DocxBlock[]; slides?: string[][];
   pages?: { page: number; width: number; height: number; scanned: boolean }[]; fields?: PdfField[]; text_available?: boolean;
 };
 export const getPreview = (documentId: string, versionId: string) => json<Preview>(`/api/documents/${documentId}/versions/${versionId}/preview`);
 
-export type SaveBody = { changes?: { target_id: string; fingerprint: string; value: string | boolean }[]; text?: string };
+export type SaveBody = { html?: string; changes?: { target_id: string; fingerprint: string; value: string | boolean }[]; text?: string };
 export type SaveResult = { version_id: string; outcome: string; note: string | null; version: FolderVersion | null };
 export const saveVersion = (documentId: string, versionId: string, body: SaveBody) =>
   json<SaveResult>(`/api/documents/${documentId}/versions/${versionId}/save`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });

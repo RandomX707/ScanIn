@@ -63,7 +63,7 @@ PLAIN = {
     "empty_document": "The edited document is empty. Add some content before saving.",
     "invalid_json": "This isn't valid JSON yet. Fix it and save again.",
     "invalid_xml": "This isn't well-formed XML yet. Fix it and save again.",
-    "not_latest": "Open the latest version to make changes.",
+    "formatting_not_preserved": "This edit couldn't be saved without changing other text, so nothing was saved. Your edits are still here.",
     "text_too_large": "This text is too large to save.",
 }
 GENERIC = "This change couldn't be saved safely. Your edits are still here."
@@ -91,6 +91,7 @@ class SaveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     changes: list[SaveChange] = Field(default_factory=list, max_length=500)
     text: str | None = Field(default=None, max_length=extraction.MAX_TEXT_BYTES)
+    html: str | None = Field(default=None, max_length=extraction.MAX_TEXT_BYTES)  # formatted Markdown/HTML edits
 
 
 class SaveRejected(APIError):
@@ -128,15 +129,16 @@ def _coerce(old_type: str, raw: Any) -> dict[str, Any]:
     raise SaveRejected("type_mismatch")
 
 
-def _guard_latest(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID) -> None:
+def _guard_ready(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID) -> None:
+    """Any version of a ready document may be edited; the save becomes the next (latest) version."""
     with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
-        document = DocumentRepository(connection, identity.tenant_id).get(document_id)
-    if document is None:
+        repo = DocumentRepository(connection, identity.tenant_id)
+        document = repo.get(document_id)
+        version = repo.get_version(document_id, version_id) if document else None
+    if document is None or version is None:
         raise APIError(404, "not_found", "The requested document was not found.")
     if document["ingestion_state"] != "ready":
         raise APIError(409, "document_not_ready", "The document is not ready for editing.")
-    if str(document["current_version_id"]) != str(version_id):
-        raise SaveRejected("not_latest", status=409)
 
 
 def save_native(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID,
@@ -167,6 +169,9 @@ def save_native(request: Request, identity: AuthenticatedIdentity, document_id: 
                                   new_value=_coerce(str(target["value"]["type"]), change.value)))
     with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
         DocumentRepository(connection, identity.tenant_id).authorize_owner_upload(document_id, actor_id=identity.subject)
+    # Edit from the opened version, whatever its position; the verified engine checks every precondition against it.
+    request.state.edit_any_version = True
+    request.state.edit_base_version_id = version_id
     try:
         draft = create_edit_set_draft(str(document_id), EditSetDraftRequest(reason="Saved from the workspace"), request, identity)
         edit_set_id = str(draft["edit_set_id"])
@@ -265,7 +270,9 @@ def save_text(request: Request, identity: AuthenticatedIdentity, document_id: UU
         raise SaveRejected("stale_base_version", status=409) from None
     except (SQLAlchemyError, RuntimeError, PermissionError):
         raise APIError(503, "save_unavailable", "Saving is unavailable right now. Try again in a moment.") from None
-    return {"version_id": str(new_version), "outcome": "VERIFIED", "note": None}
+    # Honest outcome: the text was decoded in the original encoding, parsed where it has a grammar and scanned,
+    # but no independent native verifier exists for these formats, so it is SAVED rather than VERIFIED.
+    return {"version_id": str(new_version), "outcome": "SAVED", "note": None}
 
 
 def _pointer_leaves(value: Any, pointer: str = "") -> dict[str, Any]:
@@ -324,3 +331,18 @@ def json_value_changes(request: Request, identity: AuthenticatedIdentity, docume
 
 def suffix_of(name: str) -> str:
     return PurePosixPath(name).suffix.lower()
+
+
+def save_rich(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID,
+              edited_html: str, suffix: str) -> dict[str, Any]:
+    """Serialise formatted edits back to Markdown/HTML, proving untouched blocks render the same text."""
+    from packages.core import richtext
+    _version, source = _source_version(request, identity, document_id, version_id)
+    original, _encoding = extraction.decode_text(source)
+    fmt = "md" if suffix in {".md", ".markdown"} else "html"
+    try:
+        new_text = richtext.serialise(fmt, original, edited_html)
+        richtext.check_untouched_unchanged(fmt, original, new_text, edited_html)
+    except richtext.RichTextRejected as error:
+        raise SaveRejected(error.code, status=422) from None
+    return save_text(request, identity, document_id, version_id, new_text, suffix)

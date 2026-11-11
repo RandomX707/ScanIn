@@ -97,6 +97,11 @@ class PatchBatchRequest(BaseModel):
     patches: list[PatchInput] = Field(min_length=1, max_length=200)
 
 
+def _any_version(request: Request) -> bool:
+    """Single-owner save flow: edits may start from any version of the document (set only by that flow)."""
+    return bool(getattr(request.state, "edit_any_version", False))
+
+
 def _require_owner(identity: AuthenticatedIdentity) -> None:
     if identity.role != "OWNER":
         raise APIError(403, "owner_required", "An authenticated owner identity is required.")
@@ -783,14 +788,15 @@ def create_edit_set_draft(document_id: str, payload: EditSetDraftRequest, reques
             if document["ingestion_state"] != "ready" or document["current_version_id"] is None:
                 raise APIError(409, "document_not_ready", "Safe inspection must finish before creating edits.")
             repo.create_edit_set(edit_set_id=edit_set_id, document_id=parsed_id,
-                base_version_id=UUID(str(document["current_version_id"])), category=str(document["document_category"]),
-                actor_id=identity.subject, reason=payload.reason)
+                base_version_id=UUID(str(getattr(request.state, "edit_base_version_id", None) or document["current_version_id"])),
+                category=str(document["document_category"]), actor_id=identity.subject, reason=payload.reason,
+                allow_non_current=_any_version(request))
     except (SQLAlchemyError, RuntimeError, PermissionError):
         raise APIError(503, "edit_set_unavailable", "The edit draft could not be created.") from None
     except ValueError as error:
         raise APIError(409, str(error), "The document version or authorization changed.") from None
     return {"edit_set_id": str(edit_set_id), "document_id": str(parsed_id),
-            "status": "draft", "base_version_id": str(document["current_version_id"]),
+            "status": "draft", "base_version_id": str(getattr(request.state, "edit_base_version_id", None) or document["current_version_id"]),
             "authorized_category": document["document_category"], "reason": payload.reason.strip()}
 
 
@@ -843,7 +849,7 @@ def add_edit_set_patches(document_id: str, edit_set_id: str, payload: PatchBatch
         if edit_set["status"] != "draft" or edit_set["created_by"] != identity.subject:
             raise APIError(409, "edit_set_not_editable", "Only the author can change an open draft.")
         base_version_id = UUID(str(edit_set["base_version_id"]))
-        if str(edit_set["current_version_id"]) != str(base_version_id):
+        if str(edit_set["current_version_id"]) != str(base_version_id) and not _any_version(request):
             raise APIError(409, "stale_base_version", "The document changed; rebase the draft before continuing.")
     version, source = _source_version(request, identity, parsed_id, base_version_id)
     try:
@@ -873,7 +879,7 @@ def add_edit_set_patches(document_id: str, edit_set_id: str, payload: PatchBatch
             current = repo.get_edit_set(parsed_edit_id)
             if current is None or current["status"] != "draft" or current["created_by"] != identity.subject:
                 raise APIError(409, "edit_set_not_editable", "The edit draft changed while targets were being resolved.")
-            if str(current["current_version_id"]) != str(base_version_id):
+            if str(current["current_version_id"]) != str(base_version_id) and not _any_version(request):
                 raise APIError(409, "stale_base_version", "The document changed while targets were being resolved.")
             repo.add_patches(parsed_edit_id, planned, actor_id=identity.subject)
     except APIError:
@@ -903,7 +909,7 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
         if edit_set["authorized_category"] != "insurer-authored" or edit_set["document_category"] != "insurer-authored":
             raise APIError(403, "document_category_not_authorized", "The document is not authorized for native correction.")
         base_version_id = UUID(str(edit_set["base_version_id"]))
-        if str(edit_set["current_version_id"]) != str(base_version_id):
+        if str(edit_set["current_version_id"]) != str(base_version_id) and not _any_version(request):
             raise APIError(409, "stale_base_version", "Rebase the draft against the current version first.")
         stored_patches = repo.list_patches(parsed_edit_id)
     if not stored_patches:
@@ -956,7 +962,7 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
         with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
             repo = DocumentRepository(connection, identity.tenant_id)
             current = repo.get_edit_set(parsed_edit_id)
-            if current is None or current["status"] != "draft" or str(current["current_version_id"]) != str(base_version_id):
+            if current is None or current["status"] != "draft" or (str(current["current_version_id"]) != str(base_version_id) and not _any_version(request)):
                 raise APIError(409, "stale_base_version", "The edit draft changed during preflight.")
             repo.freeze_edit_set(parsed_edit_id, frozen_hash=frozen.frozen_sha256,
                                  plan=plan_payload, adapter=str(report.adapter),
@@ -1097,7 +1103,7 @@ def _release_edit_set_claimed(parsed_document: UUID, parsed_edit_set: UUID, requ
                         }), "idempotent": True}
         if edit_set["status"] != "ready_for_release":
             raise APIError(409, "edit_set_not_ready_for_release", "Preflight and freeze this edit set before release.")
-        if str(edit_set["current_version_id"]) != str(edit_set["base_version_id"]):
+        if str(edit_set["current_version_id"]) != str(edit_set["base_version_id"]) and not _any_version(request):
             raise APIError(409, "stale_base_version", "The document changed after this edit set was created.")
         frozen_payload = edit_set.get("patch_plan")
         adapter_name = str(edit_set.get("adapter") or "")
@@ -1178,7 +1184,7 @@ def _release_edit_set_claimed(parsed_document: UUID, parsed_edit_set: UUID, requ
             new_version = DocumentRepository(connection, identity.tenant_id).commit_derived_release(
                 edit_set_id=parsed_edit_set, stored=stored, outcome=outcome,
                 adapter=adapter_name, adapter_version=adapter_version,
-                manifest=base_manifest, actor_id=identity.subject)
+                manifest=base_manifest, actor_id=identity.subject, allow_non_current=_any_version(request))
     except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
         # The content-addressed object remains private and is harmlessly reusable on retry.
         raise APIError(409, "release_commit_failed", "The verified candidate was not registered; retry after checking the document version.") from None

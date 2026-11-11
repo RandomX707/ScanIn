@@ -17,7 +17,7 @@ from packages.api.auth import AuthenticatedIdentity, require_identity
 from packages.api.db_context import api_tenant_transaction
 from packages.api.documents import _filename, _source_version, ingest_stream, inspect_document
 from packages.api.errors import APIError
-from packages.api.save_flow import SaveRequest, json_value_changes, save_native, save_text, suffix_of, _guard_latest
+from packages.api.save_flow import SaveRequest, json_value_changes, save_native, save_rich, save_text, suffix_of, _guard_ready
 from packages.core import extraction
 from packages.core.chunking import chunkify
 from packages.registry.documents import DocumentRepository
@@ -80,6 +80,8 @@ def _folder_payload(folder: dict[str, object]) -> dict[str, object]:
             "size_bytes": int(item["size_bytes"]),
             "parent_number": numbers.get(str(item["parent_version_id"])) if item["parent_version_id"] else None,
             "status": "Parsed" if item["kind"] == "original" else "Saved",
+            # VERIFIED / STRUCTURALLY_VERIFIED / INCOMPLETE come from the verifier; text-writer versions are SAVED.
+            "outcome": None if item["kind"] == "original" else (item.get("verification_outcome") or "SAVED"),
         } for index, item in enumerate(versions)],
     }
 
@@ -190,13 +192,15 @@ def save_version(document_id: str, version_id: str, payload: SaveRequest, reques
         parsed_document, parsed_version = UUID(document_id), UUID(version_id)
     except ValueError:
         raise APIError(404, "not_found", "The requested version was not found.") from None
-    _guard_latest(request, identity, parsed_document, parsed_version)
+    _guard_ready(request, identity, parsed_document, parsed_version)
     with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
         original = DocumentRepository(connection, identity.tenant_id).get_original(parsed_document)
     if original is None:
         raise APIError(404, "not_found", "The requested document was not found.")
     suffix = suffix_of(str(original["filename"]))
-    if suffix in extraction.TEXT_EXTENSIONS:
+    if suffix in {".md", ".markdown", ".html", ".htm"} and payload.html is not None:
+        result = save_rich(request, identity, parsed_document, parsed_version, payload.html, suffix)
+    elif suffix in extraction.TEXT_EXTENSIONS:
         if payload.text is None:
             raise APIError(422, "text_required", "Nothing changed, so there is no new version to save.")
         result = save_text(request, identity, parsed_document, parsed_version, payload.text, suffix)
@@ -409,8 +413,6 @@ def version_preview(document_id: str, version_id: str, request: Request,
     model: dict[str, object] = {"name": name, "is_latest": is_latest, "size_bytes": len(source)}
 
     def done(format_: str, mode: str, reason: str | None = None, **extra: object) -> dict[str, object]:
-        if mode != "none" and not is_latest:
-            mode, reason = "none", "Open the latest version to make changes."
         return {**model, "format": format_, "edit": {"mode": mode, "reason": reason}, **extra}
 
     try:
@@ -419,7 +421,10 @@ def version_preview(document_id: str, version_id: str, request: Request,
                 return done("text", "none", "This file is too large to edit here.")
             text, encoding = extraction.decode_text(source)
             kind = {".md": "md", ".markdown": "md", ".html": "html", ".htm": "html", ".xml": "xml", ".json": "json"}.get(suffix, "txt")
-            return done("text", "text", None, text=text, encoding=encoding, kind=kind)
+            from packages.core import richtext
+            rendered = (richtext.render_markdown(text) if kind == "md"
+                        else richtext.render_html_document(text) if kind == "html" else None)
+            return done("text", "text", None, text=text, encoding=encoding, kind=kind, html=rendered)
         if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
             return done("image", "none", file_reason([], suffix))
         if suffix == ".pptx":

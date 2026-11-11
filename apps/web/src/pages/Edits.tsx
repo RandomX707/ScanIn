@@ -4,7 +4,7 @@ import {
   ApiError, fetchVersionFile, folderName, getPreview, saveVersion, typeLabel,
   type Chunks, type FolderVersion, type Preview, type SaveBody,
 } from "../lib/api";
-import { DocxEditor, GridEditor, PdfEditor, TextEditor } from "./editors";
+import { DocxEditor, GridEditor, PdfEditor, RichEditor, TextEditor } from "./editors";
 
 export type EditsProps = {
   documentId: string; folderName: string; version: FolderVersion; family: FolderVersion[]; chunksText: Chunks | null;
@@ -75,12 +75,12 @@ export function EditsTab(props: EditsProps) {
     return (
       <>
         {head}
-        <div className="empty"><h3>No editable text available</h3><p>{preview.edit.reason}</p></div>
+        <div className="empty"><h3>{preview.edit.reason}</h3></div>
       </>
     );
   }
   const kind = preview.kind ?? "";
-  const formatting = mode === "text" && (kind === "md" || kind === "html");
+  const rich = mode === "text" && (kind === "md" || kind === "html") && preview.html != null;
   return (
     <>
       {head}
@@ -88,7 +88,8 @@ export function EditsTab(props: EditsProps) {
         <div><strong><Icon name="edit" size={15} /> Working document</strong><div><span>{DESCRIPTION[mode]}</span></div></div>
         <span id="edit-state">{dirty ? "Unsaved changes" : "No changes yet"}</span>
       </div>
-      {mode === "text" && <TextEditor key={resetKey} preview={preview} formatting={formatting} onBody={onBody} onReset={reset} />}
+      {rich && <RichEditor key={resetKey} preview={preview} onBody={onBody} onReset={reset} />}
+      {mode === "text" && !rich && <TextEditor key={resetKey} preview={preview} formatting={false} onBody={onBody} onReset={reset} />}
       {mode === "grid" && <GridEditor key={resetKey} preview={preview} onBody={onBody} />}
       {mode === "docx" && <DocxEditor key={resetKey} preview={preview} onBody={onBody} />}
       {mode === "pdf" && <PdfEditor key={resetKey} preview={preview} fetchBytes={async () => (await fetchVersionFile(documentId, version.version_id)).arrayBuffer()} onBody={onBody} />}

@@ -254,3 +254,45 @@ function PdfPage({ pdf, lib, page, fields, current, onChange, changed }: {
     </div>
   );
 }
+
+
+/* ------------------------------------------------------------------------------------------------ rendered Markdown / HTML */
+
+export function RichEditor({ preview, onBody, onReset }: { preview: Preview; onBody: OnBody; onReset: () => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  const initial = useRef("");
+  useEffect(() => {
+    if (!box.current) return;
+    box.current.innerHTML = preview.html ?? "<p></p>";
+    initial.current = box.current.innerHTML;
+  }, [preview.html]);
+  const run = (command: string, value?: string) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    box.current?.focus();
+    document.execCommand(command, false, value);
+    changed();
+  };
+  const changed = () => {
+    const html = box.current?.innerHTML ?? "";
+    onBody(html !== initial.current ? { html } : null);
+  };
+  return (
+    <>
+      <div className="editor-toolbar" role="toolbar" aria-label="Editor formatting">
+        <button className="tool-button" onMouseDown={run("bold")} title="Bold"><b>B</b></button>
+        <button className="tool-button" onMouseDown={run("italic")} title="Italic"><i>I</i></button>
+        <button className="tool-button" onMouseDown={run("underline")} title="Underline"><u>U</u></button>
+        <span className="toolbar-sep" />
+        <button className="tool-button" onMouseDown={run("formatBlock", "h2")} title="Heading">H2</button>
+        <button className="tool-button" onMouseDown={run("formatBlock", "p")} title="Paragraph">¶</button>
+        <button className="tool-button" onMouseDown={run("insertUnorderedList")} title="Bulleted list">☷</button>
+        <span className="toolbar-sep" />
+        <button className="tool-button" onMouseDown={run("undo")} title="Undo">↶</button>
+        <button className="tool-button" onMouseDown={run("redo")} title="Redo">↷</button>
+        <button className="tool-button" onClick={onReset} title="Restore starting version">↺</button>
+      </div>
+      <div ref={box} className="editable" contentEditable suppressContentEditableWarning role="textbox" aria-multiline="true"
+        aria-label="Editable working copy" spellCheck onInput={changed} />
+    </>
+  );
+}

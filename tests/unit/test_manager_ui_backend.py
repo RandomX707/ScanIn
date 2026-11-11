@@ -95,3 +95,16 @@ def test_plain_sentences_for_reason_codes():
 
 def test_samples_directory_is_packaged():
     assert Path(SAMPLES_DIR).is_dir()
+
+
+def test_text_versions_report_saved_not_verified():
+    from datetime import datetime, timezone
+    from packages.api.workspace import _folder_payload
+    now = datetime.now(timezone.utc)
+    v = lambda i, kind, parent, outcome=None: {"version_id": f"v{i}", "kind": kind, "created_at": now, "size_bytes": 1,
+                                               "parent_version_id": parent, "verification_outcome": outcome}
+    folder = {"id": "d", "filename": "a.md", "created_at": now,
+              "versions": [v(1, "original", None), v(2, "derived", "v1"), v(3, "derived", "v1", "VERIFIED")]}
+    payload = _folder_payload(folder)["versions"]
+    assert [x["outcome"] for x in payload] == [None, "SAVED", "VERIFIED"]
+    assert payload[2]["parent_number"] == 1 and payload[2]["number"] == 3  # edits from v1 derive from v1

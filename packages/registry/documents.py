@@ -218,13 +218,17 @@ class DocumentRepository:
 
     def commit_text_version(self, *, document_id: UUID, base_version_id: UUID, stored: StoredFile,
                             media_type: str, actor_id: str, details: dict[str, object]) -> UUID:
+        """Locks the document row, so concurrent saves are serialised; any existing version may be the parent."""
         """Attach a same-format text version (no native adapter path) with a parent link and SHA-256."""
         if stored.tenant_id != self.tenant_id or stored.document_id != document_id:
             raise PermissionError("stored file does not match the document")
         current = self.connection.execute(text("""SELECT current_version_id FROM documents
             WHERE tenant_id=:tenant AND id=:document AND ingestion_state='ready' FOR UPDATE"""),
             {"tenant": self.tenant_id, "document": document_id}).scalar_one_or_none()
-        if current is None or current != base_version_id:
+        parent_exists = self.connection.execute(text("""SELECT 1 FROM document_versions
+            WHERE tenant_id=:tenant AND document_id=:document AND id=:version"""),
+            {"tenant": self.tenant_id, "document": document_id, "version": base_version_id}).scalar_one_or_none()
+        if current is None or parent_exists is None:
             raise ValueError("stale_base_version")
         file_id, version_id = uuid4(), uuid4()
         self.connection.execute(text("""INSERT INTO files
@@ -233,25 +237,28 @@ class DocumentRepository:
             {"id": file_id, "tenant": self.tenant_id, "sha256": stored.sha256,
              "size": stored.size_bytes, "mime": media_type, "key": stored.key})
         self.connection.execute(text("""INSERT INTO document_versions
-            (id,tenant_id,document_id,parent_version_id,file_id,kind,sha256)
-            VALUES (:id,:tenant,:document,:parent,:file,'derived',:sha256)"""),
+            (id,tenant_id,document_id,parent_version_id,file_id,kind,sha256,created_at)
+            VALUES (:id,:tenant,:document,:parent,:file,'derived',:sha256,clock_timestamp())"""),
             {"id": version_id, "tenant": self.tenant_id, "document": document_id,
              "parent": base_version_id, "file": file_id, "sha256": stored.sha256})
         self.connection.execute(text("""UPDATE documents SET current_version_id=:version
-            WHERE tenant_id=:tenant AND id=:document AND current_version_id=:base"""),
-            {"version": version_id, "tenant": self.tenant_id, "document": document_id, "base": base_version_id})
+            WHERE tenant_id=:tenant AND id=:document"""),
+            {"version": version_id, "tenant": self.tenant_id, "document": document_id})
         append_event(connection=self.connection, actor_id=actor_id, action="document.text_version_saved",
                      subject=str(document_id), payload={"version_id": str(version_id), "parent_version_id": str(base_version_id),
                                                          "output_sha256": stored.sha256, **details})
         return version_id
 
     def create_edit_set(self, *, edit_set_id: UUID, document_id: UUID, base_version_id: UUID,
-                        category: str, actor_id: str, reason: str) -> None:
-        result = self.connection.execute(text("""INSERT INTO edit_sets
+                        category: str, actor_id: str, reason: str, allow_non_current: bool = False) -> None:
+        # Single-owner mode may start from any version of the document; otherwise only the current one.
+        version_rule = ("EXISTS (SELECT 1 FROM document_versions WHERE tenant_id=:tenant AND document_id=:document AND id=:version)"
+                        if allow_non_current else "current_version_id=:version")
+        result = self.connection.execute(text(f"""INSERT INTO edit_sets
             (id,tenant_id,document_id,base_version_id,authorized_category,created_by,reason)
             SELECT :id,:tenant,:document,:version,:category,:actor,:reason
             WHERE EXISTS (SELECT 1 FROM documents WHERE tenant_id=:tenant AND id=:document
-                          AND current_version_id=:version AND ingestion_state='ready'
+                          AND {version_rule} AND ingestion_state='ready'
                           AND document_category=:category)
             RETURNING id"""), {"id": edit_set_id, "tenant": self.tenant_id, "document": document_id,
                 "version": base_version_id, "category": category, "actor": actor_id, "reason": reason.strip()})
@@ -380,7 +387,8 @@ class DocumentRepository:
 
     def commit_derived_release(self, *, edit_set_id: UUID, stored: StoredFile,
                                outcome: str, adapter: str, adapter_version: str,
-                               manifest: dict[str, object], actor_id: str) -> UUID:
+                               manifest: dict[str, object], actor_id: str,
+                               allow_non_current: bool = False) -> UUID:
         """Atomically attach a verifier report and derived version to an owner-authorized plan."""
         download_eligible = is_download_eligible(outcome, adapter, manifest)
         if outcome not in {"INCOMPLETE"} and not download_eligible:
@@ -399,7 +407,7 @@ class DocumentRepository:
             return released_version_id
         if status != "ready_for_release":
             raise ValueError("edit_set_not_ready_for_release")
-        if base_version_id != current_version_id:
+        if base_version_id != current_version_id and not allow_non_current:
             raise ValueError("stale_base_version")
         if stored.document_id != document_id:
             raise PermissionError("stored file document does not match edit set")
@@ -412,8 +420,8 @@ class DocumentRepository:
              "size": stored.size_bytes, "mime": manifest.get("media_type", "application/octet-stream"),
              "key": stored.key})
         self.connection.execute(text("""INSERT INTO document_versions
-            (id,tenant_id,document_id,parent_version_id,file_id,kind,sha256,edit_set_id)
-            VALUES (:id,:tenant,:document,:parent,:file,'derived',:sha256,:edit_set)"""),
+            (id,tenant_id,document_id,parent_version_id,file_id,kind,sha256,edit_set_id,created_at)
+            VALUES (:id,:tenant,:document,:parent,:file,'derived',:sha256,:edit_set,clock_timestamp())"""),
             {"id": version_id, "tenant": self.tenant_id, "document": document_id,
              "parent": base_version_id, "file": file_id, "sha256": stored.sha256, "edit_set": edit_set_id})
         self.connection.execute(text("""INSERT INTO verification_manifests
@@ -422,10 +430,11 @@ class DocumentRepository:
             {"tenant": self.tenant_id, "edit": edit_set_id, "source": str(manifest["source_sha256"]),
              "output": stored.sha256, "outcome": outcome, "adapter": adapter, "version": adapter_version,
              "manifest": json.dumps(manifest, sort_keys=True, separators=(",", ":"))})
+        # The row is locked above, so concurrent saves on one document are serialised: each becomes the latest in turn.
         updated = self.connection.execute(text("""UPDATE documents SET current_version_id=:version
-            WHERE tenant_id=:tenant AND id=:document AND current_version_id=:base RETURNING id"""),
+            WHERE tenant_id=:tenant AND id=:document AND (current_version_id=:base OR :any_version) RETURNING id"""),
             {"version": version_id, "tenant": self.tenant_id, "document": document_id,
-             "base": base_version_id}).scalar_one_or_none()
+             "base": base_version_id, "any_version": allow_non_current}).scalar_one_or_none()
         if updated is None:
             raise ValueError("stale_base_version")
         self.connection.execute(text("""UPDATE edit_sets SET status='released',released_version_id=:version,updated_at=now()

@@ -10,11 +10,18 @@ const root = path.resolve(here, '../../..');
 const python = path.join(root, '.venv/bin/python');
 const fixtureDir = path.join(root, '.runtime/browser-fixtures');
 const mime = {
+  html: 'text/html',
   txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', pdf: 'application/pdf',
 };
-const unique = (stem, ext) => `${stem}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
+const unique = (stem, ext) => `e2e-${stem}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
+const run = () => JSON.parse(fs.readFileSync(path.join(root, '.runtime/e2e-run.json'), 'utf8'));
+
+// All pages of this suite act as an owner of the run's own tenant, never the demo owner's.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript((token) => sessionStorage.setItem('channel360.demo.session', token), run().token);
+});
 const sha = (buffer) => crypto.createHash('sha256').update(buffer).digest('hex');
 const modifierKey = process.platform === 'darwin' ? 'Meta' : 'Control';
 
@@ -25,6 +32,19 @@ function verify(kind, file, expected, field) {
 test.beforeAll(() => {
   execFileSync(python, [path.join(root, 'scripts/host/create_browser_fixtures.py'), '--output', fixtureDir]);
 });
+
+// Types after the given text inside the demo's editor (works for the textarea and the formatted editor).
+async function editDemoText(page, anchor, replacement) {
+  const area = page.getByLabel('Editable working copy');
+  if (await area.evaluate((el) => el.tagName === 'TEXTAREA')) {
+    await area.fill((await area.inputValue()).replace(anchor, replacement));
+  } else {
+    const target = area.locator(`:text("${anchor}")`).first();
+    await target.click();
+    await page.keyboard.press('End');
+    await page.keyboard.type(' (v4 edit)');
+  }
+}
 
 async function upload(page, name, ext, buffer) {
   await page.goto('/');
@@ -101,18 +121,38 @@ test.describe('Scan In workspace: upload, read, edit, save as next version', () 
     await checkFolderAndVersions(page, { name, ext: 'txt', original, kind: 'txt', expected: 'three working days' });
   });
 
-  test('MD (formatting toolbar)', async ({ page }) => {
+  test('MD (rendered editor with formatting toolbar)', async ({ page }) => {
     const name = unique('change-log', 'md');
-    const original = Buffer.from('# Change log\n\n## Version 1\nInitial release.\n\n## Next steps\nPlan the rollout.\n');
+    const original = Buffer.from('# Change log\n\n## Version 1\nInitial release.\n\n## Next steps\n- Plan the rollout\n- Train the team\n');
     await upload(page, name, 'md', original);
     await exactSource(page, original);
     await chunkNavigation(page);
     await page.locator('.tab', { hasText: 'Edits' }).click();
-    await expect(page.getByRole('toolbar', { name: 'Editor formatting' })).toBeVisible();
-    const area = page.getByLabel('Editable working copy');
-    await area.fill('# Change log\n\n## Version 1\nInitial release shipped.\n\n## Next steps\nPlan the rollout.\n');
+    const toolbar = page.getByRole('toolbar', { name: 'Editor formatting' });
+    for (const title of ['Bold', 'Italic', 'Underline', 'Heading', 'Paragraph', 'Bulleted list', 'Undo', 'Redo']) await expect(toolbar.getByTitle(title)).toBeVisible();
+    const editor = page.getByLabel('Editable working copy');
+    await expect(editor.locator('h2').first()).toHaveText('Version 1');   // rendered, not raw Markdown
+    await expect(editor.locator('li')).toHaveCount(2);
+    await editor.locator(':text("Initial release.")').click();
+    await page.keyboard.press('End');
+    await page.keyboard.type(' Shipped.');
     await saveNextVersion(page);
-    await checkFolderAndVersions(page, { name, ext: 'md', original, kind: 'md', expected: 'Initial release shipped.' });
+    await checkFolderAndVersions(page, { name, ext: 'md', original, kind: 'md', expected: 'Initial release. Shipped.' });
+  });
+
+  test('HTML (rendered editor keeps the document head)', async ({ page }) => {
+    const name = unique('welcome', 'html');
+    const original = fs.readFileSync(path.join(root, 'packages/api/samples/Welcome_Packet.html'));
+    await upload(page, name, 'html', original);
+    await exactSource(page, original);
+    await page.locator('.tab', { hasText: 'Edits' }).click();
+    const editor = page.getByLabel('Editable working copy');
+    await expect(editor.locator('h2').first()).toHaveText('Before day one');
+    await editor.locator(':text("Review the enrollment handbook")').click();
+    await page.keyboard.press('End');
+    await page.keyboard.type(' Reminder added.');
+    await saveNextVersion(page);
+    await checkFolderAndVersions(page, { name, ext: 'html', original, kind: 'html', expected: 'Reminder added.' });
   });
 
   test('CSV', async ({ page }) => {
@@ -186,7 +226,7 @@ test.describe('Scan In workspace: upload, read, edit, save as next version', () 
     await page.locator('.tab', { hasText: 'Chunks' }).click();
     await expect(page.getByRole('heading', { name: 'No readable text detected' })).toBeVisible();
     await page.locator('.tab', { hasText: 'Edits' }).click();
-    await expect(page.locator('.empty')).toContainText("can't be edited");
+    await expect(page.locator('.empty h3')).toContainText("can't be edited");
     await expect(page.locator('textarea, [contenteditable], .cell-input, .pdf-field')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Save as next version' })).toHaveCount(0);
   });
@@ -231,7 +271,7 @@ test.describe('Scan In workspace: upload, read, edit, save as next version', () 
     test(`${label} is read only with one plain sentence`, async ({ page }) => {
       await upload(page, unique('readonly', ext), ext, fs.readFileSync(path.join(fixtureDir, file)));
       await page.locator('.tab', { hasText: 'Edits' }).click();
-      await expect(page.locator('.empty p')).toHaveText(sentence);
+      await expect(page.locator('.empty h3')).toHaveText(sentence);
       await expect(page.locator('textarea, [contenteditable], .cell-input, .pdf-field')).toHaveCount(0);
     });
   }
@@ -247,13 +287,13 @@ test.describe('Scan In workspace: upload, read, edit, save as next version', () 
     for (const [file, ext] of [['Quarterly_Service_Review.pptx', 'pptx'], ['Claim_Receipt.png', 'png']]) {
       await upload(page, unique('readonly', ext), ext, fs.readFileSync(path.join(root, 'packages/api/samples', file)));
       await page.locator('.tab', { hasText: 'Edits' }).click();
-      await expect(page.locator('.empty p')).toContainText('can be');
+      await expect(page.locator('.empty h3')).toContainText('can be');
       await expect(page.locator('textarea, [contenteditable], .cell-input, .pdf-field')).toHaveCount(0);
     }
   });
 
   test('History search finds a folder', async ({ page }) => {
-    const stem = `findable-${crypto.randomBytes(4).toString('hex')}`;
+    const stem = `e2e-findable-${crypto.randomBytes(4).toString('hex')}`;
     await upload(page, `${stem}.txt`, 'txt', Buffer.from('Searchable folder content.\n'));
     await page.getByRole('button', { name: 'History' }).first().click();
     await page.getByLabel('Search document folders').fill(stem);
@@ -263,11 +303,54 @@ test.describe('Scan In workspace: upload, read, edit, save as next version', () 
     await expect(page.getByRole('heading', { name: 'No folders found' })).toBeVisible();
   });
 
+  test('a native CSV edited from v1 after v2 exists becomes v3 derived from v1', async ({ page }) => {
+    const name = unique('older', 'csv');
+    await upload(page, name, 'csv', Buffer.from('Month,Count\nJan,3\nFeb,4\n'));
+    await page.locator('.tab', { hasText: 'Edits' }).click();
+    await page.locator('[data-cell="csv:2:2"]').fill('30');
+    await saveNextVersion(page);
+    await page.locator('.version-pill', { hasText: 'v1' }).click();
+    await page.locator('.tab', { hasText: 'Edits' }).click();
+    await expect(page.locator('[data-cell="csv:3:2"]')).toBeVisible();
+    await page.locator('[data-cell="csv:3:2"]').fill('40');
+    await page.getByRole('button', { name: 'Save as next version' }).click();
+    await expect(page.locator('.file-meta')).toContainText('Version 3 of 3', { timeout: 120_000 });
+    await page.getByRole('button', { name: /All versions/ }).click();
+    await expect(page.locator('.version-card').nth(2)).toContainText('Derived from v1');
+    await expect(page.locator('.version-card').nth(2)).toContainText('Latest');
+  });
+
   test('Try demo opens the Meridian sample with v2 and v3', async ({ page }) => {
     await page.goto('/');
     await page.getByRole('button', { name: /Try demo/ }).click();
     await expect(page.locator('.file-main h2')).toContainText('Meridian');
     await expect(page.locator('.sample-ribbon')).toContainText('SYNTHETIC SAMPLE');
     await expect(page.locator('.version-pill')).toHaveCount(3);
+  });
+
+  test('editing v1 saves v4 derived from v1 and leaves v1-v3 untouched', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: /Try demo/ }).click();
+    await expect(page.locator('.file-meta')).toContainText('Version 1 of 3');
+    const token = run().token;
+    const folderOf = async () => (await (await page.request.get(`http://127.0.0.1:8000/api/folders?q=Meridian`, { headers: { Authorization: `Bearer ${token}` } })).json()).items[0];
+    const before = await folderOf();
+    const bytesOf = async (folder, v) => sha(Buffer.from(await (await page.request.get(`http://127.0.0.1:8000/api/documents/${folder.document_id}/versions/${v.version_id}/file`, { headers: { Authorization: `Bearer ${token}` } })).body()));
+    const hashes = await Promise.all(before.versions.map((v) => bytesOf(before, v)));
+    await page.locator('.tab', { hasText: 'Edits' }).click();
+    await expect(page.locator('.editable')).toBeVisible();   // the editor is shown on v1, not the empty state
+    await expect(page.locator('.empty')).toHaveCount(0);
+    await editDemoText(page, 'Late enrollment requests', 'Late enrollment requests (v4 edit)');
+    await page.getByRole('button', { name: 'Save as next version' }).click();
+    await expect(page.locator('.file-meta')).toContainText('Version 4 of 4', { timeout: 60_000 });
+    const after = await folderOf();
+    expect(after.versions).toHaveLength(4);
+    expect(after.latest_version_id).toBe(after.versions[3].version_id);
+    expect(after.versions[3].parent_number).toBe(1);
+    expect(after.versions[3].outcome).toBe('SAVED');
+    expect(await Promise.all(after.versions.slice(0, 3).map((v) => bytesOf(after, v)))).toEqual(hashes);
+    await page.getByRole('button', { name: /All versions/ }).click();
+    await expect(page.locator('.version-card').nth(3)).toContainText('Derived from v1');
+    await expect(page.locator('.version-card').nth(3)).toContainText('Latest');
   });
 });

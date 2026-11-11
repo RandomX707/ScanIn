@@ -23,8 +23,8 @@ def contains_value(node, expected) -> bool:
 def main() -> int:
     kind, path, expected = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
     data = path.read_bytes()
-    if kind in {"txt", "md"}:
-        ok = expected in data.decode("utf-8")
+    if kind in {"txt", "md", "html"}:
+        ok = expected in data.decode("utf-8") and (kind != "html" or "<title>" in data.decode("utf-8"))
     elif kind == "csv":
         ok = any(expected in row for row in csv.reader(io.StringIO(data.decode("utf-8"))))
     elif kind == "json":
