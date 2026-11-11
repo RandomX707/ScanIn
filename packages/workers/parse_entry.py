@@ -132,6 +132,13 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         result["details"] = _pdf_details(data, registry.pdf, include_targets=include_targets)
     elif supported and profile.adapter == "docx":
         result["details"] = registry.docx.details(data, include_targets=include_targets)
+    elif profile.adapter == "pptx":
+        # Read-only slide text for the document map; parsed here, inside the restricted worker.
+        from packages.core.extraction import pptx_details
+        try:
+            result["details"] = pptx_details(data)
+        except Exception:  # noqa: BLE001 - an unreadable deck is simply shown without text
+            result["details"] = {"slides": []}
     from packages.core.summaries.structural import StructuralSummaryProvider
     _apply_document_level_editability(result, profile)
     if include_targets and supported:

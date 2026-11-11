@@ -6,7 +6,7 @@ export type FolderVersion = {
   size_bytes: number; parent_number: number | null; status: string;
 };
 export type Folder = {
-  document_id: string; name: string; created_at: string; latest_version_id: string; versions: FolderVersion[];
+  document_id: string; name: string; created_at: string; latest_version_id: string; demo: boolean; versions: FolderVersion[];
 };
 export type Chunk = { id: string; title: string; summary: string; words: number; points: string[]; method: string };
 export type Chunks = { sections: Chunk[]; word_count: number; text_available: boolean };
@@ -96,3 +96,15 @@ export function ext(filename: string) { return filename.split(".").pop()!.toLowe
 const LABELS: Record<string, string> = { pdf: "PDF", docx: "DOCX", doc: "DOC", xlsx: "XLSX", xls: "XLS", pptx: "PPTX", md: "MD", markdown: "MD", txt: "TXT", text: "TXT", json: "JSON", csv: "CSV", html: "HTML", htm: "HTML", xml: "XML", rtf: "RTF" };
 export function typeLabel(name: string) { return LABELS[ext(name)] ?? "FILE"; }
 export function folderName(name: string) { return name.replace(/\.[^.]+$/, "").replace(/_/g, " "); }
+
+export type Cell = { v: string; t: string; id: string; fp: string; e: boolean; r: string | null } | null;
+export type Sheet = { name: string; rows: Cell[][]; truncated: boolean };
+export type DocxBlock = { id: string; kind: string; text: string; heading: number | null; table: { index: number; row: number; col: number } | null; target_id: string | null; fp: string | null; e: boolean; r: string | null };
+export type PdfField = { id: string; name: string; type: string; value: unknown; options: string[]; max_length: number | null; fp: string; e: boolean; r: string | null; widgets: { page: number; rect: number[] }[] };
+export type Preview = {
+  name: string; is_latest: boolean; size_bytes: number; format: string;
+  edit: { mode: "text" | "grid" | "docx" | "pdf" | "none"; reason: string | null };
+  text?: string; encoding?: string; kind?: string; sheets?: Sheet[]; blocks?: DocxBlock[]; slides?: string[][];
+  pages?: { page: number; width: number; height: number; scanned: boolean }[]; fields?: PdfField[]; text_available?: boolean;
+};
+export const getPreview = (documentId: string, versionId: string) => json<Preview>(`/api/documents/${documentId}/versions/${versionId}/preview`);

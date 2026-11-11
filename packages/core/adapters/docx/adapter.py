@@ -202,6 +202,16 @@ class DocxAdapter:
                              "paragraph_index": paragraph_index, "text": text,
                              "kind": "header" if "header" in part else "footer" if "footer" in part else
                                      "table_cell" if paragraph.xpath("ancestor::w:tc", namespaces=NS) else "paragraph"}
+                    cells = paragraph.xpath("ancestor::w:tc", namespaces=NS)
+                    if cells and part == "word/document.xml":
+                        cell = cells[0]
+                        row = cell.getparent()
+                        table = row.getparent() if row is not None else None
+                        if row is not None and table is not None:
+                            block["table"] = {
+                                "index": len(table.xpath("preceding::w:tbl", namespaces=NS)),
+                                "row": len(row.xpath("preceding-sibling::w:tr", namespaces=NS)),
+                                "col": len(cell.xpath("preceding-sibling::w:tc", namespaces=NS))}
                     style_ids = paragraph.xpath("./w:pPr/w:pStyle/@w:val", namespaces=NS)
                     outline_levels = paragraph.xpath("./w:pPr/w:outlineLvl/@w:val", namespaces=NS)
                     style_match = re.fullmatch(r"Heading([1-9])", style_ids[0]) if style_ids else None
