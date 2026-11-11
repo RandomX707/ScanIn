@@ -1,0 +1,7 @@
+Service desk notes
+
+## Summary
+The help desk resolves employee access requests and urgent security incidents.
+
+## Response expectations
+Critical security requests must be escalated immediately. Standard access requests should be reviewed within two working days.

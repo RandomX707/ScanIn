@@ -17,6 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from packages.api.errors import APIError, APIErrorResponse
 from packages.api.documents import router as documents_router
 from packages.api.dashboard import router as dashboard_router
+from packages.api.workspace import router as workspace_router
 from packages.api.logging_config import RequestLogMiddleware
 from packages.api.local_demo import router as local_demo_router
 from packages.api.settings import Settings, get_settings
@@ -65,6 +66,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.include_router(documents_router)
     app.include_router(dashboard_router)
+    app.include_router(workspace_router)
     app.include_router(local_demo_router)
     app.add_middleware(RequestLogMiddleware)
     app.add_middleware(

@@ -242,9 +242,6 @@ async def upload_document(
     """
     safe_name = _filename(filename)
     settings = request.app.state.settings
-    storage: ImmutableLocalStorage = request.app.state.document_storage
-    pipeline: IngestionOrchestrator = request.app.state.ingestion_pipeline
-    document_id, upload_id = uuid4(), uuid4()
     with tempfile.TemporaryFile(mode="w+b") as upload:
         size = 0
         async for chunk in request.stream():
@@ -255,13 +252,20 @@ async def upload_document(
         if size == 0:
             raise APIError(422, "empty_upload", "The uploaded file is empty.")
         upload.seek(0)
-        try:
-            result = pipeline.process(identity.tenant_id, document_id, upload_id, upload, filename=safe_name)
-        except Exception as error:
-            # Keep operational details and local paths out of API responses/logs.
-            if getattr(error, "reason_code", "") == "upload_too_large":
-                raise APIError(413, "upload_too_large", "The upload exceeds the configured limit.") from None
-            raise APIError(503, "ingestion_unavailable", "The file could not be safely processed.") from None
+        return ingest_stream(request, identity, safe_name, upload)
+
+
+def ingest_stream(request: Request, identity: AuthenticatedIdentity, safe_name: str, upload) -> dict[str, object]:
+    """Scan one bounded upload stream and register a clean immutable original (shared by upload and samples)."""
+    pipeline: IngestionOrchestrator = request.app.state.ingestion_pipeline
+    document_id, upload_id = uuid4(), uuid4()
+    try:
+        result = pipeline.process(identity.tenant_id, document_id, upload_id, upload, filename=safe_name)
+    except Exception as error:
+        # Keep operational details and local paths out of API responses/logs.
+        if getattr(error, "reason_code", "") == "upload_too_large":
+            raise APIError(413, "upload_too_large", "The upload exceeds the configured limit.") from None
+        raise APIError(503, "ingestion_unavailable", "The file could not be safely processed.") from None
 
     if result.outcome != "stored_private" or result.stored_file is None or result.scan is None:
         if result.outcome in {"rejected", "quarantined"}:

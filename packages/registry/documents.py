@@ -96,6 +96,36 @@ class DocumentRepository:
             {"tenant": self.tenant_id, "limit": limit}).mappings()
         return [dict(row) for row in rows]
 
+    def list_folders(self, *, limit: int = 200) -> list[dict[str, object]]:
+        """Ready documents with their ordered version families (single-owner folder view)."""
+        if not 1 <= limit <= 500:
+            raise ValueError("limit_out_of_range")
+        documents = self.connection.execute(text("""SELECT d.id,d.filename,d.created_at,d.current_version_id
+            FROM documents d WHERE d.tenant_id=:tenant AND d.ingestion_state='ready'
+            ORDER BY d.created_at DESC,d.id LIMIT :limit"""),
+            {"tenant": self.tenant_id, "limit": limit}).mappings().all()
+        if not documents:
+            return []
+        rows = self.connection.execute(text("""SELECT v.document_id,v.id AS version_id,v.parent_version_id,v.kind,
+            v.created_at,f.size_bytes,f.mime,m.outcome AS verification_outcome
+            FROM document_versions v JOIN files f ON f.tenant_id=v.tenant_id AND f.id=v.file_id
+            LEFT JOIN LATERAL (SELECT outcome FROM verification_manifests vm
+              WHERE vm.tenant_id=v.tenant_id AND vm.edit_set_id=v.edit_set_id
+              ORDER BY vm.created_at DESC LIMIT 1) m ON v.edit_set_id IS NOT NULL
+            WHERE v.tenant_id=:tenant AND v.document_id = ANY(:ids)
+            ORDER BY v.created_at,v.id"""),
+            {"tenant": self.tenant_id, "ids": [row["id"] for row in documents]}).mappings().all()
+        by_document: dict[object, list[dict[str, object]]] = {}
+        for row in rows:
+            by_document.setdefault(row["document_id"], []).append(dict(row))
+        folders = []
+        for document in documents:
+            versions = [item for item in by_document.get(document["id"], []) if item["kind"] in {"original", "derived"}]
+            if versions:
+                folders.append({**dict(document), "versions": versions})
+        folders.sort(key=lambda item: item["versions"][-1]["created_at"], reverse=True)
+        return folders
+
     def dashboard_snapshot(self) -> dict[str, object]:
         metrics = self.connection.execute(text("""SELECT
             (SELECT count(*) FROM documents WHERE tenant_id=:tenant) AS total_documents,
