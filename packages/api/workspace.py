@@ -276,7 +276,8 @@ def version_chunks(document_id: str, version_id: str, request: Request,
     words = len(text.split()) if text.strip() else 0
     return {"sections": [{key: item[key] for key in ("id", "title", "summary", "words", "points", "method")}
                          for item in sections],
-            "word_count": words, "text_available": bool(sections)}
+            "word_count": words, "text_available": bool(sections),
+            "excerpt": text[:12000], "excerpt_truncated": len(text) > 12000}
 
 
 # ---------------------------------------------------------------------------------------------------------

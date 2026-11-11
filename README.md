@@ -2,7 +2,11 @@
 
 Channel360 is a **single-user document workbench for secure inspection, classification, correction, AI-assisted explanation and verified document release**. One authenticated owner operates the document workflow. The repository remains named **ScanIn**; the application and product are called Channel360.
 
-> **Project status:** a validated development prototype, not production-ready software. It has no production identity provider, durable background queue, deployment hardening, or M4 templates/rules. M5 unsigned AcroForm PDF editing and M6 DOCX editing are implemented; M6 defaults to structural verification. M7 is partially implemented through optional, disabled-by-default AI explanations; OCR and Docling are not implemented. Use synthetic documents and a dedicated test database.
+> **Status (feat/manager-ui):** the web app follows the manager prototype (`docs/design/ScanIn_Channel360_Original_Alignment_Fixed.html`): Scan In / History, a folder per upload, and Original | Chunks | Edits tabs.
+> Edits are saved with one **Save as next version** action (`POST /api/documents/{id}/versions/{v}/save`) that freezes, preflights, verifies, scans and releases through the existing engine; no drafts, patches or manifests appear in the UI.
+> The new version always keeps the original's format: TXT/MD/HTML/XML use a same-format text writer; CSV, JSON, XLSX, DOCX and fillable PDFs use their verified adapters (XLSX formula dependents save with "Formulas update when opened in Excel."); other files are read-only.
+> Chunks and key takeaways come from `GET .../versions/{v}/chunks` (deterministic, no AI); `GET /api/folders` lists originals with their versions. Run `scripts/dev/start.sh`, then `npx playwright test` in `apps/web`.
+> Still a development prototype: local owner sign-in, no production identity provider or durable queue; use synthetic documents and a dedicated test database.
 
 ## Why it exists
 

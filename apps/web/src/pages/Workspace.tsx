@@ -13,7 +13,8 @@ type Tab = "original" | "chunks" | "edits";
 export type WorkspaceProps = {
   documentId: string; versionId: string; folders: Folder[];
   onHome: () => void; onHistory: () => void; onFolder: (id: string) => void;
-  onOpen: (documentId: string, versionId: string) => void; onBrowse: () => void;
+  onOpen: (documentId: string, versionId: string, tab?: "original" | "chunks" | "edits") => void; onBrowse: () => void;
+  initialTab?: "original" | "chunks" | "edits";
   notify: (message: string, error?: boolean) => void; refresh: () => Promise<void>;
 };
 
@@ -31,7 +32,7 @@ function statusFor(version: FolderVersion, name: string, chunks: Chunks | null):
 export function Workspace(props: WorkspaceProps) {
   const { documentId, versionId, folders, notify } = props;
   const folder = folders.find((f) => f.document_id === documentId);
-  const [tab, setTab] = useState<Tab>("original");
+  const [tab, setTab] = useState<Tab>(props.initialTab ?? "original");
   const [selected, setSelected] = useState(0);
   const [chunks, setChunks] = useState<Chunks | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -125,8 +126,8 @@ export function Workspace(props: WorkspaceProps) {
             {tab === "original" && <OriginalTab documentId={documentId} root={root} folderName={folder.name} download={downloadSource} />}
             {tab === "chunks" && <ChunksTab chunks={chunks} index={index} onSelect={setSelected} onOriginal={() => chooseTab("original")} />}
             {tab === "edits" && (
-              <EditsTab documentId={documentId} version={version} family={family} chunksText={chunks} setDirty={setDirty}
-                notify={notify} refresh={props.refresh} onSaved={(id) => props.onOpen(documentId, id)} download={async () => {
+              <EditsTab documentId={documentId} folderName={folder.name} version={version} family={family} chunksText={chunks} setDirty={setDirty}
+                notify={notify} refresh={props.refresh} onSaved={(id) => props.onOpen(documentId, id, "edits")} download={async () => {
                   try { saveBlob(await fetchVersionFile(documentId, versionId), downloadName(folder.name, version.number)); }
                   catch { notify("The file could not be exported.", true); }
                 }} />
@@ -166,7 +167,7 @@ function decode(buffer: ArrayBuffer): string {
 
 export function ExtractedPreview({ preview }: { preview: Preview }) {
   if (preview.format === "docx") {
-    const nodes: JSX.Element[] = [];
+    const nodes: React.ReactNode[] = [];
     const blocks = preview.blocks ?? [];
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i];

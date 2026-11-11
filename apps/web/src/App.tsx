@@ -17,7 +17,7 @@ function App() {
   const [view, setView] = useState<View>("home");
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderId, setFolderId] = useState<string | null>(null);
-  const [active, setActive] = useState<{ documentId: string; versionId: string } | null>(null);
+  const [active, setActive] = useState<{ documentId: string; versionId: string; tab?: "original" | "chunks" | "edits" } | null>(null);
   const [search, setSearch] = useState("");
   const [progress, setProgress] = useState<Progress | null>(null);
   const [toast, setToast] = useState<Toast>(null);
@@ -37,8 +37,8 @@ function App() {
   useEffect(() => { void refresh(); }, [refresh]);
 
   function go(next: View) { setView(next); window.scrollTo(0, 0); if (next === "home" || next === "history") void refresh(); }
-  function openWorkspace(documentId: string, versionId: string) {
-    setActive({ documentId, versionId }); setView("workspace"); window.scrollTo(0, 0);
+  function openWorkspace(documentId: string, versionId: string, tab?: "original" | "chunks" | "edits") {
+    setActive({ documentId, versionId, tab }); setView("workspace"); window.scrollTo(0, 0);
   }
   function openFolder(documentId: string) { setFolderId(documentId); setView("folder"); window.scrollTo(0, 0); void refresh(); }
   const browse = () => { if (!busy.current) fileInput.current?.click(); };
@@ -104,9 +104,9 @@ function App() {
       <Topbar view={view} onHome={() => go("home")} onHistory={() => go("history")} onDemo={demo} onBrowse={browse} />
       {view === "home" && <Home folders={folders} onBrowse={browse} onFiles={(f) => void ingest(f)} onFormat={format} onFolder={openFolder} onHistory={() => go("history")} />}
       {view === "history" && <History folders={filtered} search={search} onSearch={setSearch} onBrowse={browse} onOpenFolder={openFolder} />}
-      {view === "folder" && <FolderPage folder={folder} onHistory={() => go("history")} onOpen={openWorkspace} />}
+      {view === "folder" && <FolderPage folder={folder} onHistory={() => go("history")} onOpen={(d, v) => openWorkspace(d, v)} />}
       {view === "workspace" && active && (
-        <Workspace key={`${active.documentId}:${active.versionId}`} documentId={active.documentId} versionId={active.versionId}
+        <Workspace key={`${active.documentId}:${active.versionId}`} documentId={active.documentId} versionId={active.versionId} initialTab={active.tab}
           folders={folders} onHome={() => go("home")} onHistory={() => go("history")} onFolder={openFolder}
           onOpen={openWorkspace} onBrowse={browse} notify={notify} refresh={refresh} />
       )}

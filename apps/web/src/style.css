@@ -96,3 +96,32 @@ html,body{max-width:100%;overflow-x:clip}
  .source-paper.raw-original{padding:12px}
  .chunk-pagination{flex-wrap:wrap}
 }
+
+/* Edits tab: in-place editors for the formats the verified engine can save in their own format */
+.editable.plain-text{font:13px/1.75 ui-monospace,'SF Mono',Menlo,monospace;width:100%;resize:vertical;display:block;color:#26342b}
+.editable.no-toolbar{border-radius:12px}
+.grid-editor{padding:0;overflow:auto;font:12px/1.5 'DM Sans',sans-serif}
+.grid-editor table{border-collapse:collapse;min-width:100%}
+.grid-editor th,.grid-editor td{border:1px solid #e1e8de;padding:0;min-width:96px;text-align:left;vertical-align:middle;font-weight:500}
+.grid-editor th{background:#f4f7f1;color:#4f6a56}
+.cell-input{width:100%;min-width:96px;border:0;background:transparent;padding:9px 10px;color:var(--ink);font:inherit}
+.cell-input:focus{outline:2px solid #9ecba6;outline-offset:-2px;background:#fff}
+.cell-changed{background:#eef8ea}
+.cell-locked{padding:9px 10px;color:#8a978c;background:#f7f8f5;cursor:not-allowed}
+.sheet-pills{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.grid-note{font-size:10px;color:#8e9c90;margin:10px 2px 0}
+.docx-editor{font:14px/1.85 Georgia,serif;color:#26342b;padding:32px 40px}
+.docx-editor p,.docx-editor h2,.docx-editor h3{margin:0 0 14px}
+.docx-editor [contenteditable]{outline:none;border-radius:4px;padding:2px 6px;margin-left:-6px;margin-right:-6px;box-shadow:inset 0 0 0 1px #d9ead8;background:#fbfdf9}
+.docx-editor [contenteditable]:focus{box-shadow:inset 0 0 0 2px #9ecba6;background:#fff}
+.docx-editor .locked-text{color:#8a978c;cursor:not-allowed;padding:2px 6px;margin-left:-6px;margin-right:-6px}
+.docx-editor td{vertical-align:top}
+.pdf-editor{display:grid;gap:20px;justify-items:center;background:#f4f5f0;border:1px solid #dbe4d9;border-radius:12px;padding:18px;max-height:760px;overflow:auto}
+.pdf-page{position:relative;width:100%;max-width:760px;background:#fff;box-shadow:0 3px 12px #0002;container-type:inline-size}
+.pdf-page canvas{display:block;width:100%;height:auto}
+.pdf-field{position:absolute;margin:0;padding:0 .4em;border:1px solid #7eac92;background:#eaf5ec;color:#182925;font-family:Helvetica,Arial,sans-serif;border-radius:2px}
+.pdf-field:focus{outline:2px solid #fa795c;background:#fff}
+.pdf-field:disabled{background:#eee;border-color:#ccc;cursor:not-allowed}
+.pdf-field.changed{background:#fff5d9;border-color:#d8a93a}
+.pdf-field[type=checkbox],.pdf-field[type=radio]{padding:0;accent-color:#2c6a4c}
+.edit-error{color:var(--coral-ink);font-size:11px}
