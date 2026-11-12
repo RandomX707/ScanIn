@@ -16,6 +16,16 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript((token) => sessionStorage.setItem('channel360.demo.session', token), run().token);
 });
 
+test('uploading identical bytes under another name discloses the existing document', async ({ page }) => {
+  const body = Buffer.from(`id,item\n1,dup-${Date.now()}\n`);
+  await page.goto('/');
+  await page.setInputFiles('#file-input', { name: 'e2e-dup-first.csv', mimeType: 'text/csv', buffer: body });
+  await expect(page.locator('.file-main h2')).toHaveText('e2e-dup-first.csv', { timeout: 60_000 });
+  await page.goto('/');
+  await page.setInputFiles('#file-input', { name: 'e2e-dup-second.csv', mimeType: 'text/csv', buffer: body });
+  await expect(page.locator('.toast')).toContainText('is identical to “e2e-dup-first.csv”', { timeout: 60_000 });
+});
+
 test.describe('ZIP archives are imported as their documents', () => {
   test('a hostile archive imports only the safe files and reports every refusal', async ({ page }) => {
     const out = path.join(root, '.runtime/browser-fixtures');

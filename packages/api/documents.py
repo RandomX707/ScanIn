@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from packages.api.auth import AuthenticatedIdentity, require_identity
@@ -292,12 +293,24 @@ def ingest_stream(request: Request, identity: AuthenticatedIdentity, safe_name: 
     except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
         raise APIError(503, "document_registration_unavailable", "The safely scanned file could not be registered.") from None
 
+    duplicate_of = None
+    try:
+        with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
+            rows = connection.execute(text("""SELECT d.id,d.filename FROM documents d
+                JOIN document_versions v ON v.tenant_id=d.tenant_id AND v.document_id=d.id AND v.kind='original'
+                WHERE d.tenant_id=:tenant AND v.sha256=:sha AND d.id<>:me AND d.ingestion_state='ready'
+                ORDER BY d.created_at LIMIT 1"""), {"tenant": identity.tenant_id, "sha": registered.source_sha256, "me": registered.document_id}).mappings().all()
+            if rows:
+                duplicate_of = {"document_id": str(rows[0]["id"]), "name": str(rows[0]["filename"])}
+    except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
+        duplicate_of = None                      # disclosure is best-effort; the upload itself already succeeded
     return {
         "document_id": str(registered.document_id),
         "version_id": str(registered.version_id),
         "filename": registered.filename,
         "sha256": registered.source_sha256,
         "size_bytes": registered.size_bytes,
+        "duplicate_of": duplicate_of,
         "state": "staged_private",
         "message": "Upload scanned and stored privately; inspection is required before viewing.",
     }

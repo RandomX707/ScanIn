@@ -49,6 +49,7 @@ function App() {
     let last: { document_id: string; version_id: string } | null = null;
     let successes = 0;
     let archiveDocs = 0;
+    let duplicateNote = "";
     let archiveNote: { text: string; problem: boolean } | null = null;
     for (const file of files.slice(0, 10)) {
       if (file.size > MAX_BYTES && !/\.zip$/i.test(file.name)) { notify(`${file.name}: 30 MB limit exceeded.`, true); continue; }
@@ -73,6 +74,7 @@ function App() {
         setProgress({ name: file.name, step: 3 });
         await new Promise((resolve) => setTimeout(resolve, 220));
         last = registered; successes++;
+        if (registered.duplicate_of) duplicateNote = `${file.name} is identical to “${registered.duplicate_of.name}”, which is already in your workspace.`;
       } catch (error) {
         notify(`${file.name}: ${error instanceof ApiError ? error.message : "Cannot read file"}`, true);
       } finally { setProgress(null); }
@@ -87,7 +89,7 @@ function App() {
     }
     if (successes && last) {
       openWorkspace(last.document_id, last.version_id);
-      notify(`${successes} document${successes === 1 ? "" : "s"} added. Original preserved.`);
+      notify(`${successes} document${successes === 1 ? "" : "s"} added. Original preserved.${duplicateNote ? ` ${duplicateNote}` : ""}`);
     }
   }
 

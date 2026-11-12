@@ -5,6 +5,7 @@ from pathlib import Path
 import openpyxl
 from lxml import etree
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 API = os.environ.get("CHANNEL360_API", "http://127.0.0.1:8010")
 tok = json.loads(subprocess.run([sys.executable, str(ROOT / "scripts/host/issue_test_token.py")], capture_output=True, text=True, check=True).stdout)
 H = {"Authorization": f"Bearer {tok['token']}"}
@@ -16,46 +17,7 @@ def call(method, path, body=None, headers=None):
         with urllib.request.urlopen(req, timeout=300) as r: return r.status, r.read()
     except urllib.error.HTTPError as e: return e.code, e.read()
 
-def cells_of(xml: bytes):
-    root = etree.fromstring(xml)
-    out = {}
-    for c in root.iterfind(".//m:sheetData/m:row/m:c", NS):
-        out[c.get("r")] = (c.get("s"), c.get("t"), etree.tostring(c.find("m:f", NS)) if c.find("m:f", NS) is not None else None,
-                           (c.find("m:v", NS).text if c.find("m:v", NS) is not None else None))
-    other = {tag: [etree.tostring(e) for e in root.iterfind(f"m:{tag}", NS)] for tag in ("cols", "mergeCells", "sheetFormatPr", "pageSetup", "pageMargins", "drawing", "sheetViews", "printOptions")}
-    rows = {r.get("r"): (r.get("ht"), r.get("s"), r.get("customHeight")) for r in root.iterfind(".//m:sheetData/m:row", NS)}
-    return out, other, rows
-
-def compare(src: bytes, new: bytes, edited: set[str]):
-    zs, zn = zipfile.ZipFile(io.BytesIO(src)), zipfile.ZipFile(io.BytesIO(new))
-    res = {"parts_same_set": sorted(zs.namelist()) == sorted(zn.namelist())}
-    changed = [n for n in zs.namelist() if n in zn.namelist() and zs.read(n) != zn.read(n)]
-    res["changed_parts"] = changed
-    problems = []
-    for name in changed:
-        if name.startswith("xl/worksheets/sheet"):
-            a, ao, ar = cells_of(zs.read(name)); b, bo, br = cells_of(zn.read(name))
-            diff = {k for k in set(a) | set(b) if a.get(k) != b.get(k)}
-            if diff - edited: problems.append(f"unexpected cell changes: {sorted(diff - edited)[:5]}")
-            if ao != bo: problems.append("sheet-level layout elements changed")
-            if ar != br: problems.append("row heights changed")
-            res["cells_changed"] = sorted(diff)
-        elif name == "xl/workbook.xml":
-            a, b = etree.tostring(etree.fromstring(zs.read(name)), method="c14n"), etree.tostring(etree.fromstring(zn.read(name)), method="c14n")
-            ra = re.sub(rb' (fullCalcOnLoad|forceFullCalc)="1"', b"", b)
-            if ra != re.sub(rb' (fullCalcOnLoad|forceFullCalc)="1"', b"", a):
-                problems.append("workbook.xml changed beyond fullCalcOnLoad")
-        elif name in ("[Content_Types].xml", "_rels/.rels", "docProps/custom.xml"):
-            pass                                  # provenance stamp: explicit, verified permitted changes in the adapter
-        elif name not in ("xl/sharedStrings.xml", "xl/calcChain.xml", "docProps/app.xml", "docProps/core.xml"):
-            problems.append(f"unexpected part changed: {name}")
-    wa, wb = openpyxl.load_workbook(io.BytesIO(src)), openpyxl.load_workbook(io.BytesIO(new))
-    for sa, sb in zip(wa.worksheets, wb.worksheets):
-        f = lambda ws: sum(1 for r in ws.iter_rows() for c in r if isinstance(c.value, str) and c.value.startswith("="))
-        if (sa.title, len(sa.merged_cells.ranges), f(sa), len(sa._images)) != (sb.title, len(sb.merged_cells.ranges), f(sb), len(sb._images)):
-            problems.append("sheet title/merged/formulas/images differ")
-    res["problems"] = problems
-    return res
+from ooxml_compare import cells_of, compare  # noqa: E402
 
 def run(path: Path):
     data = path.read_bytes(); sha = hashlib.sha256(data).hexdigest()

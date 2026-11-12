@@ -90,7 +90,7 @@ export function archiveMessage(report: ArchiveReport): { text: string; problem: 
   return { text, problem: trouble.some((e) => e.status !== "skipped") || s.recognized === 0 };
 }
 
-export async function uploadAndInspect(file: File, step: (n: number) => void): Promise<{ document_id: string; version_id: string }> {
+export async function uploadAndInspect(file: File, step: (n: number) => void): Promise<{ document_id: string; version_id: string; duplicate_of?: { document_id: string; name: string } | null }> {
   step(0);
   const upload = await request(`/api/documents?filename=${encodeURIComponent(file.name)}`, { method: "PUT", body: file });
   if (!upload.ok) {
@@ -98,7 +98,7 @@ export async function uploadAndInspect(file: File, step: (n: number) => void): P
     try { body = await upload.json(); } catch { /* generic */ }
     throw new ApiError(upload.status, "upload_failed", body.message ?? "This file could not be added.");
   }
-  const registered = await upload.json() as { document_id: string; version_id: string };
+  const registered = await upload.json() as { document_id: string; version_id: string; duplicate_of?: { document_id: string; name: string } | null };
   step(1);
   const inspected = await request(`/api/documents/${registered.document_id}/inspect`, { method: "POST" });
   if (!inspected.ok) throw new ApiError(inspected.status, "inspect_failed", "This file could not be read safely.");
