@@ -132,3 +132,8 @@ html,body{max-width:100%;overflow-x:clip}
 .pdf-run.changed{background:#ffe9a655;outline:1px solid #d8a93a}
 .pdf-run.refused{outline:2px solid var(--coral-ink,#c0392b)}
 .pdf-run-input{box-sizing:border-box;z-index:2}
+.sheet-fidelity table{border-collapse:collapse;min-width:0;background:#fff}
+.sheet-fidelity td{min-width:0;padding:0 3px;border:1px solid #e6e9e4;font:12px/1.3 Calibri,Carlito,'DM Sans',sans-serif;color:#182925;overflow:hidden;text-overflow:clip}
+.sheet-fidelity .cell-input{min-width:0;padding:0;margin:0;height:100%;line-height:inherit;background:transparent}
+.sheet-fidelity .cell-text,.sheet-fidelity .cell-locked{overflow:hidden}
+.sheet-fidelity td.cell-changed{outline:2px solid #d8a93a;outline-offset:-2px}

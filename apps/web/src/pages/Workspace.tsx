@@ -5,6 +5,7 @@ import {
   type Chunks, type Folder, type FolderVersion, type Preview,
 } from "../lib/api";
 import { EditsTab } from "./Edits";
+import { SheetGrid } from "./SheetGrid";
 
 const SOURCE_TEXT = ["txt", "text", "md", "markdown", "csv", "json", "xml", "rtf", "html", "htm"];
 const NATIVE = ["pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp"];
@@ -189,7 +190,9 @@ export function ExtractedPreview({ preview }: { preview: Preview }) {
     return <>{(preview.sheets ?? []).map((s) => (
       <div key={s.name}>
         <h2>{s.name}</h2>
-        <table><tbody>{s.rows.map((row, r) => <tr key={r}>{row.map((c, ci) => (r === 0 ? <th key={ci}>{c?.v ?? ""}</th> : <td key={ci}>{c?.v ?? ""}</td>))}</tr>)}</tbody></table>
+        {s.layout
+          ? <div className="grid-editor no-toolbar"><SheetGrid sheet={s} styles={preview.styles ?? []} readOnly /></div>
+          : <table><tbody>{s.rows.map((row, r) => <tr key={r}>{row.map((c, ci) => (r === 0 ? <th key={ci}>{c?.v ?? ""}</th> : <td key={ci}>{c?.v ?? ""}</td>))}</tr>)}</tbody></table>}
       </div>
     ))}</>;
   }

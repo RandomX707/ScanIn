@@ -132,6 +132,12 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         result["details"] = _pdf_details(data, registry.pdf, include_targets=include_targets)
     elif supported and profile.adapter == "docx":
         result["details"] = registry.docx.details(data, include_targets=include_targets)
+    elif supported and profile.adapter == "xlsx" and include_targets and not target_offset:
+        from packages.core.xlsx_layout import extract as _xlsx_layout
+        try:
+            result["details"] = {"layout": _xlsx_layout(data)}
+        except Exception:  # noqa: BLE001 - layout is cosmetic; the editable grid still works without it
+            result["details"] = {"layout": None}
     elif profile.adapter == "pptx":
         # Read-only slide text for the document map; parsed here, inside the restricted worker.
         from packages.core.extraction import pptx_details

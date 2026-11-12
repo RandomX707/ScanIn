@@ -443,10 +443,15 @@ def version_preview(document_id: str, version_id: str, request: Request,
             reasons = list(report.capability.get("reasons") or [])
             sheets = list(report.sheets) or ["Sheet1"]
             grid = _grid(targets, sheets)
+            layout = (report.details or {}).get("layout") or {}
+            by_name = {item["name"]: item for item in layout.get("sheets", [])}
+            for item in grid:
+                if item["name"] in by_name:
+                    item["layout"] = by_name[item["name"]]
             editable = level == "editable"
             return done("csv" if suffix == ".csv" else "xlsx", "grid" if editable else "none",
                         None if editable else (cell_reason(reasons[0]) if reasons else file_reason(reasons, suffix)),
-                        sheets=grid)
+                        sheets=grid, styles=layout.get("styles", []))
         if suffix == ".docx":
             report = request.app.state.restricted_parser.inspect(path, filename=name, include_targets=True)
             details = report.details or {}

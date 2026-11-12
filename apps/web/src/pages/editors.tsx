@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Cell, DocxBlock, PdfField, Preview, SaveBody } from "../lib/api";
+import { SheetGrid } from "./SheetGrid";
 
 type OnBody = (body: SaveBody | null) => void;
 
@@ -106,26 +107,28 @@ export function GridEditor({ preview, onBody }: { preview: Preview; onBody: OnBo
         <div className="sheet-pills">{sheets.map((s, i) => <button key={s.name} className={`version-pill ${i === active ? "active" : ""}`} onClick={() => setActive(i)}>{s.name}</button>)}</div>
       )}
       <div className="editable grid-editor no-toolbar" role="region" aria-label="Editable cells">
-        <table>
-          <tbody>
-            {sheet.rows.map((row, r) => (
-              <tr key={r}>
-                {row.map((cell, c) => {
-                  const Tag = r === 0 ? "th" : "td";
-                  if (!cell) return <Tag key={c} />;
-                  if (!cell.e) return <Tag key={c}><div className="cell-locked" title={cell.r ?? "Locked"}>{cell.v}</div></Tag>;
-                  const changed = cell.id in edits;
-                  return (
-                    <Tag key={c} className={changed ? "cell-changed" : ""}>
-                      <input className="cell-input" aria-label={`${sheet.name} ${r + 1}:${c + 1}`} data-cell={cell.id}
-                        value={changed ? edits[cell.id].value : cell.v} onChange={(e) => update(cell, e.target.value)} />
-                    </Tag>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {sheet.layout
+          ? <SheetGrid sheet={sheet} styles={preview.styles ?? []} edits={edits} onEdit={update} />
+          : <table>
+              <tbody>
+                {sheet.rows.map((row, r) => (
+                  <tr key={r}>
+                    {row.map((cell, c) => {
+                      const Tag = r === 0 ? "th" : "td";
+                      if (!cell) return <Tag key={c} />;
+                      if (!cell.e) return <Tag key={c}><div className="cell-locked" title={cell.r ?? "Locked"}>{cell.v}</div></Tag>;
+                      const changed = cell.id in edits;
+                      return (
+                        <Tag key={c} className={changed ? "cell-changed" : ""}>
+                          <input className="cell-input" aria-label={`${sheet.name} ${r + 1}:${c + 1}`} data-cell={cell.id}
+                            value={changed ? edits[cell.id].value : cell.v} onChange={(e) => update(cell, e.target.value)} />
+                        </Tag>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>}
       </div>
       {sheet.truncated && <p className="grid-note">Showing the first rows and columns of this sheet.</p>}
     </>

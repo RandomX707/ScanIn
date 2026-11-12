@@ -29,6 +29,21 @@ from packages.registry.documents import DocumentRepository
 from packages.workers.parser import ParserNotVerified
 
 FORMULA_NOTE = "Formulas update when opened in Excel."
+TRACKING_NOTE = ("Track Changes is turned on in this document. Your edit is kept as a new version here, "
+                 "not as a Word tracked change.")
+
+
+def tracking_setting_on(source: bytes, filename: str) -> bool:
+    """DOCX with the Track Changes *setting* enabled (distinct from unresolved tracked insertions/deletions)."""
+    if not filename.lower().endswith(".docx") or not source.startswith(b"PK"):
+        return False
+    try:
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(source)) as zf:
+            info = zf.getinfo("word/settings.xml")
+            return info.file_size < 4_000_000 and b"trackRevisions" in zf.read(info)
+    except (KeyError, zipfile.BadZipFile, OSError):
+        return False
 
 PLAIN = {
     "max_length_exceeded": "This value doesn't fit the field.",
@@ -169,6 +184,7 @@ def save_native(request: Request, identity: AuthenticatedIdentity, document_id: 
     if not changes:
         raise SaveRejected("patch_set_empty", status=409)
     version, _source = _source_version(request, identity, document_id, version_id)
+    tracking = tracking_setting_on(_source, str(version.get("filename", "")))
     ids = [change.target_id for change in changes]
     if len(set(ids)) != len(ids):
         raise SaveRejected("duplicate_target", GENERIC)
@@ -205,8 +221,8 @@ def save_native(request: Request, identity: AuthenticatedIdentity, document_id: 
     outcome = str(released.get("outcome"))
     if outcome == "BLOCKED" or not released.get("version_id"):
         raise SaveRejected("blocked", _blocked_message(released))
-    return {"version_id": released["version_id"], "outcome": outcome,
-            "note": FORMULA_NOTE if outcome == "INCOMPLETE" else None}
+    notes = [n for n in (FORMULA_NOTE if outcome == "INCOMPLETE" else None, TRACKING_NOTE if tracking else None) if n]
+    return {"version_id": released["version_id"], "outcome": outcome, "note": " ".join(notes) or None}
 
 
 def _blocked_message(released: dict[str, Any]) -> str:

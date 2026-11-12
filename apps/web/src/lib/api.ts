@@ -98,13 +98,16 @@ export function typeLabel(name: string) { return LABELS[ext(name)] ?? "FILE"; }
 export function folderName(name: string) { return name.replace(/\.[^.]+$/, "").replace(/_/g, " "); }
 
 export type Cell = { v: string; t: string; id: string; fp: string; e: boolean; r: string | null } | null;
-export type Sheet = { name: string; rows: Cell[][]; truncated: boolean };
+export type CellStyle = { b?: 1; i?: 1; u?: 1; sz?: number; c?: string; bg?: string; ha?: string; va?: string; wrap?: 1; bl?: 1; br?: 1; bt?: 1; bb?: 1 };
+export type SheetImage = { src: string; from: { col: number; row: number; dx: number; dy: number } | null; to?: { col: number; row: number; dx: number; dy: number } | null; ext?: { cx: number; cy: number } };
+export type SheetLayout = { default_col?: number; default_row?: number; merges: [number, number, number, number][]; cols: Record<string, number>; rows: Record<string, number>; cells: Record<string, number>; images: SheetImage[] };
+export type Sheet = { name: string; rows: Cell[][]; truncated: boolean; layout?: SheetLayout };
 export type DocxBlock = { id: string; kind: string; text: string; heading: number | null; table: { index: number; row: number; col: number } | null; target_id: string | null; fp: string | null; e: boolean; r: string | null };
 export type PdfField = { id: string; name: string; type: string; value: unknown; options: string[]; max_length: number | null; fp: string; e: boolean; r: string | null; widgets: { page: number; rect: number[]; state?: string | null }[] };
 export type Preview = {
   name: string; is_latest: boolean; size_bytes: number; format: string;
   edit: { mode: "text" | "grid" | "docx" | "pdf" | "pdf_text" | "none"; reason: string | null };
-  signature?: { status: string; validated: boolean };
+  signature?: { status: string; validated: boolean }; styles?: CellStyle[];
   text?: string; html?: string | null; encoding?: string; kind?: string; sheets?: Sheet[]; blocks?: DocxBlock[]; slides?: string[][];
   pages?: { page: number; width: number; height: number; scanned: boolean }[]; fields?: PdfField[]; text_available?: boolean;
 };
