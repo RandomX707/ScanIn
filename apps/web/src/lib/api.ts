@@ -103,13 +103,30 @@ export type DocxBlock = { id: string; kind: string; text: string; heading: numbe
 export type PdfField = { id: string; name: string; type: string; value: unknown; options: string[]; max_length: number | null; fp: string; e: boolean; r: string | null; widgets: { page: number; rect: number[]; state?: string | null }[] };
 export type Preview = {
   name: string; is_latest: boolean; size_bytes: number; format: string;
-  edit: { mode: "text" | "grid" | "docx" | "pdf" | "none"; reason: string | null };
+  edit: { mode: "text" | "grid" | "docx" | "pdf" | "pdf_text" | "none"; reason: string | null };
+  signature?: { status: string; validated: boolean };
   text?: string; html?: string | null; encoding?: string; kind?: string; sheets?: Sheet[]; blocks?: DocxBlock[]; slides?: string[][];
   pages?: { page: number; width: number; height: number; scanned: boolean }[]; fields?: PdfField[]; text_available?: boolean;
 };
 export const getPreview = (documentId: string, versionId: string) => json<Preview>(`/api/documents/${documentId}/versions/${versionId}/preview`);
 
-export type SaveBody = { html?: string; changes?: { target_id: string; fingerprint: string; value: string | boolean }[]; text?: string };
+export type PdfTextEdit = { id: string; old: string; new: string };
+export type PdfRun = { id: string; page: number; text: string; bbox: [number, number, number, number]; font: string; size: number; e: boolean; r: string | null };
+export type PdfPageText = { page: number; width: number; height: number; runs: PdfRun[] };
+export const getPdfText = (documentId: string, versionId: string, page: number) =>
+  json<PdfPageText>(`/api/documents/${documentId}/versions/${versionId}/pdf-text?page=${page}`);
+export async function previewPdfEdits(documentId: string, versionId: string, edits: PdfTextEdit[]): Promise<ArrayBuffer> {
+  const response = await request(`/api/documents/${documentId}/versions/${versionId}/pdf-edit/preview`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pdf_edits: edits }) });
+  if (!response.ok) {
+    let body: { code?: string; message?: string } = {};
+    try { body = await response.json(); } catch { /* generic */ }
+    throw new ApiError(response.status, body.code ?? "error", body.message ?? "That change couldn't be applied safely.");
+  }
+  return response.arrayBuffer();
+}
+
+export type SaveBody = { html?: string; changes?: { target_id: string; fingerprint: string; value: string | boolean }[]; text?: string; pdf_edits?: PdfTextEdit[] };
 export type SaveResult = { version_id: string; outcome: string; note: string | null; version: FolderVersion | null };
 export const saveVersion = (documentId: string, versionId: string, body: SaveBody) =>
   json<SaveResult>(`/api/documents/${documentId}/versions/${versionId}/save`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });

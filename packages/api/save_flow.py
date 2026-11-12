@@ -5,6 +5,7 @@ reports one plain outcome.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -65,6 +66,17 @@ PLAIN = {
     "invalid_xml": "This isn't well-formed XML yet. Fix it and save again.",
     "formatting_not_preserved": "This edit couldn't be saved without changing other text, so nothing was saved. Your edits are still here.",
     "text_too_large": "This text is too large to save.",
+    "glyph_unavailable": "This text uses a font that doesn't include one of the new characters. Use characters already present in the line.",
+    "overflow": "The new text is too long for its space and would run into neighbouring content. Shorten it.",
+    "stale_target": "This text changed since it was selected. Reopen the version and try again.",
+    "no_change": "There is no change to save.",
+    "shared_operator": "This text is drawn together with neighbouring text and can't be changed on its own.",
+    "font_unsupported": "This text uses a font encoding that can't be edited safely.",
+    "font_metrics_unknown": "This text uses a font without size data, so a safe fit check isn't possible.",
+    "undecodable_text": "This text can't be read reliably enough to edit.",
+    "multiline_not_supported": "Edit one line at a time.",
+    "unknown_target": "That text could not be found.",
+    "pdf_verification_failed": "The edited PDF didn't pass the safety checks, so nothing was saved. Your edits are still here.",
 }
 GENERIC = "This change couldn't be saved safely. Your edits are still here."
 
@@ -87,11 +99,19 @@ class SaveChange(BaseModel):
     value: str | bool | int | float
 
 
+class PdfTextEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=3, max_length=300, pattern=r"^p\d+:[^\s]+:\d+-\d+$")
+    old: str = Field(max_length=2000)
+    new: str = Field(max_length=2000)
+
+
 class SaveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     changes: list[SaveChange] = Field(default_factory=list, max_length=500)
     text: str | None = Field(default=None, max_length=extraction.MAX_TEXT_BYTES)
     html: str | None = Field(default=None, max_length=extraction.MAX_TEXT_BYTES)  # formatted Markdown/HTML edits
+    pdf_edits: list[PdfTextEdit] | None = Field(default=None, max_length=200)      # ordinary-PDF text edits
 
 
 class SaveRejected(APIError):
@@ -346,3 +366,64 @@ def save_rich(request: Request, identity: AuthenticatedIdentity, document_id: UU
     except richtext.RichTextRejected as error:
         raise SaveRejected(error.code, status=422) from None
     return save_text(request, identity, document_id, version_id, new_text, suffix)
+
+
+def _commit_derived_bytes(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID,
+                          version: dict[str, Any], data: bytes, details: dict[str, Any]) -> UUID:
+    """Scan, promote and attach one same-format derived version (shared by the byte-level writers)."""
+    storage = request.app.state.document_storage
+    scanner = request.app.state.ingestion_pipeline.scanner
+    staged = storage.stage(identity.tenant_id, document_id, uuid4(), io.BytesIO(data),
+                           max_bytes=request.app.state.settings.max_upload_bytes)
+    try:
+        scan = scanner.scan(staged.path)
+    except Exception:  # noqa: BLE001 - scanner failures fail closed
+        scan = None
+    if scan is None or scan.status != "clean" or scan.sha256 != staged.sha256:
+        if scan is not None and scan.status == "infected":
+            storage.quarantine(staged)
+            raise SaveRejected("blocked", "The saved file didn't pass the safety scan.")
+        storage.discard_staged(staged)
+        raise SaveRejected("release_scan_unavailable", status=503)
+    stored = storage.promote_derived(staged, scan, edit_set_id=uuid4())
+    try:
+        with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
+            return DocumentRepository(connection, identity.tenant_id).commit_text_version(
+                document_id=document_id, base_version_id=version_id, stored=stored,
+                media_type=str(version.get("mime") or "application/octet-stream"), actor_id=identity.subject,
+                details={**details, "malware_scan": scan.status, "source_sha256": str(version["sha256"])})
+    except ValueError:
+        raise SaveRejected("stale_base_version", status=409) from None
+    except (SQLAlchemyError, RuntimeError, PermissionError):
+        raise APIError(503, "save_unavailable", "Saving is unavailable right now. Try again in a moment.") from None
+
+
+def pdf_edit_candidate(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID,
+                       edits: list[PdfTextEdit]) -> tuple[bytes, dict[str, Any], dict[str, Any]]:
+    """Apply text edits in the sandboxed worker and verify the result. Raises SaveRejected with plain wording."""
+    from packages.core import pdf_signature
+    from packages.workers.pdf_edit import PdfEditRefused, PdfEditUnavailable
+    version, source = _source_version(request, identity, document_id, version_id)
+    sig = pdf_signature.classify(source)
+    if pdf_signature.blocks_editing(sig["status"]):
+        raise SaveRejected("pdf_signed", pdf_signature.REASONS[sig["status"]], status=409)
+    path = request.app.state.document_storage.root / str(version["storage_key"])
+    try:
+        data, report = request.app.state.pdf_editor.edit(path, [e.model_dump() for e in edits])
+    except PdfEditRefused as refused:
+        raise SaveRejected(refused.code, plain(refused.code)) from None
+    except PdfEditUnavailable:
+        raise APIError(503, "pdf_edit_unavailable", "PDF editing is unavailable right now. Try again in a moment.") from None
+    if report.get("outcome") != "VERIFIED" or hashlib.sha256(data).hexdigest() != report.get("output_sha256"):
+        raise SaveRejected("pdf_verification_failed", status=422)
+    return data, report, version
+
+
+def save_pdf_text(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID,
+                  edits: list[PdfTextEdit]) -> dict[str, Any]:
+    data, report, version = pdf_edit_candidate(request, identity, document_id, version_id, edits)
+    new_version = _commit_derived_bytes(request, identity, document_id, version_id, version, data, {
+        "writer": "pdf_text", "outcome": "VERIFIED", "edit_count": len(edits),
+        "edited_pages": sorted({e["page"] + 1 for e in report["edits"]}),
+        "edit_targets": [e.id for e in edits], "checks": report["checks"], "decode_verified": True})
+    return {"version_id": str(new_version), "outcome": "VERIFIED", "note": None}

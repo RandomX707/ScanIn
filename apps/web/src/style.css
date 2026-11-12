@@ -125,3 +125,10 @@ html,body{max-width:100%;overflow-x:clip}
 .pdf-field.changed{background:#fff5d9;border-color:#d8a93a}
 .pdf-field[type=checkbox],.pdf-field[type=radio]{padding:0;accent-color:#2c6a4c}
 .edit-error{color:var(--coral-ink);font-size:11px}
+.pdf-run{position:absolute;margin:0;padding:0;border:0;background:transparent;cursor:text;border-radius:2px}
+.pdf-run:hover{background:#fa795c1f;outline:1px dashed #fa795c}
+.pdf-run[data-locked=true]{cursor:not-allowed}
+.pdf-run[data-locked=true]:hover{background:#9993;outline:1px dashed #999}
+.pdf-run.changed{background:#ffe9a655;outline:1px solid #d8a93a}
+.pdf-run.refused{outline:2px solid var(--coral-ink,#c0392b)}
+.pdf-run-input{box-sizing:border-box;z-index:2}

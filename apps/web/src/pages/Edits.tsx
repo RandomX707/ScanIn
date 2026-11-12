@@ -5,6 +5,7 @@ import {
   type Chunks, type FolderVersion, type Preview, type SaveBody,
 } from "../lib/api";
 import { DocxEditor, GridEditor, PdfEditor, RichEditor, TextEditor } from "./editors";
+import { PdfTextEditor } from "./PdfTextEditor";
 
 export type EditsProps = {
   documentId: string; folderName: string; version: FolderVersion; family: FolderVersion[]; chunksText: Chunks | null;
@@ -17,6 +18,7 @@ const DESCRIPTION: Record<string, string> = {
   grid: "Click a cell to change its value. Locked cells can't be edited. Your original is preserved.",
   docx: "Edit the highlighted text directly. Dimmed text is read-only. Your original is preserved.",
   pdf: "Fill in the form fields on the page. Your original is preserved.",
+  pdf_text: "Click text on the page to change it. Your original is preserved.",
 };
 
 export function EditsTab(props: EditsProps) {
@@ -92,6 +94,8 @@ export function EditsTab(props: EditsProps) {
       {mode === "text" && !rich && <TextEditor key={resetKey} preview={preview} formatting={false} onBody={onBody} onReset={reset} />}
       {mode === "grid" && <GridEditor key={resetKey} preview={preview} onBody={onBody} />}
       {mode === "docx" && <DocxEditor key={resetKey} preview={preview} onBody={onBody} />}
+      {mode === "pdf_text" && <PdfTextEditor key={resetKey} documentId={documentId} versionId={version.version_id} preview={preview} notify={notify}
+        fetchBytes={async () => (await fetchVersionFile(documentId, version.version_id)).arrayBuffer()} onBody={onBody} />}
       {mode === "pdf" && <PdfEditor key={resetKey} preview={preview} fetchBytes={async () => (await fetchVersionFile(documentId, version.version_id)).arrayBuffer()} onBody={onBody} />}
       <div className="edit-actions">
         <div>

@@ -3,7 +3,8 @@ Output (private, gitignored): .private/inventory/probe-<label>.json ; stdout sho
 import hashlib, json, subprocess, sys, urllib.request, urllib.parse
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
-API = "http://127.0.0.1:8000"
+import os
+API = os.environ.get("CHANNEL360_API", "http://127.0.0.1:8000")
 label = sys.argv[1] if len(sys.argv) > 1 else "baseline"
 tok = json.loads(subprocess.run([sys.executable, str(ROOT / "scripts/host/issue_test_token.py")], capture_output=True, text=True, check=True).stdout)
 H = {"Authorization": f"Bearer {tok['token']}"}

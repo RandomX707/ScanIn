@@ -107,11 +107,16 @@ class DocumentRepository:
         if not documents:
             return []
         rows = self.connection.execute(text("""SELECT v.document_id,v.id AS version_id,v.parent_version_id,v.kind,
-            v.created_at,f.size_bytes,f.mime,m.outcome AS verification_outcome
+            v.created_at,f.size_bytes,f.mime,
+            COALESCE(m.outcome, ev.outcome) AS verification_outcome
             FROM document_versions v JOIN files f ON f.tenant_id=v.tenant_id AND f.id=v.file_id
             LEFT JOIN LATERAL (SELECT outcome FROM verification_manifests vm
               WHERE vm.tenant_id=v.tenant_id AND vm.edit_set_id=v.edit_set_id
               ORDER BY vm.created_at DESC LIMIT 1) m ON v.edit_set_id IS NOT NULL
+            LEFT JOIN LATERAL (SELECT a.payload->>'outcome' AS outcome FROM audit_events a
+              WHERE a.tenant_id=v.tenant_id AND a.action='document.text_version_saved'
+                AND a.subject=v.document_id::text AND a.payload->>'version_id'=v.id::text
+              ORDER BY a.sequence DESC LIMIT 1) ev ON v.kind='derived' AND v.edit_set_id IS NULL
             WHERE v.tenant_id=:tenant AND v.document_id = ANY(:ids)
             ORDER BY v.created_at,v.id"""),
             {"tenant": self.tenant_id, "ids": [row["id"] for row in documents]}).mappings().all()

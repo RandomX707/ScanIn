@@ -25,6 +25,7 @@ from packages.db.engine import create_runtime_engine, create_worker_engine
 from packages.ingestion.pipeline import IngestionOrchestrator
 from packages.ingestion.scanner import ClamAvUnixScanner
 from packages.storage.local import ImmutableLocalStorage
+from packages.workers.pdf_edit import RestrictedPdfEditor
 from packages.workers.parser import RestrictedParser
 
 
@@ -59,6 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.worker_engine = worker_engine
     app.state.document_storage = ImmutableLocalStorage(runtime_settings.storage_root)
     app.state.restricted_parser = RestrictedParser(Path(__file__).resolve().parents[2])
+    app.state.pdf_editor = RestrictedPdfEditor(Path(__file__).resolve().parents[2])
     app.state.ingestion_pipeline = IngestionOrchestrator(
         app.state.document_storage,
         ClamAvUnixScanner(runtime_settings.clamav_socket_path),

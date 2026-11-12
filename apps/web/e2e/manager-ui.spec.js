@@ -265,7 +265,6 @@ test.describe('Scan In workspace: upload, read, edit, save as next version', () 
   for (const [label, file, ext, sentence] of [
     ['signed PDF', 'synthetic-signed.pdf', 'pdf', /signed|signature/i],
     ['XFA PDF', 'synthetic-xfa.pdf', 'pdf', /XFA/],
-    ['PDF without form fields', 'synthetic-invoice-no-fields.pdf', 'pdf', /no form fields/],
     ['tracked-changes DOCX', 'synthetic-tracked-changes.docx', 'docx', /tracked changes/],
   ]) {
     test(`${label} is read only with one plain sentence`, async ({ page }) => {
@@ -275,6 +274,27 @@ test.describe('Scan In workspace: upload, read, edit, save as next version', () 
       await expect(page.locator('textarea, [contenteditable], .cell-input, .pdf-field')).toHaveCount(0);
     });
   }
+
+  test('an ordinary PDF without form fields is edited as real text and saved as the next version', async ({ page }) => {
+    const original = fs.readFileSync(path.join(fixtureDir, 'synthetic-invoice-no-fields.pdf'));
+    await upload(page, unique('plainpdf', 'pdf'), 'pdf', original);
+    await page.locator('.tab', { hasText: 'Edits' }).click();
+    await expect(page.getByText('no form fields')).toHaveCount(0);
+    const run = page.locator('.pdf-run:not([data-locked])').first();
+    await expect(run).toBeVisible({ timeout: 60_000 });
+    const oldText = (await run.getAttribute('aria-label')).replace('Edit text: ', '');
+    const newText = oldText.includes(' ') ? oldText.split(' ').slice(0, -1).join(' ') : oldText.slice(0, -1);
+    await run.click();
+    await page.locator('.pdf-run-input').fill(newText);
+    await page.locator('.pdf-run-input').press('Enter');
+    await expect(page.locator('.pdf-run.changed')).toBeVisible({ timeout: 60_000 });
+    await saveNextVersion(page);
+    const v2 = await download(page, () => page.getByRole('button', { name: /^Export/ }).click());
+    const out = path.join(fixtureDir, `v2-${v2.name}`);
+    fs.writeFileSync(out, v2.bytes);
+    const src = path.join(fixtureDir, 'synthetic-invoice-no-fields.pdf');
+    expect(execFileSync(python, [path.join(root, 'scripts/corpus/verify_pdf_text.py'), src, out, oldText, newText]).toString().trim()).toBe('OK');
+  });
 
   test('an encrypted PDF is refused rather than opened for editing', async ({ page }) => {
     await page.goto('/');

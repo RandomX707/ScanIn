@@ -55,6 +55,23 @@ class EditRefused(Exception):
 
 # ───────────────────────────── fonts ─────────────────────────────
 
+_STD14 = {"Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique", "Times-Roman", "Times-Bold",
+          "Times-Italic", "Times-BoldItalic", "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique"}
+
+
+def _standard14(base: str) -> str | None:
+    name = base.split("+")[-1]
+    return name if name in _STD14 else None
+
+
+def _std_width(name: str, ch: str) -> float:
+    from reportlab.pdfbase import pdfmetrics          # exact AFM metrics for the 12 text base-14 fonts
+    try:
+        return float(pdfmetrics.stringWidth(ch, name, 1000))
+    except Exception:  # pragma: no cover
+        return 500.0
+
+
 _BF = re.compile(rb"beginbfchar(.*?)endbfchar", re.S)
 _BR = re.compile(rb"beginbfrange(.*?)endbfrange", re.S)
 _HEX = re.compile(rb"<([0-9A-Fa-f\s]*)>")
@@ -121,9 +138,10 @@ class FontInfo:
         else:
             self.first = int(font.get("/FirstChar", 0))
             wl = font.get("/Widths")
+            self.std_name = _standard14(self.base) if wl is None else None
             if wl is not None:
                 self.widths = [float(x) for x in wl.get_object()]
-            else:
+            elif self.std_name is None:
                 self.estimated_widths = True
             fd = font.get("/FontDescriptor")
             if fd is not None:
@@ -188,6 +206,11 @@ class FontInfo:
     def width(self, code: int) -> float:
         if self.is_type0:
             return self.w.get(code, self.dw)
+        if getattr(self, "std_name", None):
+            ch = self.to_uni.get(code)
+            if not ch:
+                return 500.0
+            return _std_width(self.std_name, ch)
         i = code - self.first
         if 0 <= i < len(self.widths):
             return self.widths[i] or self.missing
@@ -449,6 +472,23 @@ class PdfTextEngine:
                 return r
         raise EditRefused("unknown_target", "That text could not be found.")
 
+    def run_status(self, run: Run) -> tuple[bool, str | None]:
+        """Is this run structurally editable?  (Glyph availability and fit are checked per edit.)"""
+        try:
+            font = self._font_for(run)
+        except EditRefused as err:
+            return False, err.code
+        if not font.supported:
+            return False, "font_unsupported"
+        if font.estimated_widths:
+            return False, "font_metrics_unknown"
+        if "\ufffd" in run.text:
+            return False, "undecodable_text"
+        cont = self._containers[(run.page, run.container)]
+        if sum(cont.opcount.get(i, 0) for i in range(run.i0, run.i1 + 1)) != len(run.glyphs):
+            return False, "shared_operator"
+        return True, None
+
     # -- fit analysis
     def free_right(self, run: Run) -> float:
         """Space (pt) available to the right of the run before the next text object or the page margin."""
@@ -557,11 +597,19 @@ class PdfTextEngine:
         if hasattr(cont.obj, "get_contents") and "/Contents" in cont.obj:
             stream = DecodedStreamObject()
             stream.set_data(data)
-            cont.obj[NameObject("/Contents")] = self.writer._add_object(stream)
+            cont.obj[NameObject("/Contents")] = self.writer._add_object(stream.flate_encode())
         else:
             cont.obj.set_data(data)
+            try:
+                cont.obj.flate_encode()
+            except Exception:  # already encoded streams keep their own filter
+                pass
 
     def save(self) -> bytes:
+        try:
+            self.writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
+        except Exception:  # pragma: no cover - cosmetic size optimisation only
+            pass
         buf = io.BytesIO()
         self.writer.write(buf)
         return buf.getvalue()
@@ -577,3 +625,14 @@ def _raw(s) -> bytes:
         return bytes(s)
     ob = getattr(s, "original_bytes", None)
     return ob if ob is not None else str(s).encode("latin-1", "replace")
+
+
+def edit_order(run_ids: list[str]) -> list[str]:
+    """Order ids so earlier edits never shift operator indices that later edits depend on:
+    nested form XObjects first, then higher operator index before lower within a content stream."""
+    def key(rid: str):
+        m = re.match(r"p(\d+):(.*):(\d+)-(\d+)$", rid)
+        page, path, i0 = int(m.group(1)), m.group(2), int(m.group(3))
+        depth = 0 if path == "page" else path.count("/") + 1
+        return (page, -depth, path, -i0)
+    return sorted(run_ids, key=key)

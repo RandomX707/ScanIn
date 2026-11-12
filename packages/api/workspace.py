@@ -17,8 +17,10 @@ from packages.api.auth import AuthenticatedIdentity, require_identity
 from packages.api.db_context import api_tenant_transaction
 from packages.api.documents import _filename, _source_version, ingest_stream, inspect_document
 from packages.api.errors import APIError
-from packages.api.save_flow import SaveRequest, json_value_changes, save_native, save_rich, save_text, suffix_of, _guard_ready
-from packages.core import extraction
+from packages.api.save_flow import (PdfTextEdit, SaveRejected, SaveRequest, json_value_changes, pdf_edit_candidate, save_native,
+                                    save_pdf_text, save_rich, save_text, suffix_of, _guard_ready)
+from pydantic import BaseModel, ConfigDict, Field
+from packages.core import extraction, pdf_signature
 from packages.core.chunking import chunkify
 from packages.registry.documents import DocumentRepository
 from packages.workers.parser import ParserNotVerified
@@ -213,6 +215,8 @@ def save_version(document_id: str, version_id: str, payload: SaveRequest, reques
             result = save_text(request, identity, parsed_document, parsed_version, payload.text, suffix)
         else:
             raise APIError(422, "patch_set_empty", "Nothing changed, so there is no new version to save.")
+    elif suffix == ".pdf" and payload.pdf_edits:
+        result = save_pdf_text(request, identity, parsed_document, parsed_version, payload.pdf_edits)
     elif suffix in {".csv", ".xlsx", ".docx", ".pdf"}:
         result = save_native(request, identity, parsed_document, parsed_version, payload.changes)
     else:
@@ -477,18 +481,78 @@ def version_preview(document_id: str, version_id: str, request: Request,
                        "e": bool(f.get("editable")), "r": None if f.get("editable") else cell_reason(f.get("reason")),
                        "widgets": (f.get("native_locator") or {}).get("widgets", [])} for f in details.get("fields", [])]
             editable = level == "editable" and bool(fields)
+            signature = pdf_signature.classify(source)
+            text_editable = False
+            if editable and signature["status"] in pdf_signature.REASONS:
+                editable = False                       # a signed form must not be filled in place
             if editable:
                 reason = None
+            elif signature["status"] in pdf_signature.REASONS:
+                reason = pdf_signature.REASONS[signature["status"]]
             elif details.get("xfa"):
                 reason = FILE_REASONS["xfa"]
+            elif (level == "editable" or set(reasons) <= {"no_acroform_fields"}) and any(not p["scanned"] for p in pages):
+                text_editable = True                   # ordinary selectable-text PDF: edit the text itself
+                reason = None
             elif level == "editable":
-                reason = FILE_REASONS["no_acroform_fields"]
+                reason = FILE_REASONS["scanned_or_image_pdf"]
             elif pages and all(p["scanned"] for p in pages):
                 reason = FILE_REASONS["scanned_or_image_pdf"]
             else:
                 reason = file_reason(reasons, suffix)
-            return done("pdf", "pdf" if editable else "none", reason, pages=pages, fields=fields,
-                        text_available=any(not p["scanned"] for p in pages))
+            return done("pdf", "pdf" if editable else "pdf_text" if text_editable else "none", reason, pages=pages,
+                        fields=fields, text_available=any(not p["scanned"] for p in pages),
+                        signature={"status": signature["status"], "validated": False})
     except ParserNotVerified:
         raise APIError(503, "view_not_verified", "Safe document viewing is unavailable.") from None
     return done("none", "none", file_reason([], suffix))
+
+
+@router.get("/documents/{document_id}/versions/{version_id}/pdf-text")
+def pdf_text_runs(document_id: str, version_id: str, request: Request, page: int = Query(ge=1, le=5000),
+                  identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
+    """Selectable text runs (with page coordinates) of one page of an ordinary PDF version."""
+    from packages.workers.pdf_edit import PdfEditUnavailable
+    try:
+        parsed_document, parsed_version = UUID(document_id), UUID(version_id)
+    except ValueError:
+        raise APIError(404, "not_found", "The requested version was not found.") from None
+    version, source = _source_version(request, identity, parsed_document, parsed_version)
+    if not source.startswith(b"%PDF-"):
+        raise APIError(415, "not_a_pdf", "This version isn't a PDF.")
+    status = pdf_signature.classify(source)["status"]
+    path = request.app.state.document_storage.root / str(version["storage_key"])
+    try:
+        data = request.app.state.pdf_editor.runs(path, page)
+    except PdfEditUnavailable:
+        raise APIError(503, "pdf_edit_unavailable", "PDF text isn't available right now. Try again in a moment.") from None
+    locked = pdf_signature.REASONS.get(status)
+    if locked:
+        for run in data["runs"]:
+            run["e"], run["r"] = False, locked
+    else:
+        from packages.api.save_flow import plain
+        for run in data["runs"]:
+            if not run["e"]:
+                run["r"] = plain(str(run["r"]))
+    return data
+
+
+class PdfPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    pdf_edits: list[PdfTextEdit] = Field(min_length=1, max_length=200)
+
+
+@router.post("/documents/{document_id}/versions/{version_id}/pdf-edit/preview")
+def pdf_edit_preview(document_id: str, version_id: str, payload: PdfPreviewRequest, request: Request,
+                     identity: AuthenticatedIdentity = Depends(require_identity)) -> Response:
+    """The edited PDF exactly as it would be saved (not stored). Refusals explain themselves."""
+    try:
+        parsed_document, parsed_version = UUID(document_id), UUID(version_id)
+    except ValueError:
+        raise APIError(404, "not_found", "The requested version was not found.") from None
+    _guard_ready(request, identity, parsed_document, parsed_version)
+    data, report, _version = pdf_edit_candidate(request, identity, parsed_document, parsed_version, payload.pdf_edits)
+    return Response(content=data, media_type="application/pdf", headers={
+        "Cache-Control": "no-store", "X-Preview-Outcome": str(report["outcome"]),
+        "X-Preview-Checks": str(len(report["checks"]))})
