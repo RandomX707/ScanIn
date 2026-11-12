@@ -1,7 +1,7 @@
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
-import { ApiError, listFolders, openDemo, openSample, uploadAndInspect, type Folder } from "./lib/api";
+import { ApiError, archiveMessage, importArchive, listFolders, openDemo, openSample, uploadAndInspect, type Folder } from "./lib/api";
 import { Topbar, type View } from "./pages/Shell";
 import { Home } from "./pages/Home";
 import { FolderPage, History } from "./pages/Library";
@@ -48,9 +48,24 @@ function App() {
     busy.current = true;
     let last: { document_id: string; version_id: string } | null = null;
     let successes = 0;
+    let archiveDocs = 0;
+    let archiveNote: { text: string; problem: boolean } | null = null;
     for (const file of files.slice(0, 10)) {
-      if (file.size > MAX_BYTES) { notify(`${file.name}: 30 MB limit exceeded.`, true); continue; }
+      if (file.size > MAX_BYTES && !/\.zip$/i.test(file.name)) { notify(`${file.name}: 30 MB limit exceeded.`, true); continue; }
       setProgress({ name: file.name, step: 0 });
+      if (/\.zip$/i.test(file.name)) {
+        try {
+          const report = await importArchive(file);
+          const { text, problem } = archiveMessage(report);
+          archiveNote = { text, problem };
+          const docs = report.entries.filter((e) => e.document_id && e.version_id);
+          if (docs.length === 1) last = { document_id: docs[0].document_id!, version_id: docs[0].version_id! };
+          archiveDocs += docs.length;
+        } catch (error) {
+          notify(`${file.name}: ${error instanceof ApiError ? error.message : "Cannot import archive"}`, true);
+        } finally { setProgress(null); }
+        continue;
+      }
       try {
         const registered = await uploadAndInspect(file, (step) => setProgress({ name: file.name, step }));
         setProgress({ name: file.name, step: 2 });
@@ -64,6 +79,12 @@ function App() {
     }
     busy.current = false;
     await refresh();
+    if (archiveNote) {
+      // An archive adds several documents: show the whole set in History (a single one opens directly).
+      if (last && !successes && archiveDocs === 1) openWorkspace(last.document_id, last.version_id); else if (archiveDocs) go("history");
+      notify(archiveNote.text, archiveNote.problem);
+      if (!successes) return;
+    }
     if (successes && last) {
       openWorkspace(last.document_id, last.version_id);
       notify(`${successes} document${successes === 1 ? "" : "s"} added. Original preserved.`);
@@ -99,7 +120,7 @@ function App() {
   return (
     <div className="app">
       <input ref={fileInput} type="file" id="file-input" hidden multiple data-testid="file-input"
-        accept=".pdf,.docx,.xlsx,.xls,.pptx,.odt,.png,.jpg,.jpeg,.gif,.webp,.bmp,.txt,.text,.md,.markdown,.csv,.json,.html,.htm,.xml,.rtf"
+        accept=".zip,.pdf,.docx,.xlsx,.xls,.pptx,.odt,.png,.jpg,.jpeg,.gif,.webp,.bmp,.txt,.text,.md,.markdown,.csv,.json,.html,.htm,.xml,.rtf"
         onChange={(e) => { const picked = Array.from(e.target.files ?? []); e.target.value = ""; void ingest(picked); }} />
       <Topbar view={view} onHome={() => go("home")} onHistory={() => go("history")} onDemo={demo} onBrowse={browse} />
       {view === "home" && <Home folders={folders} onBrowse={browse} onFiles={(f) => void ingest(f)} onFormat={format} onFolder={openFolder} onHistory={() => go("history")} />}

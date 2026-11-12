@@ -59,6 +59,36 @@ export async function fetchVersionFile(documentId: string, versionId: string): P
   return response.blob();
 }
 
+export type ArchiveEntry = { path: string; name: string; folder: string; status: "imported" | "linked_duplicate" | "skipped" | "blocked" | "failed";
+  reason: string | null; reason_text: string | null; document_id: string | null; version_id: string | null; sha256: string | null };
+export type ArchiveReport = { archive: { name: string; sha256: string; size_bytes: number };
+  summary: { entries: number; imported: number; linked_duplicate: number; skipped: number; blocked: number; failed: number; recognized: number };
+  entries: ArchiveEntry[] };
+export async function importArchive(file: File): Promise<ArchiveReport> {
+  const response = await request(`/api/archives?filename=${encodeURIComponent(file.name)}`, { method: "PUT", body: file });
+  if (!response.ok) {
+    let body: { message?: string } = {};
+    try { body = await response.json(); } catch { /* generic */ }
+    throw new ApiError(response.status, "archive_failed", body.message ?? "This archive could not be imported.");
+  }
+  return response.json() as Promise<ArchiveReport>;
+}
+
+/** One plain-language sentence (plus the first few problems) for an archive import. */
+export function archiveMessage(report: ArchiveReport): { text: string; problem: boolean } {
+  const { summary: s, archive } = report;
+  const parts = [`${archive.name}: ${s.recognized} document${s.recognized === 1 ? "" : "s"} found`];
+  const done = [s.imported ? `${s.imported} added` : "", s.linked_duplicate ? `${s.linked_duplicate} already in your workspace` : ""].filter(Boolean);
+  if (done.length) parts.push(done.join(", "));
+  const trouble = report.entries.filter((e) => e.status === "blocked" || e.status === "failed" || e.status === "skipped");
+  let text = parts.join(" — ") + ".";
+  if (trouble.length) {
+    const shown = trouble.slice(0, 3).map((e) => `${e.name} (${e.reason_text ?? "not imported"})`).join("; ");
+    text += ` Not imported: ${shown}${trouble.length > 3 ? ` and ${trouble.length - 3} more` : ""}.`;
+  }
+  return { text, problem: trouble.some((e) => e.status !== "skipped") || s.recognized === 0 };
+}
+
 export async function uploadAndInspect(file: File, step: (n: number) => void): Promise<{ document_id: string; version_id: string }> {
   step(0);
   const upload = await request(`/api/documents?filename=${encodeURIComponent(file.name)}`, { method: "PUT", body: file });

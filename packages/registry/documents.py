@@ -100,7 +100,10 @@ class DocumentRepository:
         """Ready documents with their ordered version families (single-owner folder view)."""
         if not 1 <= limit <= 500:
             raise ValueError("limit_out_of_range")
-        documents = self.connection.execute(text("""SELECT d.id,d.filename,d.created_at,d.current_version_id
+        documents = self.connection.execute(text("""SELECT d.id,d.filename,d.created_at,d.current_version_id,
+            (SELECT a.payload FROM audit_events a WHERE a.tenant_id=d.tenant_id AND a.action='document.archive_provenance'
+               AND a.subject=d.id::text AND COALESCE(a.payload->>'linked','false')<>'true'
+             ORDER BY a.sequence LIMIT 1) AS provenance
             FROM documents d WHERE d.tenant_id=:tenant AND d.ingestion_state='ready'
             ORDER BY d.created_at DESC,d.id LIMIT :limit"""),
             {"tenant": self.tenant_id, "limit": limit}).mappings().all()
@@ -159,6 +162,21 @@ class DocumentRepository:
             WHERE d.tenant_id=:tenant AND d.id=:document AND v.kind='original'"""),
             {"tenant": self.tenant_id, "document": document_id}).mappings().one_or_none()
         return dict(row) if row is not None else None
+
+    def find_original_by_sha(self, sha256: str) -> dict[str, object] | None:
+        """An existing ready document in this tenant whose ORIGINAL bytes have this SHA-256 (oldest first)."""
+        row = self.connection.execute(text("""SELECT d.id AS document_id,d.filename,v.id AS version_id
+            FROM documents d JOIN document_versions v ON v.tenant_id=d.tenant_id AND v.document_id=d.id
+            WHERE d.tenant_id=:tenant AND v.kind='original' AND v.sha256=:sha AND d.ingestion_state='ready'
+            ORDER BY d.created_at LIMIT 1"""), {"tenant": self.tenant_id, "sha": sha256}).mappings().one_or_none()
+        return dict(row) if row is not None else None
+
+    def record_archive_provenance(self, *, document_id: UUID, actor_id: str, payload: dict[str, object]) -> None:
+        append_event(connection=self.connection, actor_id=actor_id, action="document.archive_provenance",
+                     subject=str(document_id), payload=payload)
+
+    def record_archive_import(self, *, actor_id: str, subject: str, payload: dict[str, object]) -> None:
+        append_event(connection=self.connection, actor_id=actor_id, action="archive.imported", subject=subject, payload=payload)
 
     def get_version(self, document_id: UUID, version_id: UUID) -> dict[str, object] | None:
         row = self.connection.execute(text("""SELECT d.id AS document_id,d.tenant_id,d.filename,

@@ -73,6 +73,9 @@ def _folder_payload(folder: dict[str, object]) -> dict[str, object]:
         "created_at": folder["created_at"].isoformat(),
         "latest_version_id": str(versions[-1]["version_id"]),
         "demo": filename == DEMO_FILENAME or filename in SAMPLE_FILES.values(),
+        # Where an archive-imported document came from (archive name + path inside it); None for direct uploads.
+        "source": ({"archive": folder["provenance"].get("archive_name"), "path": folder["provenance"].get("entry_path")}
+                   if isinstance(folder.get("provenance"), dict) else None),
         "versions": [{
             "version_id": str(item["version_id"]),
             "number": index + 1,
