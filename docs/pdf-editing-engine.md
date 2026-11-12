@@ -45,10 +45,29 @@ so Apryse or Nutrient can be dropped in later.
 **Blocker recorded:** Apryse and Nutrient fidelity cannot be benchmarked without trial/commercial keys; they must be
 obtained by the stakeholder/owner. Until then no SDK is committed to.
 
+## What stress testing on the real files taught us (M3)
+Each of these was found by the independent verifier refusing a save, then fixed and pinned by a test:
+* **Marked-content `/ActualText`** overrides what extractors read; an edit inside such a span must drop it, otherwise
+  search/copy/accessibility keep returning the *old* wording.
+* **Shared Form XObjects** (tiled exports reuse one giant form on every page, and a form can be drawn twice on a page):
+  edits are copy-on-write (clone the form + resource dicts per Do site) so other pages never change.
+* **Invisible text** (off-page or clipped) is never offered: runs are filtered by page box and by rendered ink.
+* **Width model must use the real horizontal em** (includes `Tz` and the CTM) and `Tc`; nominal font size gave wrong fits.
+* **A `ToUnicode` entry is not proof a glyph exists.** Presence is read from the embedded TrueType program
+  (fontTools) and from codes actually used in page content; a render-ink check verifies every new character drew.
+* **pypdf `compress_identical_objects(remove_orphans=True)` silently dropped images** (11 of 29 in one file). Not used;
+  the `images_preserved` check would have refused the save anyway.
+* Standard-14 fonts with no `/Widths` use exact AFM metrics (reportlab) instead of being refused.
+
+Results (shortening, number-change and multi-edit-batch stress on CAR/Fire/GMC/Marine/QCR pages): all accepted edits
+verified; refusals were honest `overflow` cases. Missing glyphs fall back to a *disclosed* standard-14 font
+(sans/serif/mono, bold/italic from the original name); characters outside WinAnsi (e.g. ₹) are refused.
+
 ## Known limits (reported to users as plain sentences)
-* New characters must exist in the original (usually subset) font. Otherwise the edit is refused (`glyph_unavailable`);
-  a disclosed, embedded substitute-font path is planned in M3.
+* New characters missing from the original subset font are redrawn in a similar standard font and the save says so;
+  characters outside WinAnsi are refused (`glyph_unavailable`). An *embedded* substitute (for ₹ etc.) is open work.
 * Edits are single lines. Wrapped paragraphs and table cells are edited line by line; reflow is refused.
 * Text is left-aligned at the original start; centred/right-aligned text whose width changes is flagged.
-* Fonts without width data (standard-14 without /Widths) are refused until width tables are added.
+* Fonts without width data that are not standard-14 are refused.
+* Outlines of CFF (OpenType) subsets can't be inspected; the post-render ink check is the safeguard for them.
 * Digitally signed PDFs: original preserved; editing only via a labelled unsigned working copy (M3).

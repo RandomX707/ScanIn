@@ -43,9 +43,10 @@ export function PdfTextEditor({ documentId, versionId, preview, fetchBytes, onBo
       if (!list.length) {
         if (lib && original.current) setDoc(await open(original.current, lib));
       } else {
-        const bytes = await previewPdfEdits(documentId, versionId, list);
+        const { bytes, substituted } = await previewPdfEdits(documentId, versionId, list);
         if (mine !== seq.current) return true;
         if (lib) setDoc(await open(bytes, lib));
+        if (substituted) notify(`${substituted} edited line${substituted === 1 ? "" : "s"} use a similar standard font because the original font doesn't include every new character.`);
       }
       setEdits(next); setErrors((e) => { const { [runId]: _drop, ...rest } = e; return rest; });
       onBody(list.length ? { pdf_edits: list } : null);

@@ -115,7 +115,7 @@ export type PdfRun = { id: string; page: number; text: string; bbox: [number, nu
 export type PdfPageText = { page: number; width: number; height: number; runs: PdfRun[] };
 export const getPdfText = (documentId: string, versionId: string, page: number) =>
   json<PdfPageText>(`/api/documents/${documentId}/versions/${versionId}/pdf-text?page=${page}`);
-export async function previewPdfEdits(documentId: string, versionId: string, edits: PdfTextEdit[]): Promise<ArrayBuffer> {
+export async function previewPdfEdits(documentId: string, versionId: string, edits: PdfTextEdit[]): Promise<{ bytes: ArrayBuffer; substituted: number }> {
   const response = await request(`/api/documents/${documentId}/versions/${versionId}/pdf-edit/preview`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pdf_edits: edits }) });
   if (!response.ok) {
@@ -123,7 +123,7 @@ export async function previewPdfEdits(documentId: string, versionId: string, edi
     try { body = await response.json(); } catch { /* generic */ }
     throw new ApiError(response.status, body.code ?? "error", body.message ?? "That change couldn't be applied safely.");
   }
-  return response.arrayBuffer();
+  return { bytes: await response.arrayBuffer(), substituted: Number(response.headers.get("X-Preview-Substituted") ?? 0) };
 }
 
 export type SaveBody = { html?: string; changes?: { target_id: string; fingerprint: string; value: string | boolean }[]; text?: string; pdf_edits?: PdfTextEdit[] };

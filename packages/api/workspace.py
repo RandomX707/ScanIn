@@ -555,4 +555,6 @@ def pdf_edit_preview(document_id: str, version_id: str, payload: PdfPreviewReque
     data, report, _version = pdf_edit_candidate(request, identity, parsed_document, parsed_version, payload.pdf_edits)
     return Response(content=data, media_type="application/pdf", headers={
         "Cache-Control": "no-store", "X-Preview-Outcome": str(report["outcome"]),
-        "X-Preview-Checks": str(len(report["checks"]))})
+        "X-Preview-Checks": str(len(report["checks"])),
+        "X-Preview-Substituted": str(sum(1 for e in report["edits"] if e.get("substitute_font"))),
+        "Access-Control-Expose-Headers": "X-Preview-Outcome, X-Preview-Checks, X-Preview-Substituted"})

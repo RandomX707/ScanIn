@@ -39,7 +39,16 @@ def list_runs(source: bytes, page: int) -> dict:
         return {"error": "page_out_of_range"}
     pg = engine.writer.pages[page - 1]
     runs = []
+    scale = 2.0
+    img = _render(source, page - 1, scale)
+    l, b, _r, t = engine.page_box(page - 1)
     for r in engine.runs(page - 1):
+        if not engine.is_visible(r):
+            continue                      # off-page text is never offered
+        x0, y0, x1, y1 = r.bbox
+        box = img[max(int((t - y1) * scale), 0):max(int((t - y0) * scale), 1), max(int((x0 - l) * scale), 0):max(int((x1 - l) * scale), 1)]
+        if box.size == 0 or not (np.abs(box - np.bincount(np.clip(box.ravel(), 0, 255).astype(np.int64)).argmax()) > 30).any():
+            continue                      # clipped / covered / invisible text: nothing is drawn there
         ok, why = engine.run_status(r)
         runs.append({**r.public(), "e": ok, "r": why})
     return {"page": page, "width": float(pg.mediabox.width), "height": float(pg.mediabox.height), "runs": runs}
@@ -71,7 +80,8 @@ def apply_edits(source: bytes, edits: list[dict]) -> dict:
         except EditRefused as err:
             return {"error": err.code, "message": err.message, "edit_id": rid}
         plans.append({"id": rid, "page": run.page, "old": e["old"], "new": e["new"], "bbox": list(run.bbox),
-                      "x0": run.x0, "y": run.y, "new_width": res["new_width"], "size": run.size, "font": run.font_name})
+                      "x0": run.x0, "y": run.y, "new_width": res["new_width"], "size": run.size, "font": run.font_name,
+                      "substitute_font": res.get("substitute_font"), "cells": res["cells"]})
     out = engine.save()
     return {"out": out, "plans": plans, "before_runs": before_runs, "page_count": engine.page_count}
 
@@ -129,6 +139,29 @@ def verify(source: bytes, out: bytes, plans: list[dict], before_runs: dict[int, 
         now = {(round(r.x0, 1), round(r.y, 1), r.text) for r in new_engine.runs(page)}
         lost = keep - now
         add("unedited_text_preserved", not lost, f"Page {page + 1}: {len(keep) - len(lost)} of {len(keep)} other text runs are identical.")
+    # 3b. every new visible character really drew something (catches glyphs missing from an embedded font program)
+    for p in plans:
+        page = p["page"]
+        scale = 3.0
+        img = _render(out, page, scale)
+        H = float(src_reader.pages[page].mediabox.height)
+        x_start, em = p["x0"], p["size"]
+        total = max(p["new_width"], 1e-6)
+        y_top, y_bot = int((H - (p["y"] + 0.82 * em)) * scale), int((H - (p["y"] - 0.22 * em)) * scale)
+        band = img[max(y_top, 0):max(y_bot, 1), :]
+        blank = []
+        for ch, (o0, o1) in zip(p["new"], p["cells"]):
+            if ch.isspace():
+                continue
+            c0, c1 = int((x_start + o0) * scale), int((x_start + o1) * scale) + 1
+            cell = band[:, max(c0, 0):max(c1, c0 + 1)]
+            if cell.size == 0:
+                continue
+            bg = np.bincount(np.clip(cell.ravel(), 0, 255).astype(np.int64)).argmax()
+            if not (np.abs(cell - bg) > 40).any():
+                blank.append(ch)
+        add("new_glyphs_rendered", len(blank) <= 0, f"Edit on page {page + 1}: every new character is visible on the page." if not blank
+            else f"Edit on page {page + 1}: {len(blank)} new character(s) did not draw.")
     # 4. pixels: change confined to edited boxes; untouched pages identical
     for page in range(n_src):
         if page in pages:
@@ -173,7 +206,7 @@ def main() -> int:
                     handle.write(applied["out"])
                 result = {**report, "source_sha256": hashlib.sha256(source).hexdigest(),
                           "output_sha256": hashlib.sha256(applied["out"]).hexdigest(), "output_bytes": len(applied["out"]),
-                          "edits": [{k: pl[k] for k in ("id", "page", "font", "size")} for pl in applied["plans"]]}
+                          "edits": [{k: pl[k] for k in ("id", "page", "font", "size", "substitute_font")} for pl in applied["plans"]]}
     except EditRefused as err:
         result = {"error": err.code, "message": err.message}
     except Exception as exc:  # noqa: BLE001 - fail closed with a stable code, no document data in the message

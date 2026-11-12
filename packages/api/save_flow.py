@@ -75,6 +75,8 @@ PLAIN = {
     "font_metrics_unknown": "This text uses a font without size data, so a safe fit check isn't possible.",
     "undecodable_text": "This text can't be read reliably enough to edit.",
     "multiline_not_supported": "Edit one line at a time.",
+    "not_visible": "This text is outside the visible page, so it can't be edited.",
+    "marked_content_unsupported": "This text is wrapped in tagged content that can't be updated safely.",
     "unknown_target": "That text could not be found.",
     "pdf_verification_failed": "The edited PDF didn't pass the safety checks, so nothing was saved. Your edits are still here.",
 }
@@ -425,5 +427,13 @@ def save_pdf_text(request: Request, identity: AuthenticatedIdentity, document_id
     new_version = _commit_derived_bytes(request, identity, document_id, version_id, version, data, {
         "writer": "pdf_text", "outcome": "VERIFIED", "edit_count": len(edits),
         "edited_pages": sorted({e["page"] + 1 for e in report["edits"]}),
-        "edit_targets": [e.id for e in edits], "checks": report["checks"], "decode_verified": True})
-    return {"version_id": str(new_version), "outcome": "VERIFIED", "note": None}
+        "edit_targets": [e.id for e in edits], "checks": report["checks"], "decode_verified": True,
+        "font_substitutions": [{"id": e["id"], "substitute": e["substitute_font"]} for e in report["edits"] if e.get("substitute_font")]})
+    return {"version_id": str(new_version), "outcome": "VERIFIED", "note": substitution_note(report)}
+
+
+def substitution_note(report: dict[str, Any]) -> str | None:
+    n = sum(1 for e in report["edits"] if e.get("substitute_font"))
+    if not n:
+        return None
+    return (f"{n} edited line{'s' if n != 1 else ''} use a similar standard font because the original font doesn't include every new character.")

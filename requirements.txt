@@ -40,3 +40,4 @@ markdown-it-py==4.3.0
 markdownify==1.2.3
 mdurl==0.1.2
 nh3==0.3.7
+fonttools==4.55.3
