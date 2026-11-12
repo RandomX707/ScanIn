@@ -17,3 +17,8 @@ Environment note: clamd was not running (stale socket); started /opt/homebrew/sb
 - 3 done: Playwright runs in its own tenant per run (scripts/host/issue_test_token.py); zz-demo-workspace-clean test asserts the demo workspace gains nothing
 - 4 done: text writer returns/records SAVED; folder payload carries outcome
 - Verified: backend 565 passed / 32 skipped; Playwright 22/22; push still blocked (no credentials)
+
+## Round 3 — real stakeholder corpus (private fixtures in ignored `Policy Copies/`; nothing from them is committed)
+- M0 done: `/Policy Copies/` and `/.private/` gitignored (check-ignore verified, nothing was tracked); inventory verified: 30 occurrences / 17 unique (7 PDF, 9 XLSX, 1 DOCX), 132 pages, 43 formulas, 305 merged ranges; `scripts/corpus/inventory.py`
+- M1 done: `scripts/corpus/probe.py` drives every file through the real API in a fresh tenant. Found: all 7 PDFs `edit=none`; 2 large PDFs failed import (inspect output exceeded 2 MB sandbox cap because of per-character spans — removed, unused); chunks are arbitrary fragments; signature state not classified
+- M2 in progress: PDF content-editing benchmark / proof of concept

@@ -312,19 +312,9 @@ def _pdf_details(data: bytes, adapter, *, include_targets: bool) -> dict[str, An
             text_page = page.get_textpage()
             count = min(text_page.count_chars(), 10000)
             text = text_page.get_text_range(0, count)
-            spans: list[dict[str, Any]] = []
-            for char_index, char in enumerate(text[:2000]):
-                if char.isspace():
-                    continue
-                try:
-                    left, bottom, right, top = text_page.get_charbox(char_index)
-                except (IndexError, ValueError):
-                    continue
-                spans.append({"start": char_index, "end": char_index + 1, "text": char,
-                              "bbox": [round(left, 2), round(bottom, 2), round(right, 2), round(top, 2)]})
             pages.append({"page": page_number, "width": round(page.get_size()[0], 2),
                           "height": round(page.get_size()[1], 2), "text": text,
-                          "text_spans": spans, "scanned_or_image_only": not bool(text.strip())})
+                          "scanned_or_image_only": not bool(text.strip())})
     finally:
         document.close()
     return {"page_count": len(reader.pages), "title": str((reader.metadata or {}).get("/Title", "")),
