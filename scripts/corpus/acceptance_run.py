@@ -49,7 +49,11 @@ class Client:
         return s2, j, j2
 
     def file(self, d, v):
-        return self.call("GET", f"/api/documents/{d}/versions/{v}/file", raw=True)[1]
+        s, data, _ = self.call("GET", f"/api/documents/{d}/versions/{v}/file", raw=True)
+        if s == 200:
+            return data
+        from storage_read import read_version          # INCOMPLETE derivatives are withheld from download by design
+        return read_version(self.tok["tenant_id"], d, v)
 
     def json(self, path):
         return self.call("GET", path)[1]

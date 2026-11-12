@@ -93,7 +93,12 @@ def _import(request: Request, identity: AuthenticatedIdentity, upload, archive_n
                         continue
                     import io
                     registered = ingest_stream(request, identity, _filename(entry.name), io.BytesIO(data))
-                    inspect_document(str(registered["document_id"]), request, False, identity)
+                    inspected = inspect_document(str(registered["document_id"]), request, False, identity)
+                    if isinstance(inspected, dict) and inspected.get("state") not in (None, "ready"):
+                        # Same rule as a single upload: a file that can't be read safely is not a document.
+                        row.update({"status": "failed", "reason": "unreadable", "reason_text": "This file couldn't be read safely, so it wasn't added."})
+                        report.append(row)
+                        continue
                     with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
                         DocumentRepository(connection, identity.tenant_id).record_archive_provenance(
                             document_id=registered["document_id"], actor_id=identity.subject, payload={**provenance, "linked": False})

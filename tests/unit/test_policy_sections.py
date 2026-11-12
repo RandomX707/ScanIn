@@ -48,8 +48,8 @@ def test_page_label_groups_ranges():
 
 
 def test_a_value_never_swallows_the_next_table_cell():
-    line = {"t": "Insured : Example Traders Ltd Date : 17/03/2026", "x": 40.0, "y": 90.0, "s": 9.0, "b": False, "n": 2,
-            "segs": [{"x": 40.0, "t": "Insured : Example Traders Ltd"}, {"x": 300.0, "t": "Date : 17/03/2026"}]}
+    line = {"t": "Insured : Example Traders Ltd Date : 01/01/2030", "x": 40.0, "y": 90.0, "s": 9.0, "b": False, "n": 2,
+            "segs": [{"x": 40.0, "t": "Insured : Example Traders Ltd"}, {"x": 300.0, "t": "Date : 01/01/2030"}]}
     got = P.segment({"pages": [{"page": 1, "lines": [L("Insured details", 60, 12, True), line]}]})
     facts = [f for g in got["sections"] for f in g["facts"]]
     assert [(f["label"], f["value"]) for f in facts] == [("Insured", "Example Traders Ltd")]

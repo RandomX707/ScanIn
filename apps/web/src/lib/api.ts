@@ -56,7 +56,11 @@ export const openDemo = () => json<{ document_id: string; version_id: string }>(
 
 export async function fetchVersionFile(documentId: string, versionId: string): Promise<Blob> {
   const response = await request(`/api/documents/${documentId}/versions/${versionId}/file`);
-  if (!response.ok) throw new ApiError(response.status, "file_unavailable", "The file could not be opened.");
+  if (!response.ok) {
+    let body: { code?: string; message?: string } = {};
+    try { body = await response.json(); } catch { /* generic */ }
+    throw new ApiError(response.status, body.code ?? "file_unavailable", response.status === 409 && body.message ? body.message : "The file could not be opened.");
+  }
   return response.blob();
 }
 

@@ -10,7 +10,7 @@ Backend 630 passed / 32 skipped (DB-env baseline); browser suite 57 passed.
 |---|---|---|
 | 4 unsigned text PDFs | PASS | real text edit (original glyphs removed, original font reused), preview of the modified PDF, save as next version, independent re-open + searchable text + pixel confinement, v1 byte-identical, lineage, audit event, edit of a historical version, overflow refused |
 | 3 signed / anomalous PDFs | SAFE RESTRICTION | imported, read, understood, downloadable; edits blocked with a specific reason (signature structure present; one has a ByteRange that runs past the end of the file). Cryptographic trust is **not** validated. |
-| 9 XLSX | PASS | faithful grid (merges, widths, heights, styles, picture), formulas shown and locked, blank template fields editable, only edited cells change, formulas/merges/images preserved, formula-dependent saves reported INCOMPLETE |
+| 9 XLSX | PASS | faithful grid (merges, widths, heights, styles, picture), formulas shown and locked, blank template fields editable, only edited cells change, formulas/merges/images preserved, formula-dependent saves reported INCOMPLETE and, per repository policy, **withheld from download** (`verified_download_required`) |
 | 1 DOCX | PASS | blocks + table shown, bounded edits, table/images/links/headers preserved, Track Changes setting preserved and disclosed |
 | ZIP | PASS | all entries recognised (7 of 7, 17 of 17), paths and Unicode names preserved, duplicates linked, hostile archive contained, malware archive refused, audit chain verifies |
 

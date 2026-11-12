@@ -61,7 +61,7 @@ export function Workspace(props: WorkspaceProps) {
   const name = version.name;
   const downloadSource = async () => {
     try { saveBlob(await fetchVersionFile(documentId, root.version_id), folder.name); }
-    catch { notify("The original could not be downloaded.", true); }
+    catch (e) { notify(e instanceof ApiError && e.status === 409 ? e.message : "The original could not be downloaded.", true); }
   };
   const [originalPage, setOriginalPage] = useState<number | undefined>(undefined);
   const chooseTab = (next: Tab) => { if (next !== "original") setOriginalPage(undefined); setTab(next); };
@@ -131,7 +131,7 @@ export function Workspace(props: WorkspaceProps) {
               <EditsTab documentId={documentId} folderName={folder.name} version={version} family={family} chunksText={chunks} setDirty={setDirty}
                 notify={notify} refresh={props.refresh} onSaved={(id) => props.onOpen(documentId, id, "edits")} download={async () => {
                   try { saveBlob(await fetchVersionFile(documentId, versionId), downloadName(folder.name, version.number)); }
-                  catch { notify("The file could not be exported.", true); }
+                  catch (e) { notify(e instanceof ApiError && e.status === 409 ? e.message : "The file could not be exported.", true); }
                 }} />
             )}
           </div>

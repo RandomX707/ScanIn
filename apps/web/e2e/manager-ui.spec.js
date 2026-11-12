@@ -255,11 +255,9 @@ test.describe('Scan In workspace: upload, read, edit, save as next version', () 
     await page.getByRole('button', { name: 'Save as next version' }).click();
     await expect(page.locator('.toast')).toContainText('Formulas update when opened in Excel.', { timeout: 120_000 });
     await expect(page.locator('.file-meta')).toContainText('Version 2 of 2');
-    const v2 = await download(page, () => page.getByRole('button', { name: /^Export/ }).click());
-    expect(path.extname(v2.name)).toBe('.xlsx');
-    const out = path.join(fixtureDir, `v2-${v2.name}`);
-    fs.writeFileSync(out, v2.bytes);
-    expect(verify('xlsx', out, '130.25')).toBe('OK');
+    // INCOMPLETE (formula results not recalculated) is withheld from download by the repository policy.
+    await page.getByRole('button', { name: /^Export/ }).click();
+    await expect(page.locator('.toast.error')).toContainText("can't be downloaded");
   });
 
   for (const [label, file, ext, sentence] of [

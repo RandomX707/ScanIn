@@ -22,7 +22,7 @@ from packages.api.save_flow import (PdfTextEdit, SaveRejected, SaveRequest, json
 from pydantic import BaseModel, ConfigDict, Field
 from packages.core import extraction, pdf_signature
 from packages.core.chunking import chunkify
-from packages.registry.documents import DocumentRepository
+from packages.registry.documents import DocumentRepository, is_download_eligible
 from packages.workers.parser import ParserNotVerified
 from packages.storage.local import ImmutableLocalStorage, StoredFile
 
@@ -123,7 +123,19 @@ def download_version_file(document_id: str, version_id: str, request: Request,
         version = repo.get_version(parsed_document, parsed_version)
         if version is None:
             raise APIError(404, "not_found", "The requested document version was not found.")
-        order = [str(item["version_id"]) for item in repo.list_versions(parsed_document)]
+        listed = repo.list_versions(parsed_document)
+        order = [str(item["version_id"]) for item in listed]
+        if version["kind"] == "derived":
+            entry = next((item for item in listed if str(item["version_id"]) == str(parsed_version)), None)
+            # Versions released by the verified native workflow follow the repository download policy (VERIFIED, or a
+            # structurally verified DOCX). INCOMPLETE ones (e.g. formula results not recalculated) are withheld.
+            # Versions written by the text/PDF writers have no workflow manifest and carry their own outcome.
+            if entry is not None and entry.get("edit_set_id") is not None and not is_download_eligible(
+                    entry.get("verification_outcome"), entry.get("verification_adapter"),
+                    {"verification_profile": entry.get("verification_profile"), "structural_checks": entry.get("structural_checks"),
+                     "visual_checks": entry.get("visual_checks")}):
+                raise APIError(409, "verified_download_required",
+                               "This saved version isn't fully verified yet (for example, formula results update when it is opened in Excel), so it can't be downloaded.")
         stored = StoredFile(identity.tenant_id, parsed_document, storage.root / str(version["storage_key"]),
                             str(version["storage_key"]), int(version["size_bytes"]), str(version["sha256"]))
         content = storage.read_original(stored)
