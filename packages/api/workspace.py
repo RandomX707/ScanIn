@@ -277,20 +277,68 @@ def _version_text(request: Request, identity: AuthenticatedIdentity, document_id
     return text
 
 
+def _semantic_chunks(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID) -> list[dict[str, object]] | None:
+    """Source-linked, rule-based sections (policy PDFs, spreadsheet templates, DOCX forms). None = use the plain chunker."""
+    from packages.core import policy_sections, sheet_sections
+    from packages.workers.pdf_edit import PdfEditUnavailable
+    cache: dict = request.app.state.__dict__.setdefault("semantic_cache", {})
+    key = (str(identity.tenant_id), str(version_id))
+    if key in cache:
+        return cache[key]
+    version, source = _source_version(request, identity, document_id, version_id)
+    with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
+        original = DocumentRepository(connection, identity.tenant_id).get_original(document_id)
+    name = str(original["filename"] if original else version["filename"])
+    suffix = PurePosixPath(name).suffix.lower()
+    path = request.app.state.document_storage.root / str(version["storage_key"])
+    chunks: list[dict[str, object]] | None = None
+    try:
+        if suffix == ".pdf" and source.startswith(b"%PDF-"):
+            outline = request.app.state.pdf_editor.outline(path)
+            segmented = policy_sections.segment(outline)
+            chunks = policy_sections.to_chunks(segmented) if segmented["sections"] else policy_sections.outline_chunks(outline)
+        elif suffix == ".xlsx":
+            report, targets = _all_targets(request, path, name)
+            if report.status == "inspected":
+                sheets = _grid(targets, list(report.sheets) or ["Sheet1"])
+                layout = (report.details or {}).get("layout") or {}
+                by_name = {item["name"]: item for item in layout.get("sheets", [])}
+                chunks = []
+                for sheet in sheets:
+                    sheet["layout"] = by_name.get(sheet["name"])
+                    chunks.extend(sheet_sections.sheet_chunks(sheet, layout.get("styles", [])))
+        elif suffix == ".docx":
+            report = request.app.state.restricted_parser.inspect(path, filename=name, include_targets=True)
+            chunks = sheet_sections.docx_chunks((report.details or {}).get("blocks", []))
+    except (PdfEditUnavailable, ParserNotVerified):
+        chunks = None
+    except Exception:  # noqa: BLE001 - understanding is best-effort; the plain chunker still serves the document
+        chunks = None
+    chunks = chunks or None
+    if len(cache) > 48:
+        cache.clear()
+    cache[key] = chunks
+    return chunks
+
+
 @router.get("/documents/{document_id}/versions/{version_id}/chunks")
 def version_chunks(document_id: str, version_id: str, request: Request,
                    identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
-    """Deterministic reading sections and key takeaways of one version (rule based, no AI)."""
+    """Reading sections of one version: source-linked and rule based (no AI); plain text chunks as the fallback."""
     try:
         parsed_document, parsed_version = UUID(document_id), UUID(version_id)
     except ValueError:
         raise APIError(404, "not_found", "The requested version was not found.") from None
     text = _version_text(request, identity, parsed_document, parsed_version)
-    sections = chunkify(text)
     words = len(text.split()) if text.strip() else 0
-    return {"sections": [{key: item[key] for key in ("id", "title", "summary", "words", "points", "method")}
-                         for item in sections],
-            "word_count": words, "text_available": bool(sections),
+    semantic = _semantic_chunks(request, identity, parsed_document, parsed_version) if text.strip() else None
+    if semantic:
+        sections = [{**{k: item[k] for k in ("id", "title", "summary", "words", "points", "method")},
+                     "source": item.get("source"), "facts": item.get("facts", [])} for item in semantic]
+    else:
+        sections = [{key: item[key] for key in ("id", "title", "summary", "words", "points", "method")} | {"source": None, "facts": []}
+                    for item in chunkify(text)]
+    return {"sections": sections, "word_count": words, "text_available": bool(sections),
             "excerpt": text[:12000], "excerpt_truncated": len(text) > 12000}
 
 

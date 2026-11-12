@@ -62,6 +62,13 @@ class RestrictedPdfEditor:
             raise PdfEditUnavailable(str(data["error"]))
         return data
 
+    def outline(self, source_path: Path, *, timeout_seconds: int = 120) -> dict[str, Any]:
+        data, _, tmp = self._run({"mode": "outline"}, source_path, timeout_seconds=timeout_seconds)
+        tmp.cleanup()
+        if data.get("error"):
+            raise PdfEditUnavailable(str(data["error"]))
+        return data
+
     def edit(self, source_path: Path, edits: list[dict[str, str]], *, timeout_seconds: int = 120) -> tuple[bytes, dict[str, Any]]:
         data, out_path, tmp = self._run({"mode": "edit", "edits": edits}, source_path, timeout_seconds=timeout_seconds)
         try:

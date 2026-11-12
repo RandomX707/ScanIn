@@ -63,7 +63,8 @@ export function Workspace(props: WorkspaceProps) {
     try { saveBlob(await fetchVersionFile(documentId, root.version_id), folder.name); }
     catch { notify("The original could not be downloaded.", true); }
   };
-  const chooseTab = (next: Tab) => setTab(next);
+  const [originalPage, setOriginalPage] = useState<number | undefined>(undefined);
+  const chooseTab = (next: Tab) => { if (next !== "original") setOriginalPage(undefined); setTab(next); };
   const select = (i: number) => { setSelected(i); setTab("chunks"); };
 
   return (
@@ -124,8 +125,8 @@ export function Workspace(props: WorkspaceProps) {
             <button role="tab" aria-selected={tab === "edits"} className={`tab ${tab === "edits" ? "active" : ""}`} onClick={() => chooseTab("edits")}><span className="tab-index">03</span> <Icon name="edit" size={16} /> Edits {dirty ? "•" : ""}</button>
           </div>
           <div className="stage-inside" id="stage-body">
-            {tab === "original" && <OriginalTab documentId={documentId} root={root} folderName={folder.name} download={downloadSource} />}
-            {tab === "chunks" && <ChunksTab chunks={chunks} index={index} onSelect={setSelected} onOriginal={() => chooseTab("original")} />}
+            {tab === "original" && <OriginalTab documentId={documentId} root={root} folderName={folder.name} download={downloadSource} page={originalPage} />}
+            {tab === "chunks" && <ChunksTab chunks={chunks} index={index} onSelect={setSelected} onOriginal={(page) => { setOriginalPage(page); chooseTab("original"); }} />}
             {tab === "edits" && (
               <EditsTab documentId={documentId} folderName={folder.name} version={version} family={family} chunksText={chunks} setDirty={setDirty}
                 notify={notify} refresh={props.refresh} onSaved={(id) => props.onOpen(documentId, id, "edits")} download={async () => {
@@ -202,7 +203,7 @@ export function ExtractedPreview({ preview }: { preview: Preview }) {
   return <p>No extractable text in this file.</p>;
 }
 
-function OriginalTab({ documentId, root, folderName: name, download }: { documentId: string; root: FolderVersion; folderName: string; download: () => void }) {
+function OriginalTab({ documentId, root, folderName: name, download, page }: { documentId: string; root: FolderVersion; folderName: string; download: () => void; page?: number }) {
   const e = ext(name);
   const native = NATIVE.includes(e);
   const sourceText = SOURCE_TEXT.includes(e);
@@ -237,7 +238,7 @@ function OriginalTab({ documentId, root, folderName: name, download }: { documen
       </div>
       <div className={`source-paper ${native ? "binary-original" : ""} ${sourceText ? "raw-original" : ""}`} id="source-view">
         {native ? (url
-          ? (e === "pdf" ? <iframe src={url} title="Original PDF · native document viewer" className="native-pdf-frame" /> : <img src={url} alt="Exact original uploaded image" className="native-original-image" />)
+          ? (e === "pdf" ? <iframe key={page ?? 0} src={page ? `${url}#page=${page}` : url} title="Original PDF · native document viewer" className="native-pdf-frame" /> : <img src={url} alt="Exact original uploaded image" className="native-original-image" />)
           : <div className="stage-note">Opening the original file…</div>)
           : sourceText ? <pre className="raw-source" aria-label="Exact original source text">{text ?? "Loading exact original source…"}</pre>
             : <><div className="extracted-banner"><Icon name="layers" size={14} /> EXTRACTED TEXT · NOT A NATIVE OFFICE RENDER · DOWNLOAD EXACT FILE ABOVE</div>{preview ? <ExtractedPreview preview={preview} /> : <p className="stage-note">{text ?? "Reading the file…"}</p>}</>}
@@ -246,7 +247,7 @@ function OriginalTab({ documentId, root, folderName: name, download }: { documen
   );
 }
 
-function ChunksTab({ chunks, index, onSelect, onOriginal }: { chunks: Chunks | null; index: number; onSelect: (i: number) => void; onOriginal: () => void }) {
+function ChunksTab({ chunks, index, onSelect, onOriginal }: { chunks: Chunks | null; index: number; onSelect: (i: number) => void; onOriginal: (page?: number) => void }) {
   const sections = useMemo(() => chunks?.sections ?? [], [chunks]);
   if (!chunks) return <p className="stage-note">Building the document map…</p>;
   if (!sections.length) return (
@@ -254,15 +255,15 @@ function ChunksTab({ chunks, index, onSelect, onOriginal }: { chunks: Chunks | n
       <div className="section-eyebrow">02 / DOCUMENT UNDERSTANDING</div>
       <h3>No readable text detected</h3>
       <p className="stage-note">This format requires OCR or a dedicated extraction adapter before a meaningful summary can be created. The original remains preserved.</p>
-      <button className="btn outline" onClick={onOriginal}>Open the original <Icon name="arrow" size={15} /></button>
+      <button className="btn outline" onClick={() => onOriginal()}>Open the original <Icon name="arrow" size={15} /></button>
     </>
   );
   const c = sections[index];
   return (
     <>
       <div className="section-eyebrow">02 / THE ESSENTIALS</div>
-      <div className="section-title"><h3>Just what matters.</h3><span className="pill">{sections.length} curated sections</span></div>
-      <div className="reader-toolbar"><span className="stage-note">A quick-read map created from the readable text.</span><span className="pill orange">Extractive demo</span></div>
+      <div className="section-title"><h3>Just what matters.</h3><span className="pill">{sections.length} section{sections.length === 1 ? "" : "s"}</span></div>
+      <div className="reader-toolbar"><span className="stage-note">Sections found from the document's own headings and labels.</span><span className="pill orange">Rule-based</span></div>
       <article className="chunk-head">
         <div className="kicker">CHUNK {String(index + 1).padStart(2, "0")} / {String(sections.length).padStart(2, "0")}</div>
         <h3>{c.title}</h3>
@@ -270,18 +271,18 @@ function ChunksTab({ chunks, index, onSelect, onOriginal }: { chunks: Chunks | n
       </article>
       <section className="takeaways">
         <div className="section-eyebrow">KEY TAKEAWAYS</div>
-        {c.points.length ? c.points.slice(0, 3).map((x, i) => <div className="takeaway" key={i}><span>{String(i + 1).padStart(2, "0")}</span><p>{x}</p></div>) : <p className="stage-note">No high-confidence key statements detected.</p>}
+        {c.points.length ? c.points.slice(0, c.source ? 6 : 3).map((x, i) => <div className="takeaway" key={i}><span>{String(i + 1).padStart(2, "0")}</span><p>{x}</p></div>) : <p className="stage-note">No high-confidence key statements detected.</p>}
       </section>
       <div className="source-link">
-        <span><Icon name="shield" size={15} /> {c.words.toLocaleString()} source words · condensed for quick reading</span>
-        <button className="btn outline small" onClick={onOriginal}>View complete original <Icon name="arrow" size={14} /></button>
+        <span><Icon name="shield" size={15} /> {c.source ? `Source: ${c.source.label} · ` : ""}{c.words.toLocaleString()} source words{c.source ? "" : " · condensed for quick reading"}</span>
+        <button className="btn outline small" onClick={() => onOriginal(c.source?.kind === "pdf" ? c.source.pages?.[0] : undefined)}>{c.source?.kind === "pdf" && c.source.pages?.length ? `View on page ${c.source.pages[0]}` : "View complete original"} <Icon name="arrow" size={14} /></button>
       </div>
       <div className="chunk-pagination">
         <button className="btn outline small" disabled={index === 0} onClick={() => onSelect(index - 1)}>← Previous chunk</button>
         <span className="stage-note">{index + 1} of {sections.length}</span>
         <button className="btn dark small" disabled={index === sections.length - 1} onClick={() => onSelect(index + 1)}>Next chunk <Icon name="arrow" size={13} /></button>
       </div>
-      <p className="download-note" style={{ marginTop: 16 }}>Key statements are picked by fixed rules from the document text, not by AI. Source text stays in Original.</p>
+      <p className="download-note" style={{ marginTop: 16 }}>Sections and values are read from the document by fixed rules, not by AI, and each one points to where it was found. Source text stays in Original.</p>
     </>
   );
 }

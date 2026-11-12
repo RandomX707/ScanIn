@@ -33,22 +33,62 @@ def _lines(s: str) -> list[str]:
     return [_norm(line) for line in re.split(r"[\r\n]+", s) if line.strip()]
 
 
+def _visible_runs(engine: PdfTextEngine, source: bytes, page: int) -> list:
+    """Runs that really draw something on the page (off-page, clipped and covered text is dropped)."""
+    scale = 2.0
+    img = _render(source, page, scale)
+    l, b, _r, t = engine.page_box(page)
+    out = []
+    for r in engine.runs(page):
+        if not engine.is_visible(r):
+            continue
+        x0, y0, x1, y1 = r.bbox
+        box = img[max(int((t - y1) * scale), 0):max(int((t - y0) * scale), 1), max(int((x0 - l) * scale), 0):max(int((x1 - l) * scale), 1)]
+        if box.size == 0 or not (np.abs(box - np.bincount(np.clip(box.ravel(), 0, 255).astype(np.int64)).argmax()) > 30).any():
+            continue
+        out.append(r)
+    return out
+
+
+def outline(source: bytes) -> dict:
+    """Visible text of the whole document as lines with page, position, size and weight (for section understanding)."""
+    engine = PdfTextEngine(source)
+    pages = []
+    for page in range(engine.page_count):
+        pg = engine.writer.pages[page]
+        height = float(engine.page_box(page)[3])
+        runs = sorted(_visible_runs(engine, source, page), key=lambda r: (-round(r.y / 2.0), r.x0))
+        lines: list[dict] = []
+        for r in runs:
+            text = r.text.strip()
+            if not text:
+                continue
+            bold = bool(re.search(r"bold|black|heavy|semibold|demi", r.font_name, re.I))
+            if lines and abs(lines[-1]["y0"] - r.y) <= 1.6 and r.x0 >= lines[-1]["x1"] - 1:
+                ln = lines[-1]
+                gap = r.x0 - ln["x1"]
+                if gap > 0.6 * r.size:                       # a cell/column boundary: keep it as its own segment
+                    ln["segs"].append({"x": round(r.x0, 1), "t": text})
+                else:
+                    ln["segs"][-1]["t"] += (" " if gap > 0.12 * r.size else "") + text
+                ln["x1"] = r.x1; ln["s"] = max(ln["s"], r.size); ln["b"] = ln["b"] and bold; ln["n"] += 1
+            else:
+                lines.append({"segs": [{"x": round(r.x0, 1), "t": text}], "x": round(r.x0, 1), "x1": r.x1, "y0": r.y,
+                              "y": round(height - r.y, 1), "s": round(r.size, 1), "b": bold, "n": 1})
+        for ln in lines:
+            ln["t"] = " ".join(seg["t"] for seg in ln["segs"])
+            ln.pop("x1"); ln.pop("y0"); ln["s"] = round(ln["s"], 1)
+        pages.append({"page": page + 1, "width": float(pg.mediabox.width), "height": float(pg.mediabox.height), "lines": lines})
+    return {"pages": pages}
+
+
 def list_runs(source: bytes, page: int) -> dict:
     engine = PdfTextEngine(source)
     if not 1 <= page <= engine.page_count:
         return {"error": "page_out_of_range"}
     pg = engine.writer.pages[page - 1]
     runs = []
-    scale = 2.0
-    img = _render(source, page - 1, scale)
-    l, b, _r, t = engine.page_box(page - 1)
-    for r in engine.runs(page - 1):
-        if not engine.is_visible(r):
-            continue                      # off-page text is never offered
-        x0, y0, x1, y1 = r.bbox
-        box = img[max(int((t - y1) * scale), 0):max(int((t - y0) * scale), 1), max(int((x0 - l) * scale), 0):max(int((x1 - l) * scale), 1)]
-        if box.size == 0 or not (np.abs(box - np.bincount(np.clip(box.ravel(), 0, 255).astype(np.int64)).argmax()) > 30).any():
-            continue                      # clipped / covered / invisible text: nothing is drawn there
+    for r in _visible_runs(engine, source, page - 1):
         ok, why = engine.run_status(r)
         runs.append({**r.public(), "e": ok, "r": why})
     return {"page": page, "width": float(pg.mediabox.width), "height": float(pg.mediabox.height), "runs": runs}
@@ -196,6 +236,8 @@ def main() -> int:
     try:
         if job["mode"] == "runs":
             result = list_runs(source, int(job["page"]))
+        elif job["mode"] == "outline":
+            result = outline(source)
         else:
             applied = apply_edits(source, job["edits"])
             if "error" in applied:

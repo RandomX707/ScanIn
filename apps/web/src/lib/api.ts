@@ -8,7 +8,8 @@ export type FolderVersion = {
 export type Folder = {
   document_id: string; name: string; created_at: string; latest_version_id: string; demo: boolean; versions: FolderVersion[];
 };
-export type Chunk = { id: string; title: string; summary: string; words: number; points: string[]; method: string };
+export type ChunkSource = { kind: string; label: string; pages?: number[]; sheet?: string; rows?: number[]; anchors?: { page?: number; y?: number; cell?: string; label: string }[] };
+export type Chunk = { id: string; title: string; summary: string; words: number; points: string[]; method: string; source?: ChunkSource | null; facts?: { label: string; value: string; page?: number; cell?: string; blank?: boolean }[] };
 export type Chunks = { sections: Chunk[]; word_count: number; text_available: boolean; excerpt?: string; excerpt_truncated?: boolean };
 
 export class ApiError extends Error {

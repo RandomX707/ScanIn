@@ -65,15 +65,19 @@ def run(path: Path):
     if pv["edit"]["mode"] != "grid": print("  mode", pv["edit"]); return
     cells = [(c, ri, ci) for sh in pv["sheets"] for ri, row in enumerate(sh["rows"]) for ci, c in enumerate(row) if c]
     ed = [c for c, _, _ in cells if c["e"]]; locked = [c for c, _, _ in cells if not c["e"]]
+    blanks = [c for c in ed if c["t"] == "null"]
     strings = [c for c in ed if c["t"] in ("string", "str", "text") and c["v"] and len(c["v"]) < 60]
     nums = [c for c in ed if c["t"] in ("decimal", "integer", "number", "int", "float")]
     rng = random.Random(3)
     picks = (rng.sample(strings, min(2, len(strings))) + rng.sample(nums, min(1, len(nums))))
+    if os.environ.get("FILL_BLANKS"):
+        picks = rng.sample(blanks, min(3, len(blanks)))
+        print(f"  blank editable cells: {len(blanks)}")
     print(f"  cells {len(cells)} editable {len(ed)} locked {len(locked)} string {len(strings)} numeric {len(nums)} types {sorted({c['t'] for c in ed if c['t']})[:6]}")
     if not picks: print("  no editable cell to test"); return
     changes = []
     for c in picks:
-        val = (c["v"] + " x") if c in strings else (str(int(float(c["v"] or 0)) + 1) if c["t"] in ("integer", "int") else str(float(c["v"] or 0) + 1))
+        val = (["Acme Test Ltd", "12345", "7.5"][picks.index(c) % 3]) if c in blanks else (c["v"] + " x") if c in strings else (str(int(float(c["v"] or 0)) + 1) if c["t"] in ("integer", "int") else str(float(c["v"] or 0) + 1))
         changes.append({"target_id": c["id"], "fingerprint": c["fp"], "value": val})
     s, b = call("POST", f"/api/documents/{d}/versions/{v}/save", json.dumps({"changes": changes}).encode(), {"Content-Type": "application/json"})
     res = json.loads(b)

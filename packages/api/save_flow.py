@@ -140,6 +140,15 @@ def _coerce(old_type: str, raw: Any) -> dict[str, Any]:
     if old_type in {"string", "choice"}:
         return {"type": old_type, "value": str(raw)}
     text = str(raw).strip()
+    if old_type == "null":
+        # An empty template field: numbers go in as numbers, everything else as text exactly as typed.
+        if isinstance(raw, bool):
+            return {"type": "boolean", "value": raw}
+        if re.fullmatch(r"-?(?:0|[1-9]\d{0,14})", text):
+            return {"type": "integer", "value": int(text)}
+        if re.fullmatch(r"-?(?:0|[1-9]\d{0,8})\.\d{1,6}", text):
+            return {"type": "decimal", "value": text}
+        return {"type": "string", "value": str(raw)}
     if old_type == "integer":
         if isinstance(raw, bool) or not re.fullmatch(r"-?\d+", text):
             raise SaveRejected("invalid_integer")

@@ -233,6 +233,23 @@ UNSAFE_FORMULA = re.compile(r"\b(?:INDIRECT|OFFSET)\s*\(|\[[^\]]+\]|\bR\[?-?\d",
 CELL_COORD = re.compile(r"^\$?([A-Z]{1,3})\$?([1-9][0-9]*)$", re.I)
 
 
+def _merge_covered(root: etree._Element) -> set[str]:
+    """References hidden under merged ranges (every merged cell except its top-left anchor)."""
+    covered: set[str] = set()
+    for merge in root.xpath(".//m:mergeCells/m:mergeCell", namespaces=NS):
+        try:
+            c1, r1, c2, r2 = range_boundaries(merge.get("ref", ""))
+        except (ValueError, TypeError):
+            continue
+        if (r2 - r1 + 1) * (c2 - c1 + 1) > 10_000:
+            continue
+        for row in range(r1, r2 + 1):
+            for col in range(c1, c2 + 1):
+                if (row, col) != (r1, c1):
+                    covered.add(f"{get_column_letter(col)}{row}")
+    return covered
+
+
 def _column_index(text: str) -> int:
     out = 0
     for char in text.upper():
@@ -484,11 +501,15 @@ class XlsxAdapter:
         for sheet, part in sheets.items():
             root = _xml(parts[part][1])
             sheet_protected = root.find(f"{{{MAIN}}}sheetProtection") is not None
+            covered = _merge_covered(root)
             for cell in root.xpath(".//m:c", namespaces=NS):
                 value, reason = _cell_value(cell, shared, rich, dates, epoch)
+                ref = cell.get("r", "")
+                if value is None and reason == "blank_cell" and cell.find(f"{{{MAIN}}}f") is None and ref not in covered:
+                    # An empty template field (styled cell with no value): fillable, unless it is hidden under a merged range.
+                    value, reason = TypedValue("null", None), None
                 if value is None or reason:
                     continue
-                ref = cell.get("r", "")
                 style_id = int(cell.get("s", "0")) if cell.get("s", "0").isdigit() else 0
                 if sheet_protected and style_id not in unlocked_styles:
                     reason = "protected_cell_locked"
@@ -625,6 +646,12 @@ class XlsxAdapter:
                     except ValueError:
                         continue
         return result
+
+    def type_compatible(self, old: TypedValue, new: TypedValue) -> bool:
+        """Existing rule (same type, or integer<->decimal), plus: an empty template field accepts any plain value."""
+        if old.type == "null":
+            return new.type in {"string", "integer", "decimal", "boolean"}
+        return old.type == new.type or {old.type, new.type} <= {"integer", "decimal"}
 
     def validate_new_value(self, value: TypedValue) -> None:
         if value.type not in {"string", "integer", "decimal", "date", "datetime", "boolean", "null"}:
