@@ -351,10 +351,12 @@ def _formula_references(formula: str, own_sheet: str) -> tuple[list[tuple[str, s
         sheet = (m.group(1).replace("''", "'") if m.group(1) else m.group(2) or own_sheet).strip()
         refs.append((sheet, m.group(3), m.group(4) or m.group(3)))
     residue = CELL_REF.sub("", clean)
+    # IFERROR/IFNA are pure error handlers: their dependencies are exactly the references in their arguments.
     # Defined names are supported only when mapped to a range; other bare names make analysis unknown.
     residue = re.sub(r"(?:'[^']+'|[A-Za-z_][A-Za-z0-9_. ]*)!", "", residue)
-    residue = re.sub(r"\b(?:SUM|AVERAGE|MIN|MAX|COUNT|IF|AND|OR|NOT|ROUND|ABS|COUNTIF|SUMIF)\b", "", residue, flags=re.I)
+    residue = re.sub(r"\b(?:SUM|AVERAGE|MIN|MAX|COUNT|IF|IFERROR|IFNA|AND|OR|NOT|ROUND|ABS|COUNTIF|SUMIF)\b", "", residue, flags=re.I)
     residue = re.sub(r"\b(?:TRUE|FALSE)\b", "", residue, flags=re.I)
+    residue = residue.replace('""', "")        # string-literal placeholders cannot carry references
     residue = re.sub(r"[0-9.]+|[+*/^<>=(),;:%&\s-]+", "", residue)
     # Conservative: defined names, table syntax, or other identifiers are not resolved in this M0 parser.
     unknown = bool(residue)

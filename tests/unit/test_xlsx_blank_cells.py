@@ -48,3 +48,14 @@ def test_save_coercion_infers_number_or_text_for_an_empty_field():
     assert _coerce("null", "007") == {"type": "string", "value": "007"}                    # IDs keep leading zeros
     assert _coerce("null", "Acme Ltd") == {"type": "string", "value": "Acme Ltd"}
     assert _coerce("null", "1" * 20) == {"type": "string", "value": "1" * 20}              # beyond Excel precision stays text
+
+
+def test_error_handlers_do_not_make_dependencies_unknown():
+    from packages.core.adapters.xlsx.adapter import _formula_references
+    refs, unknown = _formula_references('IFERROR(C28/B28-1,"")', "S")
+    assert not unknown and {r[1] for r in refs} == {"C28", "B28"}
+    assert not _formula_references("IFNA(B2+B3,0)", "S")[1]
+    assert not _formula_references('IF(B2>0,"yes","no")', "S")[1]
+    # everything else stays conservative: unknown functions, indirection, defined names
+    for bad in ("VLOOKUP(B2,C2:D9,2,0)", "INDIRECT(B2)", "OFFSET(B2,1,1)", "MyName*2", "IFERROR(Foo(B2),0)"):
+        assert _formula_references(bad, "S")[1], bad

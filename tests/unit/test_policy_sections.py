@@ -60,3 +60,27 @@ def test_label_cell_with_colon_takes_the_next_cell_as_its_value():
             "segs": [{"x": 40.0, "t": "Sum Insured :"}, {"x": 200.0, "t": "Rs. 5,00,000"}]}
     got = P.segment({"pages": [{"page": 2, "lines": [L("Sums Insured", 60, 12, True), line]}]})
     assert [(f["label"], f["value"], f["page"]) for g in got["sections"] for f in g["facts"]] == [("Sum insured", "Rs. 5,00,000", 2)]
+
+
+def test_insurer_address_is_not_filed_as_the_insureds():
+    out = {"pages": [{"page": 1, "lines": [L("Insured details", 40, 12, True), L("Address : 1 Insurer Road, Branch Town", 60),
+                                           L("Insured's Address : 9 Example Street", 80)]}]}
+    facts = [(f["label"], f["value"]) for g in P.segment(out)["sections"] for f in g["facts"]]
+    assert facts == [("Address", "9 Example Street")]            # the bare label (the insurer's office) is not promoted
+
+
+def test_unstyled_documents_still_surface_premium_warranty_and_exclusion_statements():
+    flat = {"pages": [{"page": 3, "lines": [L("Name of the Proposer Example Traders Total Premium 1,200.00", 40), L("IGST(18%) 216.00", 55),
+                                            L("Policy is subject to the following Warranty: see schedule", 70), L("Exclusion No 4 A of the Section What We Exclude", 85),
+                                            L("Plain sentence that mentions premium in passing and goes on for a while.", 100)]}]}
+    got = {g["key"]: g for g in P.segment(flat)["sections"]}
+    assert {"premium", "warranties", "exclusions"} <= set(got)
+    assert got["premium"]["pages"] == [3] and got["warranties"]["occurrences"][0]["excerpt"].startswith("Policy is subject")
+    assert not any("passing" in o["excerpt"] for g in got.values() for o in g["occurrences"])    # no loose mentions
+
+
+def test_a_neighbouring_label_cell_is_never_taken_as_the_value():
+    line = {"t": "Period of Insurance : Policy Period :", "x": 40.0, "y": 90.0, "s": 9.0, "b": False, "n": 2,
+            "segs": [{"x": 40.0, "t": "Period of Insurance :"}, {"x": 200.0, "t": "Policy Period :"}]}
+    got = P.segment({"pages": [{"page": 1, "lines": [L("Policy schedule", 60, 12, True), line]}]})
+    assert [f for g in got["sections"] for f in g["facts"]] == []

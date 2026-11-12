@@ -36,7 +36,8 @@ FACT_LABELS: list[tuple[str, str, list[str]]] = [
     ("policy_number", "Policy number", [r"^policy\s*(?:no\.?|number|#)$", r"^certificate\s*(?:no\.?|number)$"]),
     ("period", "Period of insurance", [r"^(?:policy\s+)?period(?:\s+of\s+(?:insurance|cover))?$", r"^(?:from|to)\s*(?:date)?$", r"^(?:start|expiry|end)\s+date$", r"^(?:risk\s+)?(?:inception|commencement)\s+date$"]),
     ("insured_name", "Insured", [r"^(?:name\s+of\s+(?:the\s+)?)?(?:insured|proposer|policy\s*holder)(?:'s)?(?:\s+name)?$", r"^customer\s+name$"]),
-    ("address", "Address", [r"^(?:insured'?s?\s+|communication\s+|correspondence\s+)?address$"]),
+    # A bare "Address :" is often the INSURER's office; only a qualified label is treated as the insured's address.
+    ("address", "Address", [r"^(?:insured'?s?|proposer'?s?|policy\s*holder'?s?|communication|correspondence|mailing|risk\s+location)\s+address$"]),
     ("sum_insured", "Sum insured", [r"^(?:total\s+)?sum\s+insured$", r"^sum\s+assured$", r"^total\s+(?:insured\s+)?value$"]),
     ("premium", "Premium", [r"^(?:net\s+|basic\s+|total\s+)?premium(?:\s+payable)?(?:\s*\(.*\))?$"]),
     ("tax", "Tax", [r"^(?:gst|igst|cgst|sgst|service\s+tax)(?:\s*@?\s*[\d.]+\s*%?)?$", r"^taxes?$"]),
@@ -113,6 +114,15 @@ def classify_heading(text: str) -> str | None:
     return None
 
 
+# Statements that start a line in documents without styled headings. Verbatim, page-anchored, deliberately narrow.
+INLINE_ANCHORS: list[tuple[str, re.Pattern[str]]] = [
+    ("premium", re.compile(r"^(?:total|net|basic|gross)\s+premium\b", re.I)),
+    ("premium", re.compile(r"\b(?:total|net|gross)\s+premium\s+(?:rs\.?\s*)?[\d,]+\.\d{2}\b", re.I)),
+    ("premium", re.compile(r"^(?:[ics]?gst|service\s+tax)\s*(?:\(|@|\d)", re.I)),
+    ("warranties", re.compile(r"\bsubject\s+to\s+the\s+following\s+warrant(?:y|ies)\b", re.I)),
+    ("exclusions", re.compile(r"^exclusions?\s+no\.?\b", re.I)),
+]
+
 FACT_SECTION = {"policy_number": "schedule", "period": "schedule", "insurer": "schedule", "intermediary": "schedule",
                 "insured_name": "insured", "address": "insured", "sum_insured": "sum_insured",
                 "premium": "premium", "tax": "premium", "deductible": "conditions"}
@@ -154,6 +164,17 @@ def segment(outline: dict[str, Any]) -> dict[str, Any]:
             current.lines.append(ln)
     pages = max(l.page for l in lines)
     facts = _facts(lines)
+    headed = {(s.key, s.start.page) for s in raw}
+    for ln in lines:
+        if len(ln.text) > 160 or _is_heading_shape(ln, body):
+            continue
+        for key, rx in INLINE_ANCHORS:
+            if rx.search(ln.text) and (key, ln.page) not in headed:
+                sec = Section(key, TITLES[key], ln.text[:70].rstrip(), ln)
+                sec.lines = [ln]                     # the statement itself is its own excerpt
+                raw.append(sec)
+                headed.add((key, ln.page))
+                break
     grouped: dict[str, dict[str, Any]] = {}
     for s in raw:
         g = grouped.setdefault(s.key, {"key": s.key, "title": s.title, "occurrences": [], "facts": [], "words": 0})
@@ -203,7 +224,10 @@ def _facts(lines: list[Line]) -> list[dict[str, Any]]:
                 continue
             lo = label_only.match(seg)
             if lo and i + 1 < len(ln.segs):
-                add(ln, lo.group("label"), ln.segs[i + 1])
+                nxt = ln.segs[i + 1]
+                if label_only.match(nxt) or pair.match(nxt):      # the neighbouring cell is another label, not a value
+                    continue
+                add(ln, lo.group("label"), nxt)
     return facts
 
 
