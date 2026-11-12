@@ -21,4 +21,5 @@ Environment note: clamd was not running (stale socket); started /opt/homebrew/sb
 ## Round 3 — real stakeholder corpus (private fixtures in ignored `Policy Copies/`; nothing from them is committed)
 - M0 done: `/Policy Copies/` and `/.private/` gitignored (check-ignore verified, nothing was tracked); inventory verified: 30 occurrences / 17 unique (7 PDF, 9 XLSX, 1 DOCX), 132 pages, 43 formulas, 305 merged ranges; `scripts/corpus/inventory.py`
 - M1 done: `scripts/corpus/probe.py` drives every file through the real API in a fresh tenant. Found: all 7 PDFs `edit=none`; 2 large PDFs failed import (inspect output exceeded 2 MB sandbox cap because of per-character spans — removed, unused); chunks are arbitrary fragments; signature state not classified
-- M2 in progress: PDF content-editing benchmark / proof of concept
+- M2 done: `packages/core/pdf_text.py` genuine content-stream text editor (original glyphs removed, original font reused, fit check); measured vs PyMuPDF; Apryse/Nutrient blocked on trial keys; decision in `docs/pdf-editing-engine.md`; `tests/unit/test_pdf_text.py` 5 pass
+- M3 in progress: integrate PDF editing into API/UI
