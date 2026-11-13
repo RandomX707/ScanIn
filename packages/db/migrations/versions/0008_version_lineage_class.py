@@ -28,6 +28,25 @@ def upgrade() -> None:
         )
         UPDATE document_versions v SET lineage_class='unsigned_working_copy'
         FROM descendants d WHERE v.tenant_id=d.tenant_id AND v.id=d.id""")
+    # Missing legacy provenance is not evidence that a version is an ordinary release.
+    # Preserve that uncertainty through every descendant and branch.
+    op.execute("""WITH RECURSIVE unknown_roots(tenant_id,id) AS (
+          SELECT v.tenant_id,v.id FROM document_versions v
+          WHERE v.kind='derived' AND v.lineage_class='unknown'
+            AND NOT EXISTS (
+              SELECT 1 FROM audit_events e WHERE e.tenant_id=v.tenant_id
+                AND e.payload->>'version_id'=v.id::text
+                AND e.action IN ('document.text_version_saved','document.derived_version_released')
+            )
+        ), unknown_descendants(tenant_id,id) AS (
+          SELECT tenant_id,id FROM unknown_roots
+          UNION
+          SELECT child.tenant_id,child.id FROM document_versions child
+            JOIN unknown_descendants parent ON child.tenant_id=parent.tenant_id AND child.parent_version_id=parent.id
+        )
+        UPDATE document_versions v SET lineage_class='unknown'
+        FROM unknown_descendants d WHERE v.tenant_id=d.tenant_id AND v.id=d.id
+          AND v.lineage_class<>'unsigned_working_copy'""")
     # Versions with authoritative native release manifests are standard unless they descend
     # from a working copy (already marked above). Unknown legacy rows stay visibly unknown.
     op.execute("""UPDATE document_versions v SET lineage_class='standard'
@@ -36,7 +55,10 @@ def upgrade() -> None:
             SELECT 1 FROM audit_events e WHERE e.tenant_id=v.tenant_id
               AND e.payload->>'version_id'=v.id::text
               AND e.action IN ('document.text_version_saved','document.derived_version_released')
-          ))""")
+          )) AND NOT EXISTS (
+            SELECT 1 FROM document_versions parent WHERE parent.tenant_id=v.tenant_id
+              AND parent.id=v.parent_version_id AND parent.lineage_class='unknown'
+          )""")
 
 
 def downgrade() -> None:
