@@ -13,12 +13,15 @@ export type PageViewerProps = {
   note?: string;
   onPages?: (pages: { page: number; width: number; height: number }[]) => void;
   testId?: string;
+  /** Show only these pages (comparison 'changed content only'); page numbers keep their real values. */
+  onlyPages?: number[] | null;
+  heading?: string;
 };
 
 const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 
 /** Shared paginated viewer: zoom, fit width, actual size, page navigation, full-screen. Used by Original and Compare. */
-export function PageViewer({ fetchBytes, title, highlights = [], activeHighlight, initialPage, note, onPages, testId }: PageViewerProps) {
+export function PageViewer({ fetchBytes, title, highlights = [], activeHighlight, initialPage, note, onPages, testId, onlyPages, heading }: PageViewerProps) {
   const [doc, setDoc] = useState<Doc | null>(null);
   const [pages, setPages] = useState<{ page: number; width: number; height: number }[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -96,6 +99,7 @@ export function PageViewer({ fetchBytes, title, highlights = [], activeHighlight
   const percent = Math.round(scale * 72 / 96 * 100);
   return (
     <div className={`page-viewer ${expanded ? "expanded" : ""}`} data-testid={testId ?? "page-viewer"}>
+      {heading ? <div className="viewer-heading">{heading}</div> : null}
       <div className="viewer-toolbar" role="toolbar" aria-label={`${title} controls`}>
         <div className="vt-group">
           <button className="btn outline small" aria-label="Previous page" disabled={current <= 1} onClick={() => goto(current - 1)}>‹</button>
@@ -114,7 +118,7 @@ export function PageViewer({ fetchBytes, title, highlights = [], activeHighlight
       {note ? <div className="viewer-note">{note}</div> : null}
       <div className="viewer-scroll" ref={scroller} tabIndex={0} aria-label={title}>
         {error ? <p className="stage-note">{error}</p> : !doc ? <p className="stage-note">Opening the page preview…</p>
-          : pages.map((p) => <ViewerPage key={p.page} doc={doc} size={p} scale={scale} highlights={highlights.filter((h) => h.page === p.page)} active={activeHighlight} />)}
+          : pages.filter((p) => !onlyPages || onlyPages.includes(p.page)).map((p) => <ViewerPage key={p.page} doc={doc} size={p} scale={scale} highlights={highlights.filter((h) => h.page === p.page)} active={activeHighlight} />)}
       </div>
     </div>
   );

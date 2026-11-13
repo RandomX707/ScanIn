@@ -8,7 +8,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
 const python = path.join(root, '.venv/bin/python');
 const corpus = process.env.CHANNEL360_CORPUS_DIR || path.join(root, 'Policy Copies');
-const api = process.env.IDW_API_BASE_URL || 'http://127.0.0.1:8000';
+const api = process.env.IDW_API_BASE_URL || 'http://127.0.0.1:8010';
 const folderCount = async () => (await (await fetch(`${api}/api/folders`, { headers: { Authorization: `Bearer ${run().token}` } })).json()).items.length;
 const run = () => JSON.parse(fs.readFileSync(path.join(root, '.runtime/e2e-run.json'), 'utf8'));
 

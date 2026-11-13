@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Cell, DocxBlock, PdfField, Preview, SaveBody } from "../lib/api";
 import { SheetGrid } from "./SheetGrid";
+import { SheetWorkspace } from "../components/SheetWorkspace";
 
 type OnBody = (body: SaveBody | null) => void;
 
@@ -101,6 +102,15 @@ export function GridEditor({ preview, onBody }: { preview: Preview; onBody: OnBo
   };
   if (!sheets.length) return <div className="empty"><h3>No values found</h3><p>This file has no cells to edit.</p></div>;
   const sheet = sheets[Math.min(active, sheets.length - 1)];
+  if (sheets.every((s) => s.layout)) {
+    return (
+      <>
+        <div className="editable grid-editor no-toolbar" role="region" aria-label="Editable cells">
+          <SheetWorkspace sheets={sheets} styles={preview.styles ?? []} edits={edits} onEdit={update} label="Editable workbook" testId="sheet-editor" />
+        </div>
+      </>
+    );
+  }
   return (
     <>
       {sheets.length > 1 && (

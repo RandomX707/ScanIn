@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const api = process.env.IDW_API_BASE_URL || 'http://127.0.0.1:8000';
+const api = process.env.IDW_API_BASE_URL || 'http://127.0.0.1:8010';
 
 // Runs last (workers: 1, alphabetical order). Acts as the local demo owner, not the suite's own tenant.
 test('the demo workspace gains no test documents', async ({ page }) => {

@@ -31,6 +31,11 @@ THEME_ORDER = ["lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "acc
 DEFAULT_THEME = ["FFFFFF", "000000", "EEECE1", "1F497D", "4F81BD", "C0504D", "9BBB59", "8064A2", "4BACC6", "F79646", "0000FF", "800080"]
 
 
+BUILTIN_NUMFMT = {1: "0", 2: "0.00", 3: "#,##0", 4: "#,##0.00", 9: "0%", 10: "0.00%", 11: "0.00E+00", 14: "mm-dd-yy", 15: "d-mmm-yy",
+                  16: "d-mmm", 17: "mmm-yy", 18: "h:mm AM/PM", 19: "h:mm:ss AM/PM", 20: "h:mm", 21: "h:mm:ss", 22: "m/d/yy h:mm",
+                  37: "#,##0 ;(#,##0)", 38: "#,##0 ;[Red](#,##0)", 39: "#,##0.00;(#,##0.00)", 40: "#,##0.00;[Red](#,##0.00)", 49: "@"}
+
+
 def _parse(data: bytes):
     parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False, remove_comments=True)
     return etree.fromstring(data, parser)
@@ -135,9 +140,14 @@ def _styles(zf: zipfile.ZipFile, theme: list[str]) -> list[dict[str, Any]]:
     for b in root.iterfind("m:borders/m:border", NS):
         borders.append({k: 1 for k, tag in (("bl", "left"), ("br", "right"), ("bt", "top"), ("bb", "bottom"))
                         if b.find(f"m:{tag}", NS) is not None and b.find(f"m:{tag}", NS).get("style")})
+    custom = {int(n.get("numFmtId")): n.get("formatCode", "") for n in root.iterfind("m:numFmts/m:numFmt", NS) if (n.get("numFmtId") or "").isdigit()}
     out = []
     for xf in root.iterfind("m:cellXfs/m:xf", NS):
         d: dict[str, Any] = {}
+        nid = xf.get("numFmtId", "0")
+        code = custom.get(int(nid)) if nid.isdigit() and int(nid) in custom else BUILTIN_NUMFMT.get(int(nid)) if nid.isdigit() else None
+        if code and code not in ("General", "@"):
+            d["nf"] = code[:80]
         font = fonts[int(xf.get("fontId", 0))] if int(xf.get("fontId", 0)) < len(fonts) else {}
         d.update(font)
         fill = fills[int(xf.get("fillId", 0))] if int(xf.get("fillId", 0)) < len(fills) else None
@@ -228,8 +238,10 @@ def extract(data: bytes) -> dict[str, Any] | None:
                 n = int(r.get("r", 0))
                 if n > MAX_ROWS:
                     break
-                if r.get("ht") and r.get("customHeight") in ("1", "true", None):
-                    rows[str(n)] = 0.0 if r.get("hidden") in ("1", "true") else float(r.get("ht"))
+                if r.get("hidden") in ("1", "true"):
+                    rows[str(n)] = 0.0
+                elif r.get("ht") and r.get("customHeight") in ("1", "true", None):
+                    rows[str(n)] = float(r.get("ht"))
                 for c in r.iterfind("m:c", NS):
                     if c.get("s") not in (None, "0"):
                         cell_style[c.get("r", "")] = int(c.get("s"))
@@ -248,8 +260,18 @@ def extract(data: bytes) -> dict[str, Any] | None:
                 if target:
                     images = _picture(zf, target)
             used = {k: v for k, v in cell_style.items() if v < len(styles) and styles[v]}
+            freeze = None
+            pane = root.find("m:sheetViews/m:sheetView/m:pane", NS)
+            if pane is not None and pane.get("state") in ("frozen", "frozenSplit"):
+                fr, fc = int(float(pane.get("ySplit", 0) or 0)), int(float(pane.get("xSplit", 0) or 0))
+                if fr or fc:
+                    freeze = {"rows": min(fr, 50), "cols": min(fc, 10)}
+            view = root.find("m:sheetViews/m:sheetView", NS)
+            zoom = int(view.get("zoomScale", 100)) if view is not None and (view.get("zoomScale") or "").isdigit() else 100
             sheets.append({"name": s.get("name", ""), "default_col": default_col, "default_row": default_row, "merges": merges,
-                           "cols": cols, "rows": rows, "cells": {k: v for k, v in used.items()}, "images": images})
+                           "cols": cols, "rows": rows, "cells": {k: v for k, v in used.items()}, "images": images,
+                           "freeze": freeze, "zoom": zoom, "hidden": s.get("state") in ("hidden", "veryHidden"),
+                           "protected": root.find("m:sheetProtection", NS) is not None and root.find("m:sheetProtection", NS).get("sheet") in ("1", "true")})
         return {"styles": styles, "sheets": sheets}
     except (zipfile.BadZipFile, etree.XMLSyntaxError, KeyError, ValueError, OSError):
         return None

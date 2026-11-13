@@ -62,7 +62,7 @@ def rendered_pdf(request: Request, identity: AuthenticatedIdentity, document_id:
             raise APIError(503, "render_unavailable", "The page preview is unavailable right now.") from None
         except OfficeRenderRefused as refused:
             raise APIError(422, "render_failed", "This document couldn't be rendered as pages.",
-                           [{"reason": refused.reason_code}]) from None
+                           details=[{"reason": refused.reason_code}]) from None
         finally:
             _slots.release()
         cache.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

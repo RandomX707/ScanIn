@@ -1,7 +1,7 @@
 """Sandboxed worker: list editable text runs of a page, or apply text edits and verify the result.
 
 Invoked as `python -m packages.workers.pdf_edit_entry --job job.json` inside RestrictedSubprocess.
-job.json: {"mode": "runs"|"edit", "source": path, "page": int, "edits": [{"id","old","new"}], "out": path}
+job.json: {"mode": "runs"|"outline"|"edit"|"working_copy", "source": path, "page": int, "edits": [{"id","old","new"}], "out": path}
 stdout: one JSON document.  Never prints document text except in the `runs` listing the caller asked for.
 """
 from __future__ import annotations
@@ -17,6 +17,7 @@ import numpy as np
 import pypdfium2 as pdfium
 from pypdf import PdfReader
 
+from packages.core import pdf_working_copy
 from packages.core.pdf_text import EditRefused, PdfTextEngine, edit_order
 
 MAX_EDITS = 200
@@ -77,6 +78,8 @@ def outline(source: bytes) -> dict:
                               "y": round(height - r.y, 1), "s": round(r.size, 1), "b": bold, "n": 1})
         for ln in lines:
             ln["t"] = " ".join(seg["t"] for seg in ln["segs"])
+            # bounding box in PDF user space (origin bottom-left) for highlighting in the viewer
+            ln["bb"] = [round(ln["x"], 1), round(ln["y0"] - 0.22 * ln["s"], 1), round(ln["x1"], 1), round(ln["y0"] + 0.88 * ln["s"], 1)]
             ln.pop("x1"); ln.pop("y0"); ln["s"] = round(ln["s"], 1)
         pages.append({"page": page + 1, "width": float(pg.mediabox.width), "height": float(pg.mediabox.height), "lines": lines})
     return {"pages": pages}
@@ -90,6 +93,8 @@ def list_runs(source: bytes, page: int) -> dict:
     runs = []
     for r in _visible_runs(engine, source, page - 1):
         ok, why = engine.run_status(r)
+        if ok and _is_working_copy_notice(r.text):
+            ok, why = False, "This notice marks the file as an unsigned working copy and can't be edited."
         runs.append({**r.public(), "e": ok, "r": why})
     return {"page": page, "width": float(pg.mediabox.width), "height": float(pg.mediabox.height), "runs": runs}
 
@@ -100,6 +105,11 @@ def _render(data: bytes, index: int, scale: float) -> np.ndarray:
         return np.asarray(doc[index].render(scale=scale).to_pil().convert("L"), dtype=np.int16)
     finally:
         doc.close()
+
+
+def _is_working_copy_notice(text: str) -> bool:
+    t = _norm(text)
+    return _norm(pdf_working_copy.MARKER) in t or t.startswith(_norm("Unsigned working copy of"))
 
 
 def apply_edits(source: bytes, edits: list[dict]) -> dict:
@@ -113,6 +123,8 @@ def apply_edits(source: bytes, edits: list[dict]) -> dict:
     plans = []
     for rid in edit_order(list(by_id)):
         e = by_id[rid]
+        if _is_working_copy_notice(e["old"]):
+            return {"error": "working_copy_notice_locked", "message": "This notice marks the file as a working copy and can't be edited.", "edit_id": rid}
         run = engine.find(rid)
         before_runs.setdefault(run.page, [r for r in engine.runs(run.page)])
         try:
@@ -238,6 +250,11 @@ def main() -> int:
             result = list_runs(source, int(job["page"]))
         elif job["mode"] == "outline":
             result = outline(source)
+        elif job["mode"] == "working_copy":
+            data, report = pdf_working_copy.build(source, name=str(job["name"]), source_sha256=hashlib.sha256(source).hexdigest(), source_state=str(job["state"]))
+            with open(job["out"], "wb") as handle:
+                handle.write(data)
+            result = {**report, "source_sha256": hashlib.sha256(source).hexdigest(), "output_sha256": hashlib.sha256(data).hexdigest(), "output_bytes": len(data)}
         else:
             applied = apply_edits(source, job["edits"])
             if "error" in applied:
@@ -251,6 +268,8 @@ def main() -> int:
                           "edits": [{k: pl[k] for k in ("id", "page", "font", "size", "substitute_font")} for pl in applied["plans"]]}
     except EditRefused as err:
         result = {"error": err.code, "message": err.message}
+    except pdf_working_copy.WorkingCopyRefused as err:
+        result = {"error": err.code, "message": "The working copy could not be created safely."}
     except Exception as exc:  # noqa: BLE001 - fail closed with a stable code, no document data in the message
         result = {"error": "pdf_edit_worker_failed", "stage": type(exc).__name__}
     sys.stdout.write(json.dumps(result, separators=(",", ":"), allow_nan=False))

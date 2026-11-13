@@ -6,6 +6,7 @@ import { Topbar, type View } from "./pages/Shell";
 import { Home } from "./pages/Home";
 import { FolderPage, History } from "./pages/Library";
 import { Workspace } from "./pages/Workspace";
+import { ComparePage } from "./pages/Compare";
 
 const MAX_BYTES = 30 * 1024 * 1024;
 const STEPS = ["Read original file", "Extract readable content", "Build document map", "Prepare three views"];
@@ -18,6 +19,7 @@ function App() {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderId, setFolderId] = useState<string | null>(null);
   const [active, setActive] = useState<{ documentId: string; versionId: string; tab?: "original" | "chunks" | "edits" } | null>(null);
+  const [compare, setCompare] = useState<{ documentId: string; baseId: string; targetId: string } | null>(null);
   const [search, setSearch] = useState("");
   const [progress, setProgress] = useState<Progress | null>(null);
   const [toast, setToast] = useState<Toast>(null);
@@ -40,6 +42,7 @@ function App() {
   function openWorkspace(documentId: string, versionId: string, tab?: "original" | "chunks" | "edits") {
     setActive({ documentId, versionId, tab }); setView("workspace"); window.scrollTo(0, 0);
   }
+  function openCompare(documentId: string, baseId: string, targetId: string) { setCompare({ documentId, baseId, targetId }); setView("compare"); window.scrollTo(0, 0); }
   function openFolder(documentId: string) { setFolderId(documentId); setView("folder"); window.scrollTo(0, 0); void refresh(); }
   const browse = () => { if (!busy.current) fileInput.current?.click(); };
 
@@ -127,11 +130,16 @@ function App() {
       <Topbar view={view} onHome={() => go("home")} onHistory={() => go("history")} onDemo={demo} onBrowse={browse} />
       {view === "home" && <Home folders={folders} onBrowse={browse} onFiles={(f) => void ingest(f)} onFormat={format} onFolder={openFolder} onHistory={() => go("history")} />}
       {view === "history" && <History folders={filtered} search={search} onSearch={setSearch} onBrowse={browse} onOpenFolder={openFolder} />}
-      {view === "folder" && <FolderPage folder={folder} onHistory={() => go("history")} onOpen={(d, v) => openWorkspace(d, v)} />}
+      {view === "folder" && <FolderPage folder={folder} onHistory={() => go("history")} onOpen={(d, v) => openWorkspace(d, v)} onCompare={openCompare} />}
+      {view === "compare" && compare && (
+        <ComparePage folder={folders.find((f) => f.document_id === compare.documentId)} baseId={compare.baseId} targetId={compare.targetId}
+          onChange={(b, t) => setCompare({ ...compare, baseId: b, targetId: t })} onHistory={() => go("history")} onFolder={() => openFolder(compare.documentId)}
+          onOpen={(v) => openWorkspace(compare.documentId, v)} notify={notify} />
+      )}
       {view === "workspace" && active && (
         <Workspace key={`${active.documentId}:${active.versionId}`} documentId={active.documentId} versionId={active.versionId} initialTab={active.tab}
           folders={folders} onHome={() => go("home")} onHistory={() => go("history")} onFolder={openFolder}
-          onOpen={openWorkspace} onBrowse={browse} notify={notify} refresh={refresh} />
+          onOpen={openWorkspace} onCompare={openCompare} onBrowse={browse} notify={notify} refresh={refresh} />
       )}
       {progress && (
         <div className="overlay" id="progress-overlay">

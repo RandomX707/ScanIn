@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { Icon } from "../lib/icons";
 import { folderName, typeLabel, humanDate, size as fmtSize, type Folder } from "../lib/api";
 
-export type View = "home" | "history" | "folder" | "workspace";
+export type View = "home" | "history" | "folder" | "workspace" | "compare";
 
 export function Topbar({ view, onHome, onHistory, onDemo, onBrowse }: {
   view: View; onHome: () => void; onHistory: () => void; onDemo: () => void; onBrowse: () => void;

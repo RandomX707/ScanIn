@@ -351,9 +351,9 @@ test.describe('Scan In workspace: upload, read, edit, save as next version', () 
     await page.getByRole('button', { name: /Try demo/ }).click();
     await expect(page.locator('.file-meta')).toContainText('Version 1 of 3');
     const token = run().token;
-    const folderOf = async () => (await (await page.request.get(`http://127.0.0.1:8000/api/folders?q=Meridian`, { headers: { Authorization: `Bearer ${token}` } })).json()).items[0];
+    const folderOf = async () => (await (await page.request.get(`${process.env.IDW_API_BASE_URL || 'http://127.0.0.1:8010'}/api/folders?q=Meridian`, { headers: { Authorization: `Bearer ${token}` } })).json()).items[0];
     const before = await folderOf();
-    const bytesOf = async (folder, v) => sha(Buffer.from(await (await page.request.get(`http://127.0.0.1:8000/api/documents/${folder.document_id}/versions/${v.version_id}/file`, { headers: { Authorization: `Bearer ${token}` } })).body()));
+    const bytesOf = async (folder, v) => sha(Buffer.from(await (await page.request.get(`${process.env.IDW_API_BASE_URL || 'http://127.0.0.1:8010'}/api/documents/${folder.document_id}/versions/${v.version_id}/file`, { headers: { Authorization: `Bearer ${token}` } })).body()));
     const hashes = await Promise.all(before.versions.map((v) => bytesOf(before, v)));
     await page.locator('.tab', { hasText: 'Edits' }).click();
     await expect(page.locator('.editable')).toBeVisible();   // the editor is shown on v1, not the empty state

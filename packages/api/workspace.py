@@ -5,6 +5,7 @@ edit-set workflow, independent verifiers); it adds no new trust path.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 from pathlib import Path, PurePosixPath
 from uuid import UUID
@@ -63,10 +64,27 @@ def download_name(filename: str, number: int) -> str:
     return filename if number == 1 else f"{stem}_v{number}{suffix}"
 
 
-def _folder_payload(folder: dict[str, object]) -> dict[str, object]:
+def _classify_versions(versions: list[dict[str, object]], flagged: set[str]) -> dict[str, str]:
+    parent = {str(v["version_id"]): (str(v["parent_version_id"]) if v["parent_version_id"] else None) for v in versions}
+    out: dict[str, str] = {}
+    for v in versions:
+        vid = str(v["version_id"])
+        if v["kind"] == "original":
+            out[vid] = "original"; continue
+        node, seen, cls = vid, set(), "derived"
+        while node and node not in seen:
+            if node in flagged:
+                cls = "unsigned_working_copy"; break
+            seen.add(node); node = parent.get(node)
+        out[vid] = cls
+    return out
+
+
+def _folder_payload(folder: dict[str, object], flagged: set[str] | None = None) -> dict[str, object]:
     filename = str(folder["filename"])
     versions = list(folder["versions"])  # type: ignore[arg-type]
     numbers = {str(item["version_id"]): index + 1 for index, item in enumerate(versions)}
+    classes = _classify_versions(versions, flagged or set())
     return {
         "document_id": str(folder["id"]),
         "name": filename,
@@ -85,6 +103,7 @@ def _folder_payload(folder: dict[str, object]) -> dict[str, object]:
             "size_bytes": int(item["size_bytes"]),
             "parent_number": numbers.get(str(item["parent_version_id"])) if item["parent_version_id"] else None,
             "status": "Parsed" if item["kind"] == "original" else "Saved",
+            "classification": classes[str(item["version_id"])],
             # VERIFIED / STRUCTURALLY_VERIFIED / INCOMPLETE come from the verifier; text-writer versions are SAVED.
             "outcome": None if item["kind"] == "original" else (item.get("verification_outcome") or "SAVED"),
         } for index, item in enumerate(versions)],
@@ -93,8 +112,10 @@ def _folder_payload(folder: dict[str, object]) -> dict[str, object]:
 
 def list_folder_payloads(request: Request, identity: AuthenticatedIdentity) -> list[dict[str, object]]:
     with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
-        folders = DocumentRepository(connection, identity.tenant_id).list_folders()
-    return [_folder_payload(item) for item in folders]
+        repo = DocumentRepository(connection, identity.tenant_id)
+        folders = repo.list_folders()
+        flagged = repo.working_copy_version_ids()
+    return [_folder_payload(item, flagged) for item in folders]
 
 
 @router.get("/folders")
@@ -554,6 +575,11 @@ def version_preview(document_id: str, version_id: str, request: Request,
                        "widgets": (f.get("native_locator") or {}).get("widgets", [])} for f in details.get("fields", [])]
             editable = level == "editable" and bool(fields)
             signature = pdf_signature.classify(source)
+            from packages.api.compare import lineage_classes, load_family
+            from packages.api.working_copy import ACKNOWLEDGEMENT, signature_payload, validate_signatures
+            validation = validate_signatures(request, source, hashlib.sha256(source).hexdigest())
+            versions_, events_, _meta = load_family(request, identity, parsed_document)
+            classification = lineage_classes(versions_, events_).get(str(parsed_version), "derived")
             text_editable = False
             if editable and signature["status"] in pdf_signature.REASONS:
                 editable = False                       # a signed form must not be filled in place
@@ -574,7 +600,9 @@ def version_preview(document_id: str, version_id: str, request: Request,
                 reason = file_reason(reasons, suffix)
             return done("pdf", "pdf" if editable else "pdf_text" if text_editable else "none", reason, pages=pages,
                         fields=fields, text_available=any(not p["scanned"] for p in pages),
-                        signature={"status": signature["status"], "validated": False})
+                        signature=signature_payload(validation), classification=classification,
+                        working_copy={"available": signature["status"] != "none" and classification != "unsigned_working_copy",
+                                      "acknowledgement": ACKNOWLEDGEMENT})
     except ParserNotVerified:
         raise APIError(503, "view_not_verified", "Safe document viewing is unavailable.") from None
     return done("none", "none", file_reason([], suffix))

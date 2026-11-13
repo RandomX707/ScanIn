@@ -216,6 +216,13 @@ class DocumentRepository:
             items.append(item)
         return items
 
+    def working_copy_version_ids(self) -> set[str]:
+        """Versions the audit trail records as created by the unsigned-working-copy action (descendants inherit the class)."""
+        rows = self.connection.execute(text("""SELECT payload->>'version_id' FROM audit_events
+            WHERE tenant_id=:tenant AND action='document.text_version_saved' AND payload->>'unsigned_working_copy'='true'"""),
+            {"tenant": self.tenant_id})
+        return {str(r[0]) for r in rows if r[0]}
+
     def set_document_category(self, document_id: UUID, *, category: str, actor_id: str) -> None:
         result = self.connection.execute(text("""UPDATE documents SET document_category=:category
             WHERE tenant_id=:tenant AND id=:document AND NOT EXISTS

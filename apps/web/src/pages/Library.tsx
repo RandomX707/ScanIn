@@ -36,7 +36,7 @@ export function History({ folders, search, onSearch, onBrowse, onOpenFolder }: {
   );
 }
 
-export function FolderPage({ folder, onHistory, onOpen }: { folder: Folder | undefined; onHistory: () => void; onOpen: (documentId: string, versionId: string) => void }) {
+export function FolderPage({ folder, onHistory, onOpen, onCompare }: { folder: Folder | undefined; onHistory: () => void; onOpen: (documentId: string, versionId: string) => void; onCompare: (documentId: string, baseId: string, targetId: string) => void }) {
   if (!folder) return <History folders={[]} search="" onSearch={() => {}} onBrowse={() => {}} onOpenFolder={() => {}} />;
   const family = folder.versions;
   const latest = family[family.length - 1];
@@ -64,11 +64,24 @@ export function FolderPage({ folder, onHistory, onOpen }: { folder: Folder | und
             <div className={`timeline-marker ${i === 0 ? "source" : ""}`}>{i === 0 ? <Icon name="shield" size={19} /> : String(i + 1).padStart(2, "0")}</div>
             <div className="version-card">
               <div className="version-card-main">
-                <div className="version-card-label"><strong>v{i + 1}</strong> <span className={`pill ${i === 0 ? "" : "orange"}`}>{i === 0 ? "Original source" : "Saved"}</span>{i === family.length - 1 ? <span className="latest-label">Latest</span> : null}</div>
+                <div className="version-card-label"><strong>v{i + 1}</strong> <span className={`pill ${i === 0 ? "" : v.classification === "unsigned_working_copy" ? "wc" : "orange"}`}>{i === 0 ? "Original source" : v.classification === "unsigned_working_copy" ? "Unsigned working copy · not official" : "Saved"}</span>{v.outcome && i > 0 ? <span className="pill">{v.outcome}</span> : null}{i === family.length - 1 ? <span className="latest-label">Latest</span> : null}</div>
                 <h3>{v.name}</h3>
                 <p>{humanDate(v.created_at)} · {size(v.size_bytes)} {i > 0 ? `· Derived from v${v.parent_number ?? i}` : "· Uploaded file · Immutable"}</p>
               </div>
-              <button className={`btn ${i === family.length - 1 ? "dark" : "outline"} small`} onClick={() => onOpen(folder.document_id, v.version_id)}>Open v{i + 1} <Icon name="arrow" size={14} /></button>
+              <div className="version-actions">
+                <button className={`btn ${i === family.length - 1 ? "dark" : "outline"} small`} onClick={() => onOpen(folder.document_id, v.version_id)}>Open v{i + 1} <Icon name="arrow" size={14} /></button>
+                {v.parent_number ? <button className="btn outline small" onClick={() => onCompare(folder.document_id, family[v.parent_number! - 1].version_id, v.version_id)}>Compare with v{v.parent_number}</button> : null}
+                {family.length > 1 ? (
+                  <select className="compare-with" aria-label={`Compare v${i + 1} with another version`} value="" onChange={(e) => {
+                    const other = family.find((x) => x.version_id === e.target.value); if (!other) return;
+                    const [older, newer] = other.number < v.number ? [other, v] : [v, other];
+                    onCompare(folder.document_id, older.version_id, newer.version_id);
+                  }}>
+                    <option value="">Compare with…</option>
+                    {family.filter((x) => x.version_id !== v.version_id).map((x) => <option key={x.version_id} value={x.version_id}>v{x.number}{x.kind === "original" ? " · Original" : ""}</option>)}
+                  </select>
+                ) : null}
+              </div>
             </div>
           </div>
         ))}

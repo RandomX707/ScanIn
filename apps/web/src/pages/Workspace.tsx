@@ -7,6 +7,8 @@ import {
 import { EditsTab } from "./Edits";
 import { SheetGrid } from "./SheetGrid";
 import { PageViewer } from "../components/PageViewer";
+import { SheetWorkspace } from "../components/SheetWorkspace";
+import { SignatureStatus, WorkingCopyBanner } from "../components/SignaturePanel";
 
 const SOURCE_TEXT = ["txt", "text", "md", "markdown", "csv", "json", "xml", "rtf", "html", "htm"];
 const NATIVE = ["pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp"];
@@ -16,11 +18,13 @@ export type WorkspaceProps = {
   documentId: string; versionId: string; folders: Folder[];
   onHome: () => void; onHistory: () => void; onFolder: (id: string) => void;
   onOpen: (documentId: string, versionId: string, tab?: "original" | "chunks" | "edits") => void; onBrowse: () => void;
+  onCompare: (documentId: string, baseId: string, targetId: string) => void;
   initialTab?: "original" | "chunks" | "edits";
   notify: (message: string, error?: boolean) => void; refresh: () => Promise<void>;
 };
 
 function statusFor(version: FolderVersion, name: string, chunks: Chunks | null): string {
+  if (version.classification === "unsigned_working_copy") return "Unsigned working copy · not official";
   if (version.kind === "derived") return "Saved";
   const e = ext(name);
   if (chunks && !chunks.text_available) {
@@ -98,14 +102,16 @@ export function Workspace(props: WorkspaceProps) {
           <button className="btn dark small" onClick={props.onBrowse}><Icon name="upload" size={15} /> New Scan</button>
         </div>
       </div>
+      {version.classification === "unsigned_working_copy" ? <WorkingCopyBanner /> : null}
       <div className="version-bar">
         <div className="version-label"><Icon name="layers" size={16} /> <span>DOCUMENT FOLDER</span> <strong>{folderName(folder.name)}</strong></div>
         <div className="version-pills">
           {family.map((v) => (
             <button key={v.version_id} className={`version-pill ${v.version_id === versionId ? "active" : ""}`} title={v.name}
-              onClick={() => props.onOpen(documentId, v.version_id)}>v{v.number} {v.kind === "original" ? "· Source" : ""}</button>
+              onClick={() => props.onOpen(documentId, v.version_id)}>v{v.number} {v.kind === "original" ? "· Source" : v.classification === "unsigned_working_copy" ? "· Working copy" : ""}</button>
           ))}
         </div>
+        {version.parent_number ? <button className="version-open" onClick={() => props.onCompare(documentId, family[version.parent_number! - 1].version_id, versionId)}>Compare with v{version.parent_number} <Icon name="arrow" size={14} /></button> : null}
         <button className="version-open" onClick={() => props.onFolder(documentId)}>All versions <Icon name="arrow" size={14} /></button>
       </div>
       <div className="three-col">
@@ -190,7 +196,11 @@ export function ExtractedPreview({ preview }: { preview: Preview }) {
     return <>{nodes.length ? nodes : <p>No extractable text in this file.</p>}</>;
   }
   if (preview.format === "xlsx" || preview.format === "csv") {
-    return <>{(preview.sheets ?? []).map((s) => (
+    const all = preview.sheets ?? [];
+    if (all.length && all.every((s) => s.layout)) {
+      return <div className="grid-editor no-toolbar"><SheetWorkspace sheets={all} styles={preview.styles ?? []} readOnly label="Original workbook" testId="sheet-viewer" /></div>;
+    }
+    return <>{all.map((s) => (
       <div key={s.name}>
         <h2>{s.name}</h2>
         {s.layout
@@ -214,6 +224,13 @@ function OriginalTab({ documentId, root, folderName: name, download, page }: { d
   const [preview, setPreview] = useState<Preview | null>(null);
   const urlRef = useRef<string | null>(null);
   const [renderFailed, setRenderFailed] = useState(false);
+  const [signature, setSignature] = useState<Preview["signature"] | null>(null);
+  useEffect(() => {
+    if (e !== "pdf") return;
+    let live = true;
+    getPreview(documentId, root.version_id).then((p) => { if (live) setSignature(p.signature ?? null); }).catch(() => undefined);
+    return () => { live = false; };
+  }, [documentId, root.version_id, e]);
 
   useEffect(() => {
     let live = true;
@@ -237,6 +254,7 @@ function OriginalTab({ documentId, root, folderName: name, download, page }: { d
       <div className="section-eyebrow">01 / ORIGINAL SOURCE</div>
       <div className="section-title"><h3>Your original document.</h3><span className="pill"><Icon name="shield" size={13} /> Source never overwritten</span></div>
       <div className="source-banner"><Icon name="shield" size={14} /> <span>{note}</span></div>
+      {signature ? <SignatureStatus signature={signature} /> : null}
       <div className="reader-toolbar">
         <span className="stage-note">{name} · {size(root.size_bytes)} · {faithful ? "Page-accurate preview" : native ? "Native file preview" : sourceText ? "Exact source text" : "Office reading preview"}</span>
         <button className="btn outline small" onClick={download}><Icon name="download" size={14} /> Download exact source</button>

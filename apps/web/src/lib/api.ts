@@ -3,7 +3,7 @@ const SESSION_KEY = "channel360.demo.session";
 
 export type FolderVersion = {
   version_id: string; number: number; kind: "original" | "derived"; name: string; created_at: string;
-  size_bytes: number; parent_number: number | null; status: string; outcome: string | null;
+  size_bytes: number; parent_number: number | null; status: string; outcome: string | null; classification?: string;
 };
 export type Folder = {
   document_id: string; name: string; created_at: string; latest_version_id: string; demo: boolean; versions: FolderVersion[];
@@ -133,16 +133,20 @@ export function typeLabel(name: string) { return LABELS[ext(name)] ?? "FILE"; }
 export function folderName(name: string) { return name.replace(/\.[^.]+$/, "").replace(/_/g, " "); }
 
 export type Cell = { v: string; t: string; id: string; fp: string; e: boolean; r: string | null } | null;
-export type CellStyle = { b?: 1; i?: 1; u?: 1; sz?: number; c?: string; bg?: string; ha?: string; va?: string; wrap?: 1; bl?: 1; br?: 1; bt?: 1; bb?: 1 };
+export type CellStyle = { nf?: string; b?: 1; i?: 1; u?: 1; sz?: number; c?: string; bg?: string; ha?: string; va?: string; wrap?: 1; bl?: 1; br?: 1; bt?: 1; bb?: 1 };
 export type SheetImage = { src: string; from: { col: number; row: number; dx: number; dy: number } | null; to?: { col: number; row: number; dx: number; dy: number } | null; ext?: { cx: number; cy: number } };
-export type SheetLayout = { default_col?: number; default_row?: number; merges: [number, number, number, number][]; cols: Record<string, number>; rows: Record<string, number>; cells: Record<string, number>; images: SheetImage[] };
+export type SheetLayout = { default_col?: number; default_row?: number; merges: [number, number, number, number][]; cols: Record<string, number>; rows: Record<string, number>; cells: Record<string, number>; images: SheetImage[];
+  freeze?: { rows: number; cols: number } | null; zoom?: number; hidden?: boolean; protected?: boolean };
 export type Sheet = { name: string; rows: Cell[][]; truncated: boolean; layout?: SheetLayout };
 export type DocxBlock = { id: string; kind: string; text: string; heading: number | null; table: { index: number; row: number; col: number } | null; target_id: string | null; fp: string | null; e: boolean; r: string | null };
 export type PdfField = { id: string; name: string; type: string; value: unknown; options: string[]; max_length: number | null; fp: string; e: boolean; r: string | null; widgets: { page: number; rect: number[]; state?: string | null }[] };
+export type SignatureInfo = { status: string; validated: boolean; state?: string; label?: string; detail?: string; trust_policy_configured?: boolean;
+  docmdp?: { permission: number; meaning: string } | null; limits?: string[];
+  signatures?: { integrity?: string; trust?: string; trust_reason?: string; covers_whole_file?: boolean; reason?: string; subfilter?: string | null; timestamp_token_present?: boolean; signing_time_attribute_present?: boolean; state?: string; signer?: { subject: string; issuer: string; not_before: string; not_after: string } | null }[] };
 export type Preview = {
   name: string; is_latest: boolean; size_bytes: number; format: string;
   edit: { mode: "text" | "grid" | "docx" | "pdf" | "pdf_text" | "none"; reason: string | null };
-  signature?: { status: string; validated: boolean }; styles?: CellStyle[];
+  signature?: SignatureInfo; classification?: string; working_copy?: { available: boolean; acknowledgement: string }; styles?: CellStyle[];
   text?: string; html?: string | null; encoding?: string; kind?: string; sheets?: Sheet[]; blocks?: DocxBlock[]; slides?: string[][];
   pages?: { page: number; width: number; height: number; scanned: boolean }[]; fields?: PdfField[]; text_available?: boolean;
   render?: { available: boolean; engine: string; note: string; reason: string | null };
@@ -179,4 +183,24 @@ export async function fetchRenderBytes(documentId: string, versionId: string): P
     throw new ApiError(response.status, body.code ?? "render_unavailable", body.message ?? "The page preview is unavailable.");
   }
   return response.arrayBuffer();
+}
+
+export type ChangeKind = "added" | "removed" | "modified";
+export type Change = { id: string; kind: ChangeKind; category: "text" | "value" | "formula" | "format" | "structure" | "image"; label: string;
+  location: { page?: number; sheet?: string; cell?: string; block?: string; table?: { index: number; row: number; col: number }; line?: number; media?: string; kind?: string };
+  before: string | null; after: string | null; detail?: string; page?: number; base_bbox?: [number, number, number, number] | null; target_bbox?: [number, number, number, number] | null };
+export type VersionCard = { version_id: string; number: number; kind: "original" | "derived"; classification: string; parent_number: number | null; created_at: string;
+  size_bytes: number; sha256: string; outcome: string | null; download_available: boolean; actor: string | null; recorded_at: string | null; modification: string | null; edit_count: number | null };
+export type Comparison = {
+  document_id: string; name: string; format: "pdf" | "xlsx" | "docx" | "text"; base: VersionCard; target: VersionCard;
+  relation: { type: "same" | "base_is_ancestor" | "target_is_ancestor" | "branch" | "unrelated"; path_numbers: number[]; common_ancestor?: string };
+  path: VersionCard[]; identical_bytes: boolean; changes: Change[]; summary: { added: number; removed: number; modified: number; total: number; truncated: boolean };
+  limits: string[]; note: string | null; signature?: { base: { status: string; validated: boolean }; target: { status: string; validated: boolean } };
+  pages?: { base: { page: number; width: number; height: number }[]; target: { page: number; width: number; height: number }[] };
+};
+export const compareVersions = (documentId: string, base: string, target: string) =>
+  json<Comparison>(`/api/documents/${documentId}/compare?base=${base}&target=${target}`);
+
+export async function createWorkingCopy(documentId: string, versionId: string): Promise<{ version_id: string; note: string }> {
+  return json(`/api/documents/${documentId}/versions/${versionId}/working-copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ acknowledge: true }) });
 }

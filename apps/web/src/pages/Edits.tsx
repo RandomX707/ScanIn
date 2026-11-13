@@ -6,6 +6,7 @@ import {
 } from "../lib/api";
 import { DocxEditor, GridEditor, PdfEditor, RichEditor, TextEditor } from "./editors";
 import { PdfTextEditor } from "./PdfTextEditor";
+import { SignatureStatus, WorkingCopyAction, WorkingCopyBanner } from "../components/SignaturePanel";
 
 export type EditsProps = {
   documentId: string; folderName: string; version: FolderVersion; family: FolderVersion[]; chunksText: Chunks | null;
@@ -73,11 +74,21 @@ export function EditsTab(props: EditsProps) {
   );
   if (!preview) return <>{head}<p className="stage-note">Opening the editor…</p></>;
   const mode = preview.edit.mode;
+  const workingCopy = preview.classification === "unsigned_working_copy";
   if (mode === "none") {
     return (
       <>
         {head}
-        <div className="empty"><h3>{preview.edit.reason}</h3></div>
+        {preview.signature ? <SignatureStatus signature={preview.signature} /> : null}
+        <div className="empty"><h3>{preview.edit.reason}</h3>
+          {preview.working_copy?.available ? (
+            <>
+              <p className="stage-note">The signed original stays exactly as received. You can create a separate, unsigned working copy and edit that instead.</p>
+              <WorkingCopyAction documentId={documentId} versionId={version.version_id} acknowledgement={preview.working_copy.acknowledgement} notify={notify}
+                onCreated={async (id, note) => { await props.refresh(); notify(note); props.onSaved(id); }} />
+            </>
+          ) : null}
+        </div>
       </>
     );
   }
@@ -86,6 +97,7 @@ export function EditsTab(props: EditsProps) {
   return (
     <>
       {head}
+      {workingCopy ? <WorkingCopyBanner /> : null}
       <div className="edit-head">
         <div><strong><Icon name="edit" size={15} /> Working document</strong><div><span>{DESCRIPTION[mode]}</span></div></div>
         <span id="edit-state">{dirty ? "Unsaved changes" : "No changes yet"}</span>

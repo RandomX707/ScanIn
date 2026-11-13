@@ -69,6 +69,15 @@ class RestrictedPdfEditor:
             raise PdfEditUnavailable(str(data["error"]))
         return data
 
+    def working_copy(self, source_path: Path, *, name: str, state: str, timeout_seconds: int = 180) -> tuple[bytes, dict[str, Any]]:
+        data, out_path, tmp = self._run({"mode": "working_copy", "name": name, "state": state}, source_path, timeout_seconds=timeout_seconds)
+        try:
+            if data.get("error"):
+                raise PdfEditRefused(str(data["error"]), str(data.get("message") or ""))
+            return out_path.read_bytes(), data
+        finally:
+            tmp.cleanup()
+
     def edit(self, source_path: Path, edits: list[dict[str, str]], *, timeout_seconds: int = 120) -> tuple[bytes, dict[str, Any]]:
         data, out_path, tmp = self._run({"mode": "edit", "edits": edits}, source_path, timeout_seconds=timeout_seconds)
         try:
