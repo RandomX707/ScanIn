@@ -120,9 +120,10 @@ export function ComparePage({ folder, baseId, targetId, onChange, onHistory, onF
   const highlights = useMemo(() => {
     const base: Highlight[] = [], target: Highlight[] = [];
     for (const c of visible) {
-      if (c.category !== "text" || !c.page) continue;
-      if (c.base_bbox && c.kind !== "added") base.push({ id: c.id, page: c.page, bbox: c.base_bbox, kind: c.kind === "removed" ? "del" : "mod", label: c.label });
-      if (c.target_bbox && c.kind !== "removed") target.push({ id: c.id, page: c.page, bbox: c.target_bbox, kind: c.kind === "added" ? "add" : "mod", label: c.label });
+      if ((c.category !== "text" && c.category !== "format") || !(c.page || c.base_page || c.target_page)) continue;
+      const bp = c.base_page ?? c.page, tp = c.target_page ?? c.page;
+      if (c.base_bbox && bp && c.kind !== "added") base.push({ id: c.id, page: bp, bbox: c.base_bbox, kind: c.kind === "removed" ? "del" : "mod", label: c.label });
+      if (c.target_bbox && tp && c.kind !== "removed") target.push({ id: c.id, page: tp, bbox: c.target_bbox, kind: c.kind === "added" ? "add" : "mod", label: c.label });
     }
     return { base, target };
   }, [visible]);
@@ -176,6 +177,7 @@ export function ComparePage({ folder, baseId, targetId, onChange, onHistory, onF
               <button className={`pill sum-del ${filter === "removed" ? "on" : ""}`} onClick={() => setFilter(filter === "removed" ? "all" : "removed")}>−{counts?.removed} removed</button>
               <button className={`pill sum-mod ${filter === "modified" ? "on" : ""}`} onClick={() => setFilter(filter === "modified" ? "all" : "modified")}>~{counts?.modified} modified</button>
               {categories.length > 1 ? categories.map((c) => <button key={c} className={`pill ${filter === c ? "on" : ""}`} onClick={() => setFilter(filter === c ? "all" : c)}>{CATEGORY_LABEL[c]}</button>) : null}
+              {cmp.format === "docx" ? <span className="stage-note">“Text” = the wording changed. “Formatting” = same words, different look.</span> : null}
               {cmp.complete === false ? <span className="pill sum-del" data-testid="completeness">PARTIAL — not every change is listed</span>
                 : <span className="pill sum-add" data-testid="completeness">COMPLETE{cmp.examined_cells ? ` · ${cmp.examined_cells.toLocaleString()} cells examined` : ""}</span>}
             </div>
@@ -219,8 +221,8 @@ export function ComparePage({ folder, baseId, targetId, onChange, onHistory, onF
               ) : null}
               {cmp.format === "docx" && mode === "all" ? (
                 <div className="side-by-side">
-                  <PageViewer key={`b-${baseId}`} title={`v${cmp.base.number} pages`} heading={`v${cmp.base.number} · base`} testId="viewer-base" fetchBytes={() => fetchRenderBytes(documentId, baseId)} note="Page-accurate preview. Text and formatting changes are listed on the left; a text list is not a full visual comparison." />
-                  <PageViewer key={`t-${targetId}`} title={`v${cmp.target.number} pages`} heading={`v${cmp.target.number} · target`} testId="viewer-target" fetchBytes={() => fetchRenderBytes(documentId, targetId)} />
+                  <PageViewer key={`b-${baseId}`} title={`v${cmp.base.number} pages`} heading={`v${cmp.base.number} · base`} testId="viewer-base" fetchBytes={() => fetchRenderBytes(documentId, baseId)} highlights={highlights.base} activeHighlight={active?.id} note="Page-accurate preview with each change located on its page. Text and formatting changes are listed on the left; a text list is not a full visual comparison." />
+                  <PageViewer key={`t-${targetId}`} title={`v${cmp.target.number} pages`} heading={`v${cmp.target.number} · target`} testId="viewer-target" fetchBytes={() => fetchRenderBytes(documentId, targetId)} highlights={highlights.target} activeHighlight={active?.id} />
                 </div>
               ) : null}
               <div className="compare-actions">

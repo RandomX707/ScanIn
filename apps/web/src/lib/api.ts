@@ -191,7 +191,7 @@ export async function fetchRenderBytes(documentId: string, versionId: string): P
 export type ChangeKind = "added" | "removed" | "modified";
 export type Change = { id: string; kind: ChangeKind; category: "text" | "value" | "formula" | "format" | "structure" | "image"; label: string;
   location: { page?: number; sheet?: string; cell?: string; block?: string; table?: { index: number; row: number; col: number }; line?: number; media?: string; kind?: string };
-  before: string | null; after: string | null; detail?: string; page?: number; base_bbox?: [number, number, number, number] | null; target_bbox?: [number, number, number, number] | null };
+  before: string | null; after: string | null; detail?: string; page?: number; base_page?: number | null; target_page?: number | null; base_bbox?: [number, number, number, number] | null; target_bbox?: [number, number, number, number] | null };
 export type VersionCard = { version_id: string; number: number; kind: "original" | "derived"; classification: string; parent_number: number | null; created_at: string;
   size_bytes: number; sha256: string; outcome: string | null; download_available: boolean; actor: string | null; recorded_at: string | null; modification: string | null; edit_count: number | null };
 export type Comparison = {

@@ -215,6 +215,52 @@ def _audit_compare(request: Request, identity: AuthenticatedIdentity, doc: UUID,
         logging.getLogger("idw.api").error("compare_audit_failed")
 
 
+def _docx_page_lines(request: Request, identity: AuthenticatedIdentity, doc: UUID, version_id: UUID, sha: str) -> list[dict[str, Any]] | None:
+    """Text lines (page, text, box) of the page preview of one DOCX version, cached; None when no preview can be rendered."""
+    cache: dict = request.app.state.__dict__.setdefault("docx_page_lines", {})
+    key = (str(identity.tenant_id), sha)
+    if key in cache:
+        return cache[key]
+    from packages.api.render import render_cache_path, rendered_pdf
+    try:
+        rendered_pdf(request, identity, doc, version_id)
+        outline = request.app.state.pdf_editor.outline(render_cache_path(request, identity, version_id, sha))
+        lines = [{"page": p["page"], "t": ln["t"], "bb": ln.get("bb")} for p in outline.get("pages", []) for ln in p.get("lines", [])]
+    except Exception:  # noqa: BLE001 - locating changes on pages is an aid; the comparison stands without it
+        lines = None
+    if len(cache) > 24:
+        cache.clear()
+    cache[key] = lines
+    return lines
+
+
+def _locate(lines: list[dict[str, Any]] | None, text: str | None) -> tuple[int | None, list[float] | None]:
+    """Page and box of the line where a paragraph starts (best effort, never invented)."""
+    import re
+    if not lines or not text:
+        return None, None
+    norm = lambda t: re.sub(r"\W+", "", t or "").lower()  # noqa: E731
+    head = norm(text)[:24]
+    if len(head) < 4:
+        return None, None
+    for line in lines:
+        n = norm(line["t"])
+        if n and (n.startswith(head[: max(4, min(len(n), len(head)))]) or head.startswith(n[:24]) and len(n) >= 4):
+            return line["page"], line.get("bb")
+    return None, None
+
+
+def _locate_docx_changes(request: Request, identity: AuthenticatedIdentity, doc: UUID, vb: UUID, vt: UUID, rows: dict[str, dict[str, Any]], diff: dict[str, Any]) -> None:
+    base_lines = _docx_page_lines(request, identity, doc, vb, str(rows[str(vb)]["sha256"]))
+    target_lines = _docx_page_lines(request, identity, doc, vt, str(rows[str(vt)]["sha256"]))
+    for change in diff["changes"]:
+        if change["category"] not in ("text", "format"):
+            continue
+        change["base_page"], change["base_bbox"] = _locate(base_lines, change.get("before"))
+        change["target_page"], change["target_bbox"] = _locate(target_lines, change.get("after"))
+        change["page"] = change.get("target_page") or change.get("base_page")
+
+
 @router.get("/documents/{document_id}/compare")
 def compare_versions(document_id: str, request: Request, base: str = Query(), target: str = Query(),
                      offset: int = Query(default=0, ge=0), limit: int = Query(default=5000, ge=1, le=5000), wait: float = Query(default=20.0, ge=0, le=60),
@@ -260,6 +306,8 @@ def compare_versions(document_id: str, request: Request, base: str = Query(), ta
     fmt_t, snap_t = snapshot(request, identity, doc, vtarget, source_t, meta["filename"])
     differ = diff_lines if fmt_b == "text" else engine.DIFFERS[fmt_b]
     diff = differ(snap_b, snap_t)
+    if fmt_b == "docx" and diff["changes"]:
+        _locate_docx_changes(request, identity, doc, vb, vt, by_id, diff)
     note = None if diff["changes"] else "The files differ at the byte level, but no differences were found in the content that is compared."
     if fmt_b == "pdf":
         result["signature"] = {"base": _sig(source_b), "target": _sig(source_t)}
