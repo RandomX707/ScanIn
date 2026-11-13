@@ -8,21 +8,20 @@ Three separate questions are answered and NEVER merged into one word like "valid
 Legal/regulatory acceptance is outside this module and is never claimed.
 
 Malformed containers (byte ranges outside the file, missing /Contents, unreadable DER) are reported as such and are
-never treated as trusted. OpenSSL runs with no network, no write access outside a scratch directory and no read access
-under /Users (macOS Seatbelt). Without the sandbox, validation is reported as unavailable rather than run unconfined.
+never treated as trusted. OpenSSL runs through packages/workers/sandbox.py (no network, writes only in a scratch directory, no read access to
+the user's files). Without a verified sandbox, validation is reported as unavailable rather than run unconfined.
 """
 from __future__ import annotations
 
 import os
 import re
 import shutil
-import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from packages.core import pdf_signature
+from packages.workers.sandbox import SandboxFailed, SandboxPolicy, SandboxUnavailable, confined_runner, resolve_tool, sandbox_status
 
 MAX_SIGNATURES = 8
 OID_TIMESTAMP = bytes.fromhex("2a864886f70d010910020e")      # id-aa-timeStampToken
@@ -44,27 +43,6 @@ LABELS = {
 }
 _SEVERITY = ["malformed", "integrity_invalid", "not_validated", "modified_after_signing", "integrity_valid_untrusted",
              "integrity_valid_trust_not_established", "integrity_valid_trusted"]
-
-
-def _openssl() -> str | None:
-    for candidate in (os.environ.get("IDW_OPENSSL_PATH"), "/opt/homebrew/bin/openssl", "/usr/local/bin/openssl", shutil.which("openssl")):
-        if candidate and Path(candidate).is_file():
-            try:
-                out = subprocess.run([candidate, "version"], capture_output=True, text=True, timeout=5).stdout
-            except (OSError, subprocess.SubprocessError):
-                continue
-            if out.startswith("OpenSSL"):                      # LibreSSL has no `cms`
-                return str(Path(candidate).resolve())
-    return None
-
-
-def _profile(scratch: Path, trust_file: Path | None) -> str:
-    s = scratch.resolve().as_posix()
-    reads = f'(allow file-read* (subpath "{s}")' + (f' (literal "{trust_file.resolve().as_posix()}")' if trust_file else "") + ")"
-    return "\n".join(("(version 1)", "(allow default)", "(deny network-outbound (remote ip))", "(deny network-inbound (local ip))",
-                      "(deny network-bind (local ip))", "(deny file-write*)",
-                      f'(allow file-write* (subpath "{s}") (subpath "/dev") (subpath "/private/var/folders"))',
-                      '(deny file-read* (subpath "/Users"))', reads))
 
 
 def _der_length(blob: bytes) -> int | None:
@@ -101,21 +79,31 @@ def _extract(data: bytes, rng: list[int]) -> tuple[bytes | None, bytes | None, s
     return raw[:length], data[a:a + b] + data[c:c + d], None
 
 
+class _Proc:
+    def __init__(self, returncode: int, stdout: bytes, stderr: bytes):
+        self.returncode, self.stdout, self.stderr = returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+
+
 class SignatureValidator:
-    def __init__(self, *, trust_file: str | None = None, timeout_seconds: int = 20, platform_name: str | None = None):
+    def __init__(self, *, trust_file: str | None = None, timeout_seconds: int = 20, runner=None):
         configured = trust_file or os.environ.get("IDW_PDF_TRUST_CAFILE")
         self.trust_file = Path(configured) if configured and Path(configured).is_file() else None
         self.timeout_seconds = timeout_seconds
-        self.platform_name = platform_name or sys.platform
-        self.openssl = _openssl()
+        self._runner = runner
+        self.tool = resolve_tool("openssl")
+        self.openssl = self.tool.path if self.tool else None
 
     def available(self) -> bool:
-        return self.openssl is not None and self.platform_name == "darwin" and Path("/usr/bin/sandbox-exec").is_file()
+        if self.tool is None:
+            return False
+        return self._runner is not None or sandbox_status().verified_here
 
-    def _run(self, scratch: Path, args: list[str]) -> subprocess.CompletedProcess:
-        command = ["/usr/bin/sandbox-exec", "-p", _profile(scratch, self.trust_file), self.openssl, *args]
-        return subprocess.run(command, cwd=str(scratch), env={"PATH": "/usr/bin:/bin", "HOME": str(scratch), "LANG": "C", "OPENSSL_CONF": "/dev/null"},
-                              capture_output=True, text=True, timeout=self.timeout_seconds, stdin=subprocess.DEVNULL)
+    def _run(self, scratch: Path, args: list[str]) -> _Proc:
+        runner = self._runner or confined_runner()
+        policy = SandboxPolicy(scratch=scratch, read_paths=((self.trust_file,) if self.trust_file else ()), timeout_seconds=self.timeout_seconds,
+                               cpu_seconds=self.timeout_seconds * 2, memory_bytes=1024**3, max_open_files=256)
+        result = runner.run(self.tool, args, policy, capture_stdout=True, capture_stderr=True)
+        return _Proc(result.returncode, result.stdout, result.stderr)
 
     def validate(self, data: bytes) -> dict[str, Any]:
         structure = pdf_signature.classify(data)
@@ -145,7 +133,7 @@ class SignatureValidator:
         der, signed, problem = _extract(data, sig["byte_range"])
         if problem:
             return {**out, "integrity": "malformed", "reason": problem, "state": "malformed", "trust": "not_trusted"}
-        scratch = Path(tempfile.mkdtemp(prefix="channel360-sigcheck-", dir="/private/tmp")).resolve()
+        scratch = Path(tempfile.mkdtemp(prefix="channel360-sigcheck-", dir="/private/tmp" if __import__("sys").platform == "darwin" else None)).resolve()
         os.chmod(scratch, 0o700)
         try:
             (scratch / "sig.der").write_bytes(der)
@@ -153,7 +141,7 @@ class SignatureValidator:
             base = ["cms", "-verify", "-inform", "DER", "-in", "sig.der", "-content", "signed.bin", "-binary", "-out", "/dev/null"]
             try:
                 integrity = self._run(scratch, [*base, "-noverify", "-signer", "signer.pem"])
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, SandboxFailed, SandboxUnavailable):
                 return {**out, "integrity": "unverifiable", "reason": "validator_failed", "state": "not_validated", "trust": "not_established"}
             err = (integrity.stderr or "").lower()
             if integrity.returncode != 0:
@@ -187,7 +175,7 @@ class SignatureValidator:
             return None
         try:
             proc = self._run(scratch, ["x509", "-in", "signer.pem", "-noout", "-subject", "-issuer", "-startdate", "-enddate"])
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, SandboxFailed, SandboxUnavailable):
             return None
         info: dict[str, str] = {}
         for line in (proc.stdout or "").splitlines():

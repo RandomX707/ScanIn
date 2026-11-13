@@ -136,6 +136,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health_live() -> dict[str, str]:
         return {"status": "alive"}
 
+    @app.get("/health/sandbox", tags=["health"])
+    def health_sandbox() -> dict[str, Any]:
+        """Runtime verdict of the document-processing confinement on THIS host (never claims more than the self-test proved)."""
+        from packages.workers.sandbox import sandbox_status
+        st = sandbox_status()
+        return {"platform": st.platform, "runner": st.runner_label, "verified_here": st.verified_here, "detail": st.detail, "tools_present": st.tools,
+                "document_previews": st.verified_here and st.tools.get("soffice", False), "signature_validation": st.verified_here and st.tools.get("openssl", False)}
+
     @app.get("/health/ready", tags=["health"])
     def health_ready(request: Request) -> JSONResponse:
         try:

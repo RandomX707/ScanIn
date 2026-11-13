@@ -7,18 +7,19 @@ Isolation (fails closed, never falls back to an unconfined run):
     file reads under /Users denied except the scratch directory;
   * a fresh LibreOffice profile with macros disabled and link/external-content updates set to "never";
   * wall-clock timeout, process-group kill, output size and page-count caps.
-Linux (bubblewrap) is not implemented for this worker: it reports unavailable rather than running unconfined.
+Confinement comes from packages/workers/sandbox.py: Seatbelt on macOS (self-tested here), Bubblewrap on Linux (implemented, NOT VERIFIED in
+the development environment). The renderer is available only where the sandbox passed its runtime self-test; otherwise it reports unavailable.
 """
 from __future__ import annotations
 
 import json
 import os
 import shutil
-import signal
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from packages.workers.sandbox import SandboxFailed, SandboxPolicy, SandboxUnavailable, confined_runner, resolve_tool, sandbox_status
 
 MAX_OUTPUT_BYTES = 96 * 1024 * 1024
 MAX_PAGES = 400
@@ -90,43 +91,31 @@ class OfficeRenderRefused(RuntimeError):
         super().__init__(reason_code)
 
 
-def _find_soffice() -> str | None:
-    configured = os.environ.get("IDW_SOFFICE_PATH")
-    candidates = [configured] if configured else []
-    candidates += ["/Applications/LibreOffice.app/Contents/MacOS/soffice", shutil.which("soffice") or ""]
-    for item in candidates:
-        if item and Path(item).is_file():
-            return str(Path(item).resolve())
-    return None
-
-
 def seatbelt_profile(scratch: Path) -> str:
-    s = scratch.resolve().as_posix().replace('"', '\\"')
-    return "\n".join((
-        "(version 1)", "(allow default)",
-        "(deny network-outbound (remote ip))", "(deny network-inbound (local ip))", "(deny network-bind (local ip))",
-        "(deny file-write*)",
-        f'(allow file-write* (subpath "{s}") (subpath "/dev") (subpath "/private/var/folders") (subpath "/private/var/tmp"))',
-        '(deny file-read* (subpath "/Users"))',
-        f'(allow file-read* (subpath "{s}"))',
-    ))
+    """Kept for tests/documentation: the macOS profile used for the Office renderer."""
+    from packages.workers.sandbox import SandboxPolicy as _P, SeatbeltRunner
+    return SeatbeltRunner.profile(_P(scratch=scratch))
 
 
 class SandboxedOfficeRenderer:
-    def __init__(self, *, timeout_seconds: int = 120, platform_name: str | None = None):
-        self.timeout_seconds = timeout_seconds
-        self.platform_name = platform_name or sys.platform
-        self.soffice = _find_soffice()
+    """Preview-only LibreOffice rendering through the platform sandbox abstraction (see packages/workers/sandbox.py)."""
 
-    def available(self) -> bool:
-        return self.soffice is not None and self.platform_name == "darwin" and Path("/usr/bin/sandbox-exec").is_file()
+    def __init__(self, *, timeout_seconds: int = 120, runner=None):
+        self.timeout_seconds = timeout_seconds
+        self._runner = runner
+        self.tool = resolve_tool("soffice")
 
     def reason_unavailable(self) -> str | None:
-        if self.soffice is None:
+        if self.tool is None:
             return "office_renderer_missing"
-        if self.platform_name != "darwin" or not Path("/usr/bin/sandbox-exec").is_file():
-            return "office_renderer_sandbox_unavailable"
+        if self._runner is None:
+            status = sandbox_status()
+            if not status.verified_here:
+                return "office_renderer_sandbox_unavailable"
         return None
+
+    def available(self) -> bool:
+        return self.reason_unavailable() is None
 
     def render_pdf(self, data: bytes, suffix: str) -> bytes:
         suffix = suffix.lower()
@@ -139,37 +128,33 @@ class SandboxedOfficeRenderer:
         reason = self.reason_unavailable()
         if reason:
             raise OfficeRenderUnavailable(reason)
-        if os.geteuid() == 0:
-            raise OfficeRenderUnavailable("office_renderer_root_forbidden")
-        scratch = Path(tempfile.mkdtemp(prefix="channel360-office-render-", dir="/private/tmp")).resolve()
+        try:
+            runner = self._runner or confined_runner()
+        except SandboxUnavailable:
+            raise OfficeRenderUnavailable("office_renderer_sandbox_unavailable") from None
+        scratch = Path(tempfile.mkdtemp(prefix="channel360-office-render-", dir="/private/tmp" if sys.platform == "darwin" else None)).resolve()
         os.chmod(scratch, 0o700)
         try:
-            (scratch / "in").mkdir(mode=0o700)
-            (scratch / "out").mkdir(mode=0o700)
-            (scratch / "home").mkdir(mode=0o700)
-            (scratch / "tmp").mkdir(mode=0o700)
+            for name in ("in", "out", "home", "tmp"):
+                (scratch / name).mkdir(mode=0o700)
             profile_user = scratch / "profile" / "user"
             profile_user.mkdir(parents=True, mode=0o700)
             (profile_user / "registrymodifications.xcu").write_text(_REGISTRY.replace("</oor:items>", _font_substitution_xml(font_map()) + "</oor:items>"), encoding="utf-8")
             source = scratch / "in" / f"input{suffix}"
             source.write_bytes(data)
             os.chmod(source, 0o400)
-            sb = seatbelt_profile(scratch)
-            command = ["/usr/bin/sandbox-exec", "-p", sb, self.soffice, "--headless", "--norestore", "--nolockcheck",
-                       "--nologo", "--nodefault", "--invisible", f"-env:UserInstallation=file://{scratch / 'profile'}",
-                       "--convert-to", "pdf:writer_pdf_Export", "--outdir", str(scratch / "out"), str(source)]
-            env = {"HOME": str(scratch / "home"), "PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8", "TMPDIR": str(scratch / "tmp")}
-            process = subprocess.Popen(command, cwd=str(scratch / "out"), env=env, stdin=subprocess.DEVNULL,
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            args = ["--headless", "--norestore", "--nolockcheck", "--nologo", "--nodefault", "--invisible", f"-env:UserInstallation=file://{scratch / 'profile'}",
+                    "--convert-to", "pdf:writer_pdf_Export", "--outdir", str(scratch / "out"), str(source)]
+            policy = SandboxPolicy(scratch=scratch, timeout_seconds=self.timeout_seconds, cpu_seconds=self.timeout_seconds * 2, max_file_bytes=MAX_OUTPUT_BYTES + 1024 * 1024,
+                                   env=(("HOME", str(scratch / "home")), ("TMPDIR", str(scratch / "tmp"))))
             try:
-                process.wait(timeout=self.timeout_seconds)
-            except subprocess.TimeoutExpired:
-                self._kill(process)
-                raise OfficeRenderUnavailable("office_render_timeout") from None
-            finally:
-                self._kill(process)
+                result = runner.run(self.tool, args, policy)
+            except SandboxFailed as failed:
+                raise OfficeRenderUnavailable("office_render_timeout" if failed.reason_code == "sandbox_timeout" else failed.reason_code) from None
+            except SandboxUnavailable:
+                raise OfficeRenderUnavailable("office_renderer_sandbox_unavailable") from None
             produced = scratch / "out" / "input.pdf"
-            if process.returncode != 0 or not produced.is_file():
+            if result.returncode != 0 or not produced.is_file():
                 raise OfficeRenderRefused("office_render_failed")
             size = produced.stat().st_size
             if size > MAX_OUTPUT_BYTES or size < 100:
@@ -184,10 +169,3 @@ class SandboxedOfficeRenderer:
             return out
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
-
-    @staticmethod
-    def _kill(process: subprocess.Popen) -> None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
