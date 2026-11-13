@@ -108,7 +108,7 @@ Facts and excerpts remain verbatim and page-cited (corpus test: every heading, e
 - No Microsoft Excel/Word was used: Office files were reopened with openpyxl / python-docx and rendered with LibreOffice; DOCX is structurally (not visually) verified.
 - Signed / anomalous PDFs: read-only; signature cryptographic validation and any unsigned working-copy policy remain open.
 - PDF edits are line/cell level; text with characters absent from the original font and outside Windows-1252 (e.g. ₹) is refused; the earlier privacy notes (one non-personal date in an earlier commit; early probe tenants in the shared stack's ignored storage) still stand.
-- `STANDALONE_17_FILE_RESULTS.md` is untracked at the repo root and not git-ignored; it holds file names only, but should be ignored or moved to `.private/` before any commit.
+- `STANDALONE_17_FILE_RESULTS.md` holds file names only and has been moved to `.private/moved-reports/STANDALONE_17_FILE_RESULTS.md`, which is git-ignored; it is no longer at the repository root.
 
 ## 7. Can the stakeholder demonstration proceed?
 **Yes, with stated caveats.** Safe to demonstrate: ZIP import (7/7, 17/17), reading and source-linked sections, real PDF text edits with preview, XLSX template filling, DOCX edits, honest refusal of signed PDFs, and download gating. Do **not** claim: Excel-computed values after precedent edits, complete extraction of insured/amount facts, or complete exclusion coverage on long policies (Fire). Merge/push decisions from the final review are unchanged.
