@@ -53,15 +53,17 @@ def flow(name):
     # edit the working copy
     pages_text = None
     for page in range(1, 4):
-        runs = [r for r in c.json(f"/api/documents/{d}/versions/{v2}/pdf-text?page={page}")["runs"] if r["e"] and 14 <= len(r["text"]) <= 40 and r["size"] >= 6 and " " in r["text"]]
+        page_runs = [r for r in c.json(f"/api/documents/{d}/versions/{v2}/pdf-text?page={page}")["runs"] if r["e"] and r["size"] >= 6 and 6 <= len(r["text"]) <= 40 and r["text"].replace(" ", "").isalpha()]
+        runs = [r for r in page_runs if " " in r["text"]] or page_runs           # some PDFs store one word per text object
         if runs: break
+    check(f"{tag}: the working copy has editable text to change", bool(runs), f"{len(runs)} candidate runs")
     notice = [r for r in c.json(f"/api/documents/{d}/versions/{v2}/pdf-text?page=1")["runs"] if "NOT OFFICIAL" in r["text"] or "Unsigned working copy of" in r["text"]]
     check(f"{tag}: the notice strip is shown locked in the editor", bool(notice) and all(not r["e"] for r in notice), f"{len(notice)} notice runs")
     if notice:
         s, b, _ = c.post(f"/api/documents/{d}/versions/{v2}/save", {"pdf_edits": [{"id": notice[0]["id"], "old": notice[0]["text"], "new": "x"}]})
         check(f"{tag}: editing/removing the notice is refused", s in (409, 422) and b.get("code") in {"working_copy_notice_locked", "not_editable", "run_not_editable"} or s in (409, 422), f"{s} {b.get('code')}")
     if runs:
-        r = runs[0]; new = " ".join(r["text"].split(" ")[:-1])
+        r = runs[0]; new = " ".join(r["text"].split(" ")[:-1]) if " " in r["text"] else r["text"][:-1]
         s, b, _ = c.post(f"/api/documents/{d}/versions/{v2}/save", {"pdf_edits": [{"id": r["id"], "old": r["text"], "new": new}]})
         if check(f"{tag}: edit of the working copy saved as v3 (VERIFIED)", s == 200 and b["outcome"] == "VERIFIED", f"{s} {b.get('code') or b.get('outcome')}"):
             v3 = b["version_id"]; f3 = c.file(d, v3)[1]; rd3 = pypdf.PdfReader(io.BytesIO(f3))

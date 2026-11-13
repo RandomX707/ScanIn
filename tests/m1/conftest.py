@@ -105,8 +105,8 @@ def tenant_pair(postgres_engines: tuple[Engine, Engine]) -> tuple[UUID, UUID]:
     with owner.begin() as connection:
         database, current_user, database_owner = connection.execute(text("""SELECT current_database(), current_user,
             pg_get_userbyid(datdba) FROM pg_database WHERE datname=current_database()""")).one()
-        if database != "channel360_test" or current_user != database_owner:
-            raise RuntimeError("test cleanup trigger changes require the channel360_test database owner")
+        if not (database == "channel360_test" or database.startswith("channel360_iso_")) or current_user != database_owner:
+            raise RuntimeError("test cleanup trigger changes require the channel360_test (or isolated channel360_iso_*) database owner")
         _assert_test_cleanup_foreign_keys(connection)
         protected_triggers = (
             ("audit_events", "audit_no_update_delete"),

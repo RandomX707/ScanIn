@@ -169,7 +169,7 @@ def verify(source: bytes, data: bytes, *, removed: int, source_pages: int) -> di
         text = page.extract_text() or ""
         if _norm(MARKER) not in _norm(text):
             marker_missing.append(i + 1)
-        original = _norm(src.pages[i].extract_text() or "")
+        original = _norm(src.pages[i].extract_text() or "").replace(_norm(MARKER), "")     # a source that is itself a working copy already carries the notice
         without_strip = _norm(text).replace(_norm(MARKER), "")
         # the provenance line is also stamped text; the original page text must still be present, unchanged and in order
         if original and original not in without_strip:

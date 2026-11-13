@@ -130,7 +130,7 @@ function App() {
       <Topbar view={view} onHome={() => go("home")} onHistory={() => go("history")} onDemo={demo} onBrowse={browse} />
       {view === "home" && <Home folders={folders} onBrowse={browse} onFiles={(f) => void ingest(f)} onFormat={format} onFolder={openFolder} onHistory={() => go("history")} />}
       {view === "history" && <History folders={filtered} search={search} onSearch={setSearch} onBrowse={browse} onOpenFolder={openFolder} />}
-      {view === "folder" && <FolderPage folder={folder} onHistory={() => go("history")} onOpen={(d, v) => openWorkspace(d, v)} onCompare={openCompare} />}
+      {view === "folder" && <FolderPage folder={folder} onHistory={() => go("history")} onOpen={(d, v) => openWorkspace(d, v)} onCompare={openCompare} notify={notify} />}
       {view === "compare" && compare && (
         <ComparePage folder={folders.find((f) => f.document_id === compare.documentId)} baseId={compare.baseId} targetId={compare.targetId}
           onChange={(b, t) => setCompare({ ...compare, baseId: b, targetId: t })} onHistory={() => go("history")} onFolder={() => openFolder(compare.documentId)}

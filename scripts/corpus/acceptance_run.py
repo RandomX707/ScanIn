@@ -13,13 +13,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ooxml_compare import compare as compare_xlsx  # noqa: E402
 
 API = os.environ.get("CHANNEL360_API", "http://127.0.0.1:8010")
+if API.rstrip("/").endswith((":8000", ":5174")):
+    raise SystemExit("REFUSED: the acceptance runner uploads the whole corpus and must run against the isolated stack, never the shared app")
 OUT = ROOT / ".private/inventory"
 MANIFEST = json.load(open(OUT / "manifest.json"))
 PY = sys.executable
+# The original QCR.zip / RFQ.zip must sit in "Policy Copies". If they are gone, CHANNEL360_ZIP_DIR may point at archives rebuilt with
+# scripts/corpus/rebuild_archives.py; the result is then labelled RECONSTRUCTED so it is never mistaken for the original archives.
+ZIP_DIR = Path(os.environ.get("CHANNEL360_ZIP_DIR") or (ROOT / "Policy Copies"))
+ZIP_RECONSTRUCTED = bool(os.environ.get("CHANNEL360_ZIP_DIR"))
+ISO_DB = os.environ.get("C360_ISO_DB", "channel360_iso_dev")
+if not ISO_DB.startswith("channel360_iso_"):
+    raise SystemExit("REFUSED: the acceptance runner only reads the isolated channel360_iso_* database")
 
 
 def new_tenant():
-    tok = json.loads(subprocess.run([PY, str(ROOT / "scripts/host/issue_test_token.py")], capture_output=True, text=True, check=True).stdout)
+    tok = json.loads(subprocess.run([PY, str(ROOT / "scripts/dev/issue_iso_token.py")], capture_output=True, text=True, check=True).stdout)
     return tok
 
 
@@ -116,7 +125,37 @@ def run_pdf(cl: Client, o, path: Path, res: Result):
         res.check("signed_pdf_save_refused", s2 == 409 and (body or {}).get("code") == "pdf_signed", f"{s2} {(body or {}).get('code')}")
         res.check("signature_state_reported_not_trusted", (pv.get("signature") or {}).get("validated") is False)
         res.check("original_untouched_after_attempt", hashlib.sha256(cl.file(d, v)).hexdigest() == sha)
-        res.restriction = f"signature status '{sig}': read-only; cryptographic trust not validated; no unsigned working-copy workflow offered (product policy needed)"
+        # Signature status is cryptographically checked and reported truthfully; the signed original stays read-only, and the supported
+        # path is an explicit, acknowledged, visibly marked UNSIGNED working copy that can be edited, exported and compared.
+        state = (pv.get("signature") or {}).get("state")
+        res.check("signature_state_is_cryptographic_and_never_trusted_without_policy", state in ("integrity_valid_trust_not_established", "malformed", "integrity_invalid", "modified_after_signing"), state)
+        s3, wb, _ = cl.call("POST", f"/api/documents/{d}/versions/{v}/working-copy", json.dumps({}).encode(), {"Content-Type": "application/json"})
+        res.check("working_copy_requires_acknowledgement", s3 == 422 and wb.get("code") == "acknowledgement_required", f"{s3} {wb.get('code')}")
+        s3, wb, _ = cl.call("POST", f"/api/documents/{d}/versions/{v}/working-copy", json.dumps({"acknowledge": True}).encode(), {"Content-Type": "application/json"})
+        if res.check("working_copy_created_unsigned_and_verified", s3 == 200 and wb.get("classification") == "unsigned_working_copy" and wb.get("outcome") == "VERIFIED", f"{s3} {wb.get('code') or wb.get('outcome')}"):
+            wcv = wb["version_id"]; wcb = cl.file(d, wcv)
+            flat = wcb.replace(b"\n", b"").replace(b"\r", b"")
+            import io as _io, pypdf as _pypdf
+            rd = _pypdf.PdfReader(_io.BytesIO(wcb))
+            res.check("working_copy_has_no_signature_and_visible_notice_on_every_page", not any(m in flat for m in (b"/ByteRange", b"/DocMDP", b"/SigFlags", b"/Type /Sig", b"/Type/Sig"))
+                      and all("NOTOFFICIAL" in (pg.extract_text() or "").replace(" ", "") for pg in rd.pages), f"{len(rd.pages)} pages")
+            wpv = cl.json(f"/api/documents/{d}/versions/{wcv}/preview")
+            res.check("working_copy_is_editable_text_and_classified", wpv["edit"]["mode"] == "pdf_text" and wpv["classification"] == "unsigned_working_copy" and wpv["signature"]["state"] == "none", f"{wpv['edit']['mode']} {wpv['classification']}")
+            runs = []
+            for page_no in range(1, min(len(rd.pages), 6) + 1):      # a policy's first page may be a graphic or a table; take the first page with plain editable lines
+                page_runs = [r for r in cl.json(f"/api/documents/{d}/versions/{wcv}/pdf-text?page={page_no}")["runs"] if r["e"] and r["size"] >= 6 and 6 <= len(r["text"]) <= 40 and r["text"].replace(" ", "").isalpha()]
+                runs = [r for r in page_runs if " " in r["text"]] or page_runs        # multi-word lines first; some PDFs store one word per text object
+                if runs:
+                    break
+            if res.check("working_copy_has_editable_lines", bool(runs), f"{len(runs)} on page {page_no}"):
+                r0 = runs[0]; newt = " ".join(r0["text"].split(" ")[:-1]) if " " in r0["text"] else r0["text"][:-1]
+                s4, eb, _ = cl.call("POST", f"/api/documents/{d}/versions/{wcv}/save", json.dumps({"pdf_edits": [{"id": r0["id"], "old": r0["text"], "new": newt}]}).encode(), {"Content-Type": "application/json"})
+                res.check("working_copy_edit_saved_as_next_version", s4 == 200 and eb.get("outcome") == "VERIFIED", f"{s4} {eb.get('code') or eb.get('outcome')}")
+                cmpr = cl.json(f"/api/documents/{d}/compare?base={v}&target={eb.get('version_id')}") if s4 == 200 else {}
+                res.check("compare_signed_original_vs_edited_working_copy_with_correct_lineage", s4 == 200 and cmpr.get("relation", {}).get("path_numbers") == [1, 2, 3] and cmpr["target"]["classification"] == "unsigned_working_copy", cmpr.get("relation"))
+        res.check("signed_original_byte_identical_after_working_copy_and_edits", hashlib.sha256(cl.file(d, v)).hexdigest() == sha)
+        fold = next(f for f in cl.json("/api/folders")["items"] if f["document_id"] == d)
+        res.check("lineage_working_copy_chain", [x["parent_number"] for x in fold["versions"]] == [None, 1, 2], [x["parent_number"] for x in fold["versions"]])
         return
     if not res.check("pdf_editable_as_text", mode == "pdf_text", f"mode={mode} reason={pv['edit']['reason']}"):
         return
@@ -242,9 +281,9 @@ def run_docx(cl: Client, o, path: Path, res: Result):
 
 def run_archives(results):
     cl = Client()
-    res = Result("ZIP import (QCR.zip, RFQ.zip)", "zip")
+    res = Result("ZIP import (QCR.zip, RFQ.zip)" + (" — RECONSTRUCTED ARCHIVES (originals absent)" if ZIP_RECONSTRUCTED else ""), "zip")
     def up(name, dup="link"):
-        p = ROOT / "Policy Copies" / name
+        p = ZIP_DIR / name
         return cl.call("PUT", f"/api/archives?filename={urllib.parse.quote(name)}&duplicates={dup}", p.read_bytes(), {"Content-Type": "application/octet-stream"})
     s, qcr, _ = timed(res, "qcr_zip_s", lambda: up("QCR.zip"))
     res.check("QCR.zip recognises 7 of 7", s == 200 and qcr["summary"]["recognized"] == 7 and qcr["summary"]["imported"] == 7, qcr["summary"] if s == 200 else s)
@@ -295,11 +334,11 @@ from packages.api.db_context import api_tenant_transaction
 from packages.api.auth import AuthenticatedIdentity
 from packages.audit.chain import verify_chain
 import os
-e=create_engine('postgresql+psycopg://channel360_test_app@127.0.0.1:5432/channel360_test')
+e=create_engine('postgresql+psycopg://channel360_test_app@127.0.0.1:5432/{ISO_DB}')
 ident=AuthenticatedIdentity(subject='x',tenant_id=UUID('{zcl.tok['tenant_id']}'),role='OWNER')
 with e.connect() as c, api_tenant_transaction(c, ident):
     print(json.dumps(verify_chain(c, ident.tenant_id)))
-"""], capture_output=True, text=True, env={**os.environ, "PGPASSFILE": str(Path.home() / ".channel360-pgpass")})
+"""], capture_output=True, text=True, env={**os.environ, "PGPASSFILE": str(ROOT / ".runtime/iso-stack/pgpass")})
     zres.check("audit hash chain verifies for the tenant", chain.stdout.strip().startswith("[true"), (chain.stdout + chain.stderr).strip()[:100])
     # ---- write results
     json.dump([{"file": r.name, "kind": r.kind, "verdict": r.verdict, "restriction": r.restriction, "timings": r.timings, "checks": r.checks} for r in results],

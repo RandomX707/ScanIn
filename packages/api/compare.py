@@ -4,7 +4,6 @@ Read-only: no endpoint here can create, modify or delete a document, version or 
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -23,6 +22,7 @@ from packages.workers.pdf_edit import PdfEditUnavailable
 
 router = APIRouter(prefix="/api", tags=["compare"])
 TEXT_SUFFIXES = set(extraction.TEXT_EXTENSIONS) | {".json", ".csv"}
+XLSX_COMPARE_PAGES = 8          # 8 pages x 2000 targets = the first 16,000 cells (file order) of a very large workbook
 
 
 def lineage_classes(versions: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, str]:
@@ -90,8 +90,10 @@ def _snapshot_docx(request: Request, path: Path, name: str) -> dict[str, Any]:
 
 
 def _snapshot_xlsx(request: Request, path: Path, name: str) -> dict[str, Any]:
-    from packages.api.workspace import _all_targets
-    report, targets = _all_targets(request, path, name, pages=40)
+    from packages.api.workspace import _all_targets_ex
+    # Deterministic window: both versions are read to the SAME depth, so a very large workbook is compared over the same cells on
+    # both sides (a time budget would cut each side at a different point and invent 'added' cells).
+    report, targets, incomplete = _all_targets_ex(request, path, name, pages=XLSX_COMPARE_PAGES)
     if report.status != "inspected":
         raise APIError(422, "compare_unreadable", "This version couldn't be read safely for comparison.")
     layout = (report.details or {}).get("layout") or {}
@@ -113,7 +115,7 @@ def _snapshot_xlsx(request: Request, path: Path, name: str) -> dict[str, Any]:
         sheet["images"] = sorted(hashlib.sha256(str(i.get("src", "")).encode()).hexdigest()[:16] + f"@{(i.get('from') or {}).get('row')}:{(i.get('from') or {}).get('col')}"
                                  for i in lay.get("images", []))
         sheet["cols"] = lay.get("cols"); sheet["rows"] = lay.get("rows")
-    return {"sheets": sheets}
+    return {"sheets": sheets, "incomplete": incomplete}
 
 
 def _snapshot_text(source: bytes) -> dict[str, Any]:
@@ -223,6 +225,10 @@ def compare_versions(document_id: str, request: Request, base: str = Query(), ta
     fmt_t, snap_t = snapshot(request, identity, doc, vtarget, source_t, meta["filename"])
     differ = diff_lines if fmt_b == "text" else engine.DIFFERS[fmt_b]
     diff = differ(snap_b, snap_t)
+    if snap_b.get("incomplete") or snap_t.get("incomplete"):
+        diff["limits"] = [*diff["limits"], f"This workbook is very large: only its first {XLSX_COMPARE_PAGES * 2000:,} cells (in file order) were compared, the same cells on both sides. "
+                                           "Changes beyond that point are NOT reported."]
+        diff["summary"] = {**diff["summary"], "incomplete": True}
     note = None if diff["changes"] else "The files differ at the byte level, but no differences were found in the content that is compared."
     if fmt_b == "pdf":
         result["signature"] = {"base": _sig(source_b), "target": _sig(source_t)}
@@ -251,3 +257,32 @@ def changes_from_parent(document_id: str, version_id: str, request: Request,
     if not item["parent_version_id"]:
         raise APIError(422, "no_parent", "The original has no earlier version to compare with.")
     return compare_versions(document_id, request, base=str(item["parent_version_id"]), target=str(ver), identity=identity)
+
+
+@router.get("/documents/{document_id}/history")
+def version_history(document_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, Any]:
+    """Per-version facts for the History page: lineage class, verification outcome, download eligibility, signature status, audit."""
+    try:
+        doc = UUID(document_id)
+    except ValueError:
+        raise APIError(404, "not_found", "The requested document was not found.") from None
+    versions, events, meta = load_family(request, identity, doc)
+    numbers = {str(v["version_id"]): i + 1 for i, v in enumerate(versions)}
+    classes = lineage_classes(versions, events)
+    events_by_version: dict[str, dict[str, Any]] = {}
+    for ev in sorted(events, key=lambda e: e["sequence"]):
+        pv = (ev.get("payload") or {}).get("version_id")
+        if pv and ev["action"] in {"document.text_version_saved", "document.derived_version_released"}:
+            events_by_version[str(pv)] = ev
+    is_pdf = PurePosixPath(meta["filename"]).suffix.lower() == ".pdf"
+    items = []
+    for i, v in enumerate(versions):
+        card = _version_card(i + 1, v, classes, events_by_version, numbers)
+        card["signature"] = None
+        if is_pdf:
+            from packages.api.working_copy import signature_payload, validate_signatures
+            _version, data = _source_version(request, identity, doc, UUID(str(v["version_id"])))
+            info = signature_payload(validate_signatures(request, data, hashlib.sha256(data).hexdigest()))
+            card["signature"] = {"state": info["state"], "label": info["label"], "validated": info["validated"], "structure": info["status"]}
+        items.append(card)
+    return {"document_id": document_id, "name": meta["filename"], "versions": items}

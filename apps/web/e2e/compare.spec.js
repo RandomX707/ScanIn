@@ -7,11 +7,13 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
 const corpus = process.env.CHANNEL360_CORPUS_DIR || path.join(root, 'Policy Copies');
+const evidence = path.join(root, '.private/visual-evidence/compare');
 const run = () => JSON.parse(fs.readFileSync(path.join(root, '.runtime/e2e-run.json'), 'utf8'));
 const car = path.join(corpus, 'CAR Policy copy.pdf');
 const xlsx = path.join(corpus, 'QCR', 'CAR-QCR.xlsx');
 const docx = path.join(corpus, 'QCR', 'Health Quote Format.docx');
 
+test.beforeAll(() => fs.mkdirSync(evidence, { recursive: true }));
 test.beforeEach(async ({ page }) => {
   await page.addInitScript((token) => sessionStorage.setItem('channel360.demo.session', token), run().token);
 });
@@ -64,6 +66,7 @@ test.describe('Version comparison', () => {
     await expect(page.locator('.change-row')).toHaveCount(1);
     await expect(page.getByTestId('viewer-base').locator('.hl-mod')).toHaveCount(1, { timeout: 60_000 });
     await expect(page.getByTestId('viewer-target').locator('.hl-mod')).toHaveCount(1);
+    await page.screenshot({ path: path.join(evidence, 'pdf-v2-v3.png'), fullPage: true });
     expect(await page.locator('.audit-lines').innerText()).toContain('by channel360-demo-owner');
 
     // cumulative v1 -> v3 via the pickers
@@ -105,6 +108,7 @@ test.describe('Version comparison', () => {
     await page.locator('.change-row').nth(1).click();
     await expect(page.getByTestId('sheet-target').locator('.sg-active')).toHaveCount(1);
     const label = await page.locator('.change-row.active .change-loc').innerText();
+    await page.screenshot({ path: path.join(evidence, 'xlsx-compare.png'), fullPage: true });
     const addr = label.split('!')[1];
     await expect(page.getByTestId('sheet-target').locator(`.sg-active[data-addr="${addr}"]`)).toHaveCount(1);
   });
@@ -124,5 +128,6 @@ test.describe('Version comparison', () => {
     await expect(page.getByTestId('viewer-base').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
     await expect(page.getByTestId('viewer-target').locator('canvas').first()).toBeVisible({ timeout: 60_000 });
     await expect(page.locator('.limits')).toContainText('not compared');
+    await page.screenshot({ path: path.join(evidence, 'docx-compare.png'), fullPage: true });
   });
 });

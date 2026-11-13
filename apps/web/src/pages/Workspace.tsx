@@ -198,7 +198,7 @@ export function ExtractedPreview({ preview }: { preview: Preview }) {
   if (preview.format === "xlsx" || preview.format === "csv") {
     const all = preview.sheets ?? [];
     if (all.length && all.every((s) => s.layout)) {
-      return <div className="grid-editor no-toolbar"><SheetWorkspace sheets={all} styles={preview.styles ?? []} readOnly label="Original workbook" testId="sheet-viewer" /></div>;
+      return <div className="grid-editor no-toolbar"><SheetWorkspace sheets={all} styles={preview.styles ?? []} readOnly label="Original workbook" testId="sheet-viewer" partial={preview.partial} /></div>;
     }
     return <>{all.map((s) => (
       <div key={s.name}>
@@ -264,7 +264,7 @@ function OriginalTab({ documentId, root, folderName: name, download, page }: { d
           ? (e === "pdf" ? <iframe key={page ?? 0} src={page ? `${url}#page=${page}` : url} title="Original PDF · native document viewer" className="native-pdf-frame" /> : <img src={url} alt="Exact original uploaded image" className="native-original-image" />)
           : <div className="stage-note">Opening the original file…</div>)
           : sourceText ? <pre className="raw-source" aria-label="Exact original source text">{text ?? "Loading exact original source…"}</pre>
-            : faithful ? <PageViewer title="Original document pages" fetchBytes={() => fetchRenderBytes(documentId, root.version_id).catch((e) => { setRenderFailed(true); throw e; })} note={preview?.render?.note} testId="docx-page-viewer" />
+            : faithful ? <PageViewer title="Original document pages" fetchBytes={() => fetchRenderBytes(documentId, root.version_id).catch((e) => { setRenderFailed(true); throw e; })} note={preview?.render?.note} testId="docx-page-viewer" initialPage={page} />
             : <>{preview?.format === "docx" ? <div className="extracted-banner"><Icon name="layers" size={14} /> {preview.render?.available === false ? "PAGE PREVIEW UNAVAILABLE" : "PAGE PREVIEW FAILED"} · SHOWING EXTRACTED TEXT, NOT THE ORIGINAL LAYOUT · DOWNLOAD EXACT FILE ABOVE</div> : null}<div className="extracted-banner"><Icon name="layers" size={14} /> EXTRACTED TEXT · NOT A NATIVE OFFICE RENDER · DOWNLOAD EXACT FILE ABOVE</div>{preview ? <ExtractedPreview preview={preview} /> : <p className="stage-note">{text ?? "Reading the file…"}</p>}</>}
       </div>
     </>
@@ -299,7 +299,7 @@ function ChunksTab({ chunks, index, onSelect, onOriginal }: { chunks: Chunks | n
       </section>
       <div className="source-link">
         <span><Icon name="shield" size={15} /> {c.source ? `Source: ${c.source.label} · ` : ""}{c.words.toLocaleString()} source words{c.source ? "" : " · condensed for quick reading"}</span>
-        <button className="btn outline small" onClick={() => onOriginal(c.source?.kind === "pdf" ? c.source.pages?.[0] : undefined)}>{c.source?.kind === "pdf" && c.source.pages?.length ? `View on page ${c.source.pages[0]}` : "View complete original"} <Icon name="arrow" size={14} /></button>
+        <button className="btn outline small" onClick={() => onOriginal(c.source?.pages?.length && (c.source.kind === "pdf" || c.source.kind === "docx") ? c.source.pages[0] : undefined)}>{c.source?.pages?.length && (c.source.kind === "pdf" || c.source.kind === "docx") ? `View on page ${c.source.pages[0]}` : "View complete original"} <Icon name="arrow" size={14} /></button>
       </div>
       <div className="chunk-pagination">
         <button className="btn outline small" disabled={index === 0} onClick={() => onSelect(index - 1)}>← Previous chunk</button>

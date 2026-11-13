@@ -8,7 +8,7 @@ import numpy as np, openpyxl, pypdfium2 as pdfium
 ROOT = Path(__file__).resolve().parents[2]
 API = os.environ.get("CHANNEL360_API", "http://127.0.0.1:8010")
 OUT = ROOT / ".private/audit"; OUT.mkdir(parents=True, exist_ok=True)
-tok = json.loads(subprocess.run([sys.executable, str(ROOT / "scripts/host/issue_test_token.py")], capture_output=True, text=True, check=True).stdout)
+tok = json.loads(subprocess.run([sys.executable, str(ROOT / "scripts/dev/issue_iso_token.py")], capture_output=True, text=True, check=True).stdout)
 H = {"Authorization": f"Bearer {tok['token']}"}
 SOFFICE = "/opt/homebrew/bin/soffice"
 PROFILE = tempfile.mkdtemp(prefix="lo-profile-")

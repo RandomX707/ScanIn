@@ -10,10 +10,12 @@ export type SheetWorkspaceProps = {
   marks?: Record<string, Record<string, CellMark>>;
   focus?: { sheet: string; cell: string; nonce: number } | null;
   label?: string; testId?: string;
+  /** The server could only read part of a very large workbook in the allowed time. */
+  partial?: boolean;
 };
 
 /** Excel-like workspace: sheet tabs, formula bar, zoom, fit width, actual size and full screen. State lives in the parent, so expanding never drops edits. */
-export function SheetWorkspace({ sheets, styles, edits, onEdit, readOnly, marks, focus, label = "Worksheet", testId }: SheetWorkspaceProps) {
+export function SheetWorkspace({ sheets, styles, edits, onEdit, readOnly, marks, focus, label = "Worksheet", testId, partial }: SheetWorkspaceProps) {
   const visible = sheets.filter((s) => !s.layout?.hidden);
   const [active, setActive] = useState(0);
   const first = sheets.find((x) => !x.layout?.hidden);
@@ -71,6 +73,7 @@ export function SheetWorkspace({ sheets, styles, edits, onEdit, readOnly, marks,
         <SheetGrid key={sheet.name} sheet={sheet} styles={styles} edits={edits} onEdit={onEdit} readOnly={readOnly} zoom={scale}
           marks={marks?.[sheet.name]} activeCell={activeCell} selected={selected?.addr ?? null} onSelect={(addr, cell) => setSelected({ addr, cell })} onSize={onSize} />
       </div>
+      {partial ? <div className="viewer-note" data-testid="partial-note">This workbook is very large, so only the cells that could be read quickly are shown here. Nothing is lost: the saved file keeps everything, and comparison reads the whole file.</div> : null}
       {sheet.truncated ? <div className="viewer-note">Showing the first 500 rows and 40 columns of this worksheet. The saved file keeps everything.</div> : null}
     </div>
   );

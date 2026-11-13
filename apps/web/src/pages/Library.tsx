@@ -1,5 +1,6 @@
 import { Footer, FolderRows, Icon } from "./Shell";
-import { folderName, humanDate, size, typeLabel, type Folder } from "../lib/api";
+import { useEffect, useState } from "react";
+import { ApiError, fetchVersionFile, folderName, getHistory, humanDate, saveBlob, size, typeLabel, type Folder, type HistoryVersion } from "../lib/api";
 
 export function History({ folders, search, onSearch, onBrowse, onOpenFolder }: {
   folders: Folder[]; search: string; onSearch: (q: string) => void; onBrowse: () => void; onOpenFolder: (id: string) => void;
@@ -36,7 +37,15 @@ export function History({ folders, search, onSearch, onBrowse, onOpenFolder }: {
   );
 }
 
-export function FolderPage({ folder, onHistory, onOpen, onCompare }: { folder: Folder | undefined; onHistory: () => void; onOpen: (documentId: string, versionId: string) => void; onCompare: (documentId: string, baseId: string, targetId: string) => void }) {
+export function FolderPage({ folder, onHistory, onOpen, onCompare, notify }: { folder: Folder | undefined; onHistory: () => void; onOpen: (documentId: string, versionId: string) => void; onCompare: (documentId: string, baseId: string, targetId: string) => void; notify?: (m: string, error?: boolean) => void }) {
+  const [facts, setFacts] = useState<Record<string, HistoryVersion>>({});
+  const documentId = folder?.document_id;
+  useEffect(() => {
+    if (!documentId) return;
+    let live = true;
+    getHistory(documentId).then((items) => { if (live) setFacts(Object.fromEntries(items.map((v) => [v.version_id, v]))); }).catch(() => undefined);
+    return () => { live = false; };
+  }, [documentId, folder?.versions.length]);
   if (!folder) return <History folders={[]} search="" onSearch={() => {}} onBrowse={() => {}} onOpenFolder={() => {}} />;
   const family = folder.versions;
   const latest = family[family.length - 1];
@@ -66,10 +75,15 @@ export function FolderPage({ folder, onHistory, onOpen, onCompare }: { folder: F
               <div className="version-card-main">
                 <div className="version-card-label"><strong>v{i + 1}</strong> <span className={`pill ${i === 0 ? "" : v.classification === "unsigned_working_copy" ? "wc" : "orange"}`}>{i === 0 ? "Original source" : v.classification === "unsigned_working_copy" ? "Unsigned working copy · not official" : "Saved"}</span>{v.outcome && i > 0 ? <span className="pill">{v.outcome}</span> : null}{i === family.length - 1 ? <span className="latest-label">Latest</span> : null}</div>
                 <h3>{v.name}</h3>
-                <p>{humanDate(v.created_at)} · {size(v.size_bytes)} {i > 0 ? `· Derived from v${v.parent_number ?? i}` : "· Uploaded file · Immutable"}</p>
+                <p>{humanDate(v.created_at)} · {size(v.size_bytes)} {i > 0 ? `· Derived from v${v.parent_number ?? i}` : "· Uploaded file · Immutable"}{facts[v.version_id]?.actor ? ` · by ${facts[v.version_id].actor}` : ""}</p>
+                {facts[v.version_id]?.signature && facts[v.version_id].signature!.state !== "none" ? <p className="stage-note" data-testid="version-signature">Signature: {facts[v.version_id].signature!.label}</p> : null}
+                {facts[v.version_id]?.signature?.state === "none" && v.classification === "unsigned_working_copy" ? <p className="stage-note">No signature · unsigned working copy, not the signed original</p> : null}
               </div>
               <div className="version-actions">
                 <button className={`btn ${i === family.length - 1 ? "dark" : "outline"} small`} onClick={() => onOpen(folder.document_id, v.version_id)}>Open v{i + 1} <Icon name="arrow" size={14} /></button>
+                {i === 0 || facts[v.version_id]?.download_available ? (
+                  <button className="btn outline small" onClick={async () => { try { saveBlob(await fetchVersionFile(folder.document_id, v.version_id), v.name); } catch (e) { notify?.(e instanceof ApiError ? e.message : "The file could not be downloaded.", true); } }}>Download</button>
+                ) : facts[v.version_id] ? <span className="stage-note" title="Saved, but not fully verified yet, so it can't be downloaded.">Not downloadable yet</span> : null}
                 {v.parent_number ? <button className="btn outline small" onClick={() => onCompare(folder.document_id, family[v.parent_number! - 1].version_id, v.version_id)}>Compare with v{v.parent_number}</button> : null}
                 {family.length > 1 ? (
                   <select className="compare-with" aria-label={`Compare v${i + 1} with another version`} value="" onChange={(e) => {

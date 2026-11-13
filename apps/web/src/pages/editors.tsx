@@ -106,7 +106,7 @@ export function GridEditor({ preview, onBody }: { preview: Preview; onBody: OnBo
     return (
       <>
         <div className="editable grid-editor no-toolbar" role="region" aria-label="Editable cells">
-          <SheetWorkspace sheets={sheets} styles={preview.styles ?? []} edits={edits} onEdit={update} label="Editable workbook" testId="sheet-editor" />
+          <SheetWorkspace sheets={sheets} styles={preview.styles ?? []} edits={edits} onEdit={update} label="Editable workbook" testId="sheet-editor" partial={preview.partial} />
         </div>
       </>
     );

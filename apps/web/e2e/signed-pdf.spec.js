@@ -8,11 +8,13 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
 const corpus = process.env.CHANNEL360_CORPUS_DIR || path.join(root, 'Policy Copies');
+const evidence = path.join(root, '.private/visual-evidence/signed-pdf');
 const run = () => JSON.parse(fs.readFileSync(path.join(root, '.runtime/e2e-run.json'), 'utf8'));
 const health = path.join(corpus, 'Health Policy copy.pdf');
 const marine = path.join(corpus, 'Marine Policy copy.pdf');
 const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
 
+test.beforeAll(() => fs.mkdirSync(evidence, { recursive: true }));
 test.beforeEach(async ({ page }) => {
   await page.addInitScript((token) => sessionStorage.setItem('channel360.demo.session', token), run().token);
 });
@@ -34,6 +36,7 @@ test.describe('Digitally signed PDFs', () => {
     await expect(status).toContainText('signer not trusted');
     await expect(status).toContainText('Not validated as trusted');
     await expect(status).toContainText('never claims legal acceptance');
+    await page.screenshot({ path: path.join(evidence, 'health-original-status.png'), fullPage: true });
 
     await page.locator('.tab', { hasText: 'Edits' }).click();
     await expect(page.locator('.pdf-run')).toHaveCount(0);                     // the signed original has no editor
@@ -41,6 +44,7 @@ test.describe('Digitally signed PDFs', () => {
     // working copy needs an explicit acknowledgement
     await page.getByTestId('create-working-copy').click();
     await expect(page.getByRole('dialog')).toContainText('will NOT carry the original signer');
+    await page.screenshot({ path: path.join(evidence, 'health-acknowledgement.png') });
     const confirm = page.getByTestId('confirm-working-copy');
     await expect(confirm).toBeDisabled();
     await page.getByRole('dialog').getByRole('checkbox').check();
@@ -53,6 +57,7 @@ test.describe('Digitally signed PDFs', () => {
     await expect(page.getByTestId('working-copy-banner').first()).toContainText('not issued or approved');
     const runs = page.locator('.pdf-run:not([data-locked])');
     await expect(runs.first()).toBeVisible({ timeout: 60_000 });
+    await page.screenshot({ path: path.join(evidence, 'health-working-copy-editor.png'), fullPage: true });
     const labels = await runs.evaluateAll((els) => els.map((el) => ({ id: el.dataset.run, label: el.getAttribute('aria-label') })));
     expect(labels.some((l) => /NOT OFFICIAL/.test(l.label))).toBe(false);      // the notice strip is not editable
     const pick = labels.find((l) => /^Edit text: .{14,36}$/.test(l.label) && l.label.replace('Edit text: ', '').includes(' '));
@@ -93,6 +98,7 @@ test.describe('Digitally signed PDFs', () => {
     await expect(status).toBeVisible({ timeout: 30_000 });
     await expect(status).toHaveAttribute('data-state', 'malformed');
     await expect(status).toContainText('Malformed signature · not trusted');
+    await page.screenshot({ path: path.join(evidence, 'marine-malformed.png'), fullPage: true });
     await expect(status).not.toContainText('trusted by policy');
     await page.locator('.tab', { hasText: 'Edits' }).click();
     await expect(page.getByTestId('create-working-copy')).toBeVisible();

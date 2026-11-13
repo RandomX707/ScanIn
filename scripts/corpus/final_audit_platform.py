@@ -14,7 +14,7 @@ os.environ.setdefault("PGPASSFILE", str(Path.home() / ".channel360-pgpass"))
 
 
 def tenant():
-    t = json.loads(subprocess.run([sys.executable, str(ROOT / "scripts/host/issue_test_token.py")], capture_output=True, text=True, check=True).stdout)
+    t = json.loads(subprocess.run([sys.executable, str(ROOT / "scripts/dev/issue_iso_token.py")], capture_output=True, text=True, check=True).stdout)
     return t, {"Authorization": f"Bearer {t['token']}"}
 
 

@@ -8,6 +8,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
 const python = path.join(root, '.venv/bin/python');
 const corpus = process.env.CHANNEL360_CORPUS_DIR || path.join(root, 'Policy Copies');
+// If the original archives are gone, CHANNEL360_ZIP_DIR may point at archives rebuilt by scripts/corpus/rebuild_archives.py (reported as reconstructed).
+const zipDir = process.env.CHANNEL360_ZIP_DIR || corpus;
 const api = process.env.IDW_API_BASE_URL || 'http://127.0.0.1:8010';
 const folderCount = async () => (await (await fetch(`${api}/api/folders`, { headers: { Authorization: `Bearer ${run().token}` } })).json()).items.length;
 const run = () => JSON.parse(fs.readFileSync(path.join(root, '.runtime/e2e-run.json'), 'utf8'));
@@ -43,14 +45,14 @@ test.describe('ZIP archives are imported as their documents', () => {
   });
 
   test('QCR.zip gives 7 documents and RFQ.zip 17 recognised entries (duplicates linked, not re-added)', async ({ page }) => {
-    test.skip(!fs.existsSync(path.join(corpus, 'QCR.zip')) || !fs.existsSync(path.join(corpus, 'RFQ.zip')), 'private stakeholder corpus not present');
+    test.skip(!fs.existsSync(path.join(zipDir, 'QCR.zip')) || !fs.existsSync(path.join(zipDir, 'RFQ.zip')), 'private stakeholder corpus not present');
     const base = await folderCount();                                        // earlier tests in this run share the tenant
     await page.goto('/');
-    await page.setInputFiles('#file-input', path.join(corpus, 'QCR.zip'));
+    await page.setInputFiles('#file-input', path.join(zipDir, 'QCR.zip'));
     await expect(page.locator('.toast')).toContainText('QCR.zip: 7 documents found — 7 added', { timeout: 180_000 });
     await expect(page.locator('.history-item')).toHaveCount(base + 7);
     await page.goto('/');
-    await page.setInputFiles('#file-input', path.join(corpus, 'RFQ.zip'));
+    await page.setInputFiles('#file-input', path.join(zipDir, 'RFQ.zip'));
     await expect(page.locator('.toast')).toContainText('RFQ.zip: 17 documents found — 10 added, 7 already in your workspace', { timeout: 180_000 });
     await expect(page.locator('.history-item')).toHaveCount(base + 17);
     await expect(page.locator('.history-item', { hasText: /Marine\s+RFQ/ })).toHaveCount(1);

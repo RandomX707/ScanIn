@@ -22,7 +22,7 @@ flat = lambda s: re.sub(r"\s+", "", s)
 class Tenant:
     def __init__(self, label):
         self.label = label
-        t = json.loads(subprocess.run([sys.executable, str(ROOT / "scripts/host/issue_test_token.py")], capture_output=True, text=True, check=True).stdout)
+        t = json.loads(subprocess.run([sys.executable, str(ROOT / "scripts/dev/issue_iso_token.py")], capture_output=True, text=True, check=True).stdout)
         self.id, self.h = t["tenant_id"], {"Authorization": f"Bearer {t['token']}"}
 
     def call(self, m, p, b=None, ct="application/octet-stream", raw=False):

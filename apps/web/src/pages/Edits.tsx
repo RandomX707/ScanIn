@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "./Shell";
 import {
-  ApiError, fetchVersionFile, folderName, getPreview, saveVersion, typeLabel,
+  ApiError, fetchRenderBytes, fetchVersionFile, folderName, getPreview, saveVersion, typeLabel,
   type Chunks, type FolderVersion, type Preview, type SaveBody,
 } from "../lib/api";
 import { DocxEditor, GridEditor, PdfEditor, RichEditor, TextEditor } from "./editors";
 import { PdfTextEditor } from "./PdfTextEditor";
 import { SignatureStatus, WorkingCopyAction, WorkingCopyBanner } from "../components/SignaturePanel";
+import { PageViewer } from "../components/PageViewer";
 
 export type EditsProps = {
   documentId: string; folderName: string; version: FolderVersion; family: FolderVersion[]; chunksText: Chunks | null;
@@ -28,6 +29,7 @@ export function EditsTab(props: EditsProps) {
   const [body, setBody] = useState<SaveBody | null>(null);
   const [saving, setSaving] = useState(false);
   const [resetKey, setResetKey] = useState(0);
+  const [pagesOpen, setPagesOpen] = useState(false);
   const dirty = body !== null;
   const bodyRef = useRef<SaveBody | null>(null);
 
@@ -116,6 +118,12 @@ export function EditsTab(props: EditsProps) {
         </div>
         <span className="stage-note">{dirty ? "Modified working copy" : "Your changes stay separate from the source"}</span>
       </div>
+      {mode === "docx" && preview.render?.available ? (
+        <details className="compare-snapshot page-preview" data-testid="docx-version-pages" onToggle={(e) => setPagesOpen(e.currentTarget.open)}>
+          <summary>Preview the pages of this saved version</summary>
+          {pagesOpen ? <PageViewer key={version.version_id} title={`v${version.number} pages`} testId="docx-version-viewer" note={preview.render.note} fetchBytes={() => fetchRenderBytes(documentId, version.version_id)} /> : null}
+        </details>
+      ) : null}
       <details className="compare-snapshot">
         <summary>Compare against source text</summary>
         <pre>{props.chunksText?.excerpt ?? ""}{props.chunksText?.excerpt_truncated ? "\n… excerpt shortened" : ""}</pre>

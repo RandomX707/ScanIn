@@ -310,6 +310,32 @@ def _version_text(request: Request, identity: AuthenticatedIdentity, document_id
     return text
 
 
+def _link_docx_pages(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID,
+                     version: dict[str, object], chunks: list[dict[str, object]]) -> None:
+    """Point each DOCX section at the rendered page where its heading/label text appears (best effort, never invented)."""
+    import re
+    from packages.api.render import render_cache_path, rendered_pdf
+    try:
+        rendered_pdf(request, identity, document_id, version_id)
+        outline = request.app.state.pdf_editor.outline(render_cache_path(request, identity, version_id, str(version["sha256"])))
+    except Exception:  # noqa: BLE001 - page links are an enhancement; sections work without them
+        return
+    norm = lambda t: re.sub(r"\W+", "", t or "").lower()  # noqa: E731
+    page_text = [(p["page"], norm(" ".join(line["t"] for line in p["lines"]))) for p in outline.get("pages", [])]
+    for chunk in chunks:
+        source = chunk.get("source") or {}
+        needles = [str(chunk.get("title") or "")] + [str(a.get("label") or "") for a in (source.get("anchors") or [])[:4]] + [str(f.get("label") or "") for f in (chunk.get("facts") or [])[:4]]
+        for needle in needles:
+            n = norm(needle)
+            if len(n) < 4:
+                continue
+            hit = next((number for number, text in page_text if n in text), None)
+            if hit:
+                source["pages"] = [hit]; source["label"] = f"Page {hit}" + (f" · {source['label']}" if source.get("label") else "")
+                chunk["source"] = source
+                break
+
+
 def _semantic_chunks(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID) -> list[dict[str, object]] | None:
     """Source-linked, rule-based sections (policy PDFs, spreadsheet templates, DOCX forms). None = use the plain chunker."""
     from packages.core import policy_sections, sheet_sections
@@ -343,6 +369,8 @@ def _semantic_chunks(request: Request, identity: AuthenticatedIdentity, document
         elif suffix == ".docx":
             report = request.app.state.restricted_parser.inspect(path, filename=name, include_targets=True)
             chunks = sheet_sections.docx_chunks((report.details or {}).get("blocks", []))
+            if chunks and request.app.state.office_renderer.available():
+                _link_docx_pages(request, identity, document_id, version_id, version, chunks)
     except (PdfEditUnavailable, ParserNotVerified):
         chunks = None
     except Exception:  # noqa: BLE001 - understanding is best-effort; the plain chunker still serves the document
@@ -436,17 +464,27 @@ def file_reason(codes: list[str] | tuple[str, ...], suffix: str) -> str:
     return "This file can't be edited without risking its layout."
 
 
-def _all_targets(request: Request, path: Path, name: str, pages: int = 10):
+def _all_targets_ex(request: Request, path: Path, name: str, pages: int = 10, budget_seconds: float | None = None):
+    """(report, targets, incomplete). `incomplete` is True when more target pages exist than were read (page cap or time budget)."""
+    import time
+    started = time.monotonic()
     parser = request.app.state.restricted_parser
     report = parser.inspect(path, filename=name, include_targets=True)
     targets = list(report.targets)
     page = report.targets_page or {}
     offset = page.get("next_offset")
     while offset is not None and pages > 1:
+        if budget_seconds is not None and time.monotonic() - started > budget_seconds:
+            break
         more = parser.inspect(path, filename=name, include_targets=True, target_offset=int(offset))
         targets.extend(more.targets)
         offset = (more.targets_page or {}).get("next_offset")
         pages -= 1
+    return report, targets, offset is not None
+
+
+def _all_targets(request: Request, path: Path, name: str, pages: int = 10):
+    report, targets, _incomplete = _all_targets_ex(request, path, name, pages)
     return report, targets
 
 
@@ -520,7 +558,8 @@ def version_preview(document_id: str, version_id: str, request: Request,
             slides = (report.details or {}).get("slides", [])
             return done("pptx", "none", file_reason([], suffix), slides=slides)
         if suffix in {".csv", ".xlsx"}:
-            report, targets = _all_targets(request, path, name)
+            # A very large sheet costs seconds per page of targets: read what fits in the budget and say so (partial=True).
+            report, targets, partial = _all_targets_ex(request, path, name, pages=10, budget_seconds=25.0)
             if report.status != "inspected":
                 return done("csv" if suffix == ".csv" else "xlsx", "none", file_reason(report.capability.get("reasons", []), suffix))
             level = str(report.capability.get("level"))
@@ -535,7 +574,7 @@ def version_preview(document_id: str, version_id: str, request: Request,
             editable = level == "editable"
             return done("csv" if suffix == ".csv" else "xlsx", "grid" if editable else "none",
                         None if editable else (cell_reason(reasons[0]) if reasons else file_reason(reasons, suffix)),
-                        sheets=grid, styles=layout.get("styles", []))
+                        sheets=grid, styles=layout.get("styles", []), partial=partial)
         if suffix == ".docx":
             report = request.app.state.restricted_parser.inspect(path, filename=name, include_targets=True)
             details = report.details or {}

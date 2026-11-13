@@ -496,6 +496,7 @@ class XlsxAdapter:
 
     def targets(self, source: bytes) -> list[EditTarget]:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
+        source_sha = hashlib.sha256(source).hexdigest()          # once: per-cell hashing of the whole file made this quadratic
         graph = _FormulaGraph(refs)
         unlocked_styles = _unlocked_styles(parts)
         formula_cells = {f"{sheet}!{c.get('r')}" for sheet, c in formulas}
@@ -504,6 +505,8 @@ class XlsxAdapter:
             root = _xml(parts[part][1])
             sheet_protected = root.find(f"{{{MAIN}}}sheetProtection") is not None
             covered = _merge_covered(root)
+            # Per-sheet, once: most sheets have no list validation, and re-scanning the tree per cell made inspection quadratic.
+            has_list_validation = bool(root.xpath(".//m:dataValidation[@type='list']", namespaces=NS))
             for cell in root.xpath(".//m:c", namespaces=NS):
                 value, reason = _cell_value(cell, shared, rich, dates, epoch)
                 ref = cell.get("r", "")
@@ -515,13 +518,13 @@ class XlsxAdapter:
                 style_id = int(cell.get("s", "0")) if cell.get("s", "0").isdigit() else 0
                 if sheet_protected and style_id not in unlocked_styles:
                     reason = "protected_cell_locked"
-                validation_options, validation_unsupported = self._list_validation_options(
-                    parts, sheets, shared, rich, dates, epoch, sheet, ref, root)
+                validation_options, validation_unsupported = (self._list_validation_options(
+                    parts, sheets, shared, rich, dates, epoch, sheet, ref, root) if has_list_validation else (None, False))
                 if validation_unsupported:
                     reason = reason or "unsupported_data_validation"
                 deps: set[str] = graph.dependents_of(sheet, ref) if not unknown_formula else set()
                 fp = _fingerprint(cell)
-                result.append(EditTarget(f"xlsx:{sheet}!{ref}", hashlib.sha256(source).hexdigest(), sheet, ref,
+                result.append(EditTarget(f"xlsx:{sheet}!{ref}", source_sha, sheet, ref,
                                          value, fp, cell.get("s"), reason is None, reason,
                                          None if unknown_formula else tuple(sorted(deps))))
         return result
@@ -607,6 +610,7 @@ class XlsxAdapter:
 
     def unsupported_targets(self, source: bytes) -> list[EditTarget]:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
+        source_sha = hashlib.sha256(source).hexdigest()
         result: list[EditTarget] = []
         for sheet, part in sheets.items():
             root = _xml(parts[part][1])
@@ -614,7 +618,7 @@ class XlsxAdapter:
             for cell in root.xpath(".//m:c", namespaces=NS):
                 value, reason = _cell_value(cell, shared, rich, dates, epoch)
                 if value is not None and reason in READ_ONLY_DATE_TIME_REASONS and cell.find(f"{{{MAIN}}}f") is None:
-                    result.append(EditTarget(f"xlsx:{sheet}!{cell.get('r', '')}", hashlib.sha256(source).hexdigest(), sheet,
+                    result.append(EditTarget(f"xlsx:{sheet}!{cell.get('r', '')}", source_sha, sheet,
                                              cell.get("r", ""), value, _fingerprint(cell), cell.get("s"), False, reason,
                                              None if unknown_formula else ()))
                     continue
@@ -624,7 +628,7 @@ class XlsxAdapter:
                         formula = cell.find(f"{{{MAIN}}}f")
                         if formula.get("t") in {"array", "dataTable"} or (formula.get("ref") and ":" in formula.get("ref", "")):
                             reason = "array_formula"
-                    result.append(EditTarget(f"xlsx:{sheet}!{ref}", hashlib.sha256(source).hexdigest(), sheet, ref,
+                    result.append(EditTarget(f"xlsx:{sheet}!{ref}", source_sha, sheet, ref,
                                              (TypedValue("string", "=" + (cell.find(f"{{{MAIN}}}f").text or ""),
                                                           native=cell.find(f"{{{MAIN}}}f").text or "")
                                               if cell.find(f"{{{MAIN}}}f") is not None
@@ -641,7 +645,7 @@ class XlsxAdapter:
                             for col in range(min_col, max_col + 1):
                                 ref = f"{get_column_letter(col)}{row}"
                                 if ref in seen: continue
-                                result.append(EditTarget(f"xlsx:{sheet}!{ref}", hashlib.sha256(source).hexdigest(), sheet, ref,
+                                result.append(EditTarget(f"xlsx:{sheet}!{ref}", source_sha, sheet, ref,
                                                          TypedValue("null", None), hashlib.sha256(f"array:{sheet}:{ref}".encode()).hexdigest(),
                                                          None, False, "array_formula", None if unknown_formula else ()))
                                 seen.add(ref)

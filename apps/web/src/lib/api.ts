@@ -149,6 +149,7 @@ export type Preview = {
   signature?: SignatureInfo; classification?: string; working_copy?: { available: boolean; acknowledgement: string }; styles?: CellStyle[];
   text?: string; html?: string | null; encoding?: string; kind?: string; sheets?: Sheet[]; blocks?: DocxBlock[]; slides?: string[][];
   pages?: { page: number; width: number; height: number; scanned: boolean }[]; fields?: PdfField[]; text_available?: boolean;
+  partial?: boolean;
   render?: { available: boolean; engine: string; note: string; reason: string | null };
 };
 export const getPreview = (documentId: string, versionId: string) => json<Preview>(`/api/documents/${documentId}/versions/${versionId}/preview`);
@@ -204,3 +205,6 @@ export const compareVersions = (documentId: string, base: string, target: string
 export async function createWorkingCopy(documentId: string, versionId: string): Promise<{ version_id: string; note: string }> {
   return json(`/api/documents/${documentId}/versions/${versionId}/working-copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ acknowledge: true }) });
 }
+
+export type HistoryVersion = VersionCard & { signature: { state: string; label: string; validated: boolean; structure: string } | null };
+export const getHistory = (documentId: string) => json<{ versions: HistoryVersion[] }>(`/api/documents/${documentId}/history`).then((r) => r.versions);

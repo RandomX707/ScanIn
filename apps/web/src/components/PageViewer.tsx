@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type Doc = import("pdfjs-dist").PDFDocumentProxy;
 
@@ -162,4 +162,3 @@ function ViewerPage({ doc, size, scale, highlights, active }: { doc: Doc; size: 
   );
 }
 
-export const useMemoPages = useMemo;

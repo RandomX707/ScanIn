@@ -20,6 +20,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> int:
+    if os.environ.get("C360_ALLOW_SHARED_DB_TENANTS") != "yes":
+        print("REFUSED: this script inserts a tenant into the shared channel360_test database. Use scripts/dev/issue_iso_token.py with the isolated stack, or set C360_ALLOW_SHARED_DB_TENANTS=yes deliberately.", file=sys.stderr)
+        return 2
     host, port = os.environ.get("PGHOST", "127.0.0.1"), os.environ.get("PGPORT", "5432")
     env = {**os.environ, "PGHOST": host, "PGPORT": port,
            "PGPASSFILE": os.environ.get("PGPASSFILE", str(Path.home() / ".channel360-pgpass")),
