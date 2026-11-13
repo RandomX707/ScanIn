@@ -9,11 +9,30 @@ Change record: {id, kind: added|removed|modified, category: text|value|formula|f
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from difflib import SequenceMatcher
 from typing import Any
 
-MAX_CHANGES = 200_000          # safety bound on memory; if ever exceeded the result says so (complete=False) instead of pretending
+MAX_CHANGES = 200_000
+MAX_CHANGE_BYTES = 16 * 1024 * 1024
+
+
+class _BoundedChanges:
+    """Keep a deterministic prefix while counting every discovered change."""
+    def __init__(self) -> None:
+        self.items: list[dict[str, Any]] = []
+        self.counts = {"added": 0, "removed": 0, "modified": 0}
+        self.total = 0
+        self.bytes = 0
+
+    def append(self, change: dict[str, Any]) -> None:
+        self.total += 1
+        self.counts[change["kind"]] += 1
+        size = len(json.dumps(change, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8"))
+        if len(self.items) < MAX_CHANGES and self.bytes + size + 32 <= MAX_CHANGE_BYTES:
+            self.items.append(change)
+            self.bytes += size
 
 
 def _norm(text: str) -> str:
@@ -65,16 +84,26 @@ def _summary(changes: list[dict[str, Any]], truncated: bool, total: int | None =
     return {**counts, "total": len(changes) if total is None else total, "truncated": truncated}
 
 
-def _finish(changes: list[dict[str, Any]], notes: list[str]) -> dict[str, Any]:
-    """All changes are kept (and later paginated by the API). Only a pathological result beyond the safety bound is cut, and then
-    `complete` is False and the counts say so."""
-    total = len(changes)
-    cut = total > MAX_CHANGES
-    summary = _summary(changes, cut, total)          # counts over EVERYTHING found, before any cut
-    changes = changes[:MAX_CHANGES]
+def _finish(changes: list[dict[str, Any]] | _BoundedChanges, notes: list[str]) -> dict[str, Any]:
+    """Finalize either a bounded full scan or an in-memory legacy diff result."""
+    bounded = isinstance(changes, _BoundedChanges)
+    total = changes.total if bounded else len(changes)
+    retained = changes.items if bounded else changes[:MAX_CHANGES]
+    cut = len(retained) < total
+    summary = ({**changes.counts, "total": total, "truncated": cut} if bounded else _summary(changes, cut, total))
+    changes = retained
     for index, change in enumerate(changes):
         change["id"] = f"c{index + 1}"
-    return {"changes": changes, "summary": summary, "limits": notes, "complete": not cut}
+    retained_bytes = changes_bytes(changes)
+    return {"changes": changes, "summary": summary, "limits": notes, "complete": (True if bounded else not cut),
+            "scan_status": "COMPLETE" if bounded else ("PARTIAL" if cut else "COMPLETE"),
+            "list_status": "TRUNCATED" if cut else "COMPLETE", "total_changes_detected": total,
+            "returned_changes": len(changes), "has_more": cut,
+            "retained_change_bytes": retained_bytes}
+
+
+def changes_bytes(changes: list[dict[str, Any]]) -> int:
+    return sum(len(json.dumps(item, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")) for item in changes)
 
 
 # ------------------------------------------------------------------ PDF
@@ -253,7 +282,7 @@ def diff_xlsx_indexed(meta_a: dict[str, Any], meta_b: dict[str, Any], open_a, op
     styles_a, styles_b = meta_a.get("styles", []), meta_b.get("styles", [])
     sheets_a = {s["name"]: s for s in meta_a["sheets"]}
     sheets_b = {s["name"]: s for s in meta_b["sheets"]}
-    changes: list[dict[str, Any]] = []
+    changes = _BoundedChanges()
     examined = 0
     for name in list(sheets_a) + [n for n in sheets_b if n not in sheets_a]:
         if name not in sheets_b:

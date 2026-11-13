@@ -65,19 +65,8 @@ def download_name(filename: str, number: int) -> str:
 
 
 def _classify_versions(versions: list[dict[str, object]], flagged: set[str]) -> dict[str, str]:
-    parent = {str(v["version_id"]): (str(v["parent_version_id"]) if v["parent_version_id"] else None) for v in versions}
-    out: dict[str, str] = {}
-    for v in versions:
-        vid = str(v["version_id"])
-        if v["kind"] == "original":
-            out[vid] = "original"; continue
-        node, seen, cls = vid, set(), "derived"
-        while node and node not in seen:
-            if node in flagged:
-                cls = "unsigned_working_copy"; break
-            seen.add(node); node = parent.get(node)
-        out[vid] = cls
-    return out
+    return {str(v["version_id"]): ("original" if v["kind"] == "original" else str(v.get("lineage_class") or "unknown"))
+            for v in versions}
 
 
 def _folder_payload(folder: dict[str, object], flagged: set[str] | None = None) -> dict[str, object]:
@@ -114,8 +103,7 @@ def list_folder_payloads(request: Request, identity: AuthenticatedIdentity) -> l
     with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
         repo = DocumentRepository(connection, identity.tenant_id)
         folders = repo.list_folders()
-        flagged = repo.working_copy_version_ids()
-    return [_folder_payload(item, flagged) for item in folders]
+    return [_folder_payload(item) for item in folders]
 
 
 @router.get("/folders")
@@ -698,7 +686,7 @@ def version_preview(document_id: str, version_id: str, request: Request, virtual
             from packages.api.working_copy import ACKNOWLEDGEMENT, signature_payload, validate_signatures
             validation = validate_signatures(request, source, hashlib.sha256(source).hexdigest())
             versions_, events_, _meta = load_family(request, identity, parsed_document)
-            classification = lineage_classes(versions_, events_).get(str(parsed_version), "derived")
+            classification = lineage_classes(versions_, events_).get(str(parsed_version), "unknown")
             text_editable = False
             if editable and signature["status"] in pdf_signature.REASONS:
                 editable = False                       # a signed form must not be filled in place

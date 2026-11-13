@@ -27,28 +27,9 @@ TEXT_SUFFIXES = set(extraction.TEXT_EXTENSIONS) | {".json", ".csv"}
 
 
 def lineage_classes(versions: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, str]:
-    """version_id -> original | derived | unsigned_working_copy (a working copy's descendants stay working copies)."""
-    flagged: set[str] = set()
-    for event in events:
-        payload = event.get("payload") or {}
-        if payload.get("unsigned_working_copy") and payload.get("version_id"):
-            flagged.add(str(payload["version_id"]))
-    parent = {str(v["version_id"]): (str(v["parent_version_id"]) if v["parent_version_id"] else None) for v in versions}
-    out: dict[str, str] = {}
-    for v in versions:
-        vid = str(v["version_id"])
-        if v["kind"] == "original":
-            out[vid] = "original"
-            continue
-        node, seen, cls = vid, set(), "derived"
-        while node and node not in seen:
-            if node in flagged:
-                cls = "unsigned_working_copy"
-                break
-            seen.add(node)
-            node = parent.get(node)
-        out[vid] = cls
-    return out
+    """Read authoritative persisted lineage; legacy rows without metadata stay visibly unknown."""
+    return {str(v["version_id"]): ("original" if v["kind"] == "original" else str(v.get("lineage_class") or "unknown"))
+            for v in versions}
 
 
 def _ancestors(parent: dict[str, str | None], node: str) -> list[str]:
@@ -139,7 +120,7 @@ def _version_card(number: int, item: dict[str, Any], classes: dict[str, str], ev
     event = events_by_version.get(vid)
     payload = (event or {}).get("payload") or {}
     outcome = None if item["kind"] == "original" else (item.get("verification_outcome") or payload.get("outcome") or "SAVED")
-    return {"version_id": vid, "number": number, "kind": item["kind"], "classification": classes.get(vid, item["kind"]),
+    return {"version_id": vid, "number": number, "kind": item["kind"], "classification": classes.get(vid, "unknown"),
             "parent_number": parent_numbers.get(str(item["parent_version_id"])) if item["parent_version_id"] else None,
             "created_at": item["created_at"].isoformat(), "size_bytes": int(item["size_bytes"]), "sha256": str(item["sha256"]),
             "outcome": outcome, "download_available": bool(item.get("download_available")),
@@ -196,9 +177,18 @@ def _xlsx_comparison(request: Request, identity: AuthenticatedIdentity, doc: UUI
         started = time.monotonic()
         meta_b, meta_t = load_meta(dir_b), load_meta(dir_t)
         result = engine.diff_xlsx_indexed(meta_b, meta_t, lambda i: open_sheet(dir_b, i), lambda i: open_sheet(dir_t, i))
-        if len(cache) > 6:
-            cache.clear()
+        # Bound process-wide retained comparison results by serialized size as well as entry count.
+        # A single bounded result is retained so cell marks remain available for its visible prefix.
+        from collections import OrderedDict
+        if not isinstance(cache, OrderedDict):
+            cache = request.app.state.compare_results = OrderedDict(cache)
+        else:
+            cache.move_to_end(key) if key in cache else None
         cache[key] = result
+        def cache_bytes() -> int:
+            return sum(int(item.get("retained_change_bytes", 0)) for item in cache.values())
+        while len(cache) > 8 or (len(cache) > 1 and cache_bytes() > 32 * 1024 * 1024):
+            cache.popitem(last=False)
         _audit_compare(request, identity, doc, vb, vt, result, time.monotonic() - started)
     return cache[key]
 
@@ -209,8 +199,8 @@ def _audit_compare(request: Request, identity: AuthenticatedIdentity, doc: UUID,
     try:
         with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
             append_event(connection=connection, actor_id=identity.subject, action="document.compare_completed", subject=str(doc),
-                         payload={"document_id": str(doc), "base_version_id": str(vb), "target_version_id": str(vt), "outcome": "COMPLETE" if result.get("complete", True) else "PARTIAL",
-                                  "examined_cells": result.get("examined_cells"), "changes": result["summary"]["total"], "seconds": round(seconds, 1)})
+            payload={"document_id": str(doc), "base_version_id": str(vb), "target_version_id": str(vt), "outcome": result.get("scan_status", "COMPLETE" if result.get("complete", True) else "PARTIAL"),
+                                  "list_status": result.get("list_status", "COMPLETE"), "examined_cells": result.get("examined_cells"), "changes": result["summary"]["total"], "seconds": round(seconds, 1)})
     except Exception:  # noqa: BLE001 - the audit write must not break reading a comparison; it is logged
         logging.getLogger("idw.api").error("compare_audit_failed")
 

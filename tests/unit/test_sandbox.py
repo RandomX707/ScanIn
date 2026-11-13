@@ -66,9 +66,64 @@ def test_bubblewrap_command_denies_network_and_confines_writes_to_scratch():
 
 def test_seatbelt_profile_denies_ip_network_and_user_files_and_limits_writes():
     p = sb.SeatbeltRunner.profile(sb.SandboxPolicy(scratch=scratch()))
-    assert "(deny network-outbound (remote ip))" in p and "(deny network-bind (local ip))" in p
-    assert "(deny file-write*)" in p and '(deny file-read* (subpath "/Users"))' in p
-    assert p.count("(allow file-write*") == 1
+    assert "(deny default)" in p
+    assert "(allow default)" not in p
+    assert "(deny network*)" in p
+    assert "(deny file-write*)" in p
+    assert '(allow file-write* (subpath "' in p
+    assert "/private/var/folders" not in p and "/private/var/tmp" not in p
+    assert '(deny file-read* (subpath "/Users"))' not in p  # default-deny covers the whole filesystem
+
+
+@live
+def test_seatbelt_runtime_isolates_two_jobs_and_restricts_project_storage_and_children(tmp_path):
+    if sys.platform != "darwin":
+        pytest.skip("requires real macOS Seatbelt runtime")
+    job_a = Path(tempfile.mkdtemp(prefix="c360-job-a-", dir="/private/tmp")).resolve()
+    job_b = Path(tempfile.mkdtemp(prefix="c360-job-b-", dir="/private/tmp")).resolve()
+    external_tmp = Path(tempfile.mkdtemp(prefix="c360-external-tmp-", dir="/private/var/tmp")).resolve()
+    credential = Path(tempfile.mkdtemp(prefix="c360-credential-", dir=str(Path.home()))) / "canary"
+    credential.parent.chmod(0o700); credential.write_text("not-a-real-credential"); credential.chmod(0o600)
+    storage_root = Path(os.environ.get("IDW_STORAGE_ROOT", str(Path(__file__).resolve().parents[2] / ".runtime/iso-final/storage"))).resolve()
+    secret_b = job_b / "private.txt"; secret_b.write_text("job-b-only"); secret_b.chmod(0o600)
+    tmp_secret = external_tmp / "private.txt"; tmp_secret.write_text("external-temp-only"); tmp_secret.chmod(0o600)
+    scratch = job_a / "scratch"; scratch.mkdir(mode=0o700)
+    server = socket.socket(); server.bind(("127.0.0.1", 0)); server.listen(1); port = server.getsockname()[1]
+    try:
+        script = f"""import json, os, socket, subprocess, sys
+checks = {{}}
+def attempt(name, fn):
+    try: fn(); checks[name] = True
+    except Exception: checks[name] = False
+attempt('own_read', lambda: open('own.txt').read())
+attempt('own_write', lambda: open('own-write.txt','w').write('ok'))
+attempt('job_b_read', lambda: open({str(secret_b)!r}).read())
+attempt('job_b_write', lambda: open({str(job_b / 'written.txt')!r},'w').write('bad'))
+attempt('external_tmp_read', lambda: open({str(tmp_secret)!r}).read())
+attempt('external_tmp_write', lambda: open({str(external_tmp / 'written.txt')!r},'w').write('bad'))
+attempt('credential_read', lambda: open({str(credential)!r}).read())
+attempt('storage_list', lambda: os.listdir({str(storage_root)!r}))
+attempt('project_read', lambda: open({str(Path(__file__).resolve().parents[2] / 'pyproject.toml')!r}).read())
+attempt('network', lambda: socket.create_connection(('127.0.0.1', {port}), timeout=1))
+child_code = f"print('child-started');\ntry: open({str(secret_b)!r}).read(); print('child-leaked')\nexcept Exception: print('child-denied')"
+child = subprocess.run([sys.executable, '-I', '-c', child_code], capture_output=True, text=True)
+checks['child_denied'] = child.returncode == 0 and 'child-started' in child.stdout and 'child-denied' in child.stdout and 'child-leaked' not in child.stdout
+print(json.dumps(checks, sort_keys=True))
+"""
+        (scratch / "own.txt").write_text("job-a-own")
+        os.chmod(scratch / "own.txt", 0o600)
+        tool = sb.Tool("python-canary", sys.executable, (str(Path(sys.executable).resolve().parents[1]), sys.prefix, sys.base_prefix))
+        result = runner.run(tool, ["-I", "-c", script], sb.SandboxPolicy(scratch=scratch, read_paths=(Path(sys.prefix), Path(sys.base_prefix)), timeout_seconds=30, cpu_seconds=30), capture_stdout=True)
+        checks = __import__("json").loads(result.stdout)
+        assert checks == {"child_denied": True, "credential_read": False, "external_tmp_read": False, "external_tmp_write": False,
+                          "job_b_read": False, "job_b_write": False, "network": False, "own_read": True, "own_write": True,
+                          "project_read": False, "storage_list": False}
+        assert not (job_b / "written.txt").exists() and not (external_tmp / "written.txt").exists()
+    finally:
+        server.close()
+        import shutil
+        shutil.rmtree(job_a, ignore_errors=True); shutil.rmtree(job_b, ignore_errors=True); shutil.rmtree(external_tmp, ignore_errors=True)
+        shutil.rmtree(credential.parent, ignore_errors=True)
 
 
 def test_env_is_an_allowlist_and_runner_refuses_root_and_bad_scratch(tmp_path, monkeypatch):

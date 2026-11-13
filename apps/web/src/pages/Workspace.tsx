@@ -26,6 +26,7 @@ export type WorkspaceProps = {
 
 function statusFor(version: FolderVersion, name: string, chunks: Chunks | null): string {
   if (version.classification === "unsigned_working_copy") return "Unsigned working copy · not official";
+  if (version.classification === "unknown") return "Lineage unavailable · status unverified";
   if (version.kind === "derived") return "Saved";
   const e = ext(name);
   if (chunks && !chunks.text_available) {

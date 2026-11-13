@@ -241,18 +241,22 @@ class SeatbeltRunner(Runner):
     @staticmethod
     def profile(policy: SandboxPolicy) -> str:
         q = lambda p: str(Path(p).resolve()).replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
-        reads = " ".join([f'(subpath "{q(policy.scratch)}")'] + [f'(literal "{q(p)}")' if Path(p).is_file() else f'(subpath "{q(p)}")' for p in policy.read_paths])
+        reads = [f'(subpath "{q(policy.scratch)}")'] + [f'(literal "{q(p)}")' if Path(p).is_file() else f'(subpath "{q(p)}")' for p in policy.read_paths]
+        system_roots = tuple(p for p in ("/System/Library", "/usr", "/Library/Frameworks") if Path(p).exists())
+        reads.extend(f'(subpath "{q(p)}")' for p in system_roots)
+        exec_roots = list(system_roots)
+        exec_roots.extend(str(Path(p).resolve()) for p in policy.read_paths if Path(p).is_dir())
         return "\n".join((
-            "(version 1)", "(allow default)",
-            "(deny network-outbound (remote ip))", "(deny network-inbound (local ip))", "(deny network-bind (local ip))",   # IP only: local IPC (unix sockets) stays
+            "(version 1)", "(deny default)", "(allow process*)", "(allow sysctl-read)",
+            "(deny network*)",
             "(deny file-write*)",
-            f'(allow file-write* (subpath "{q(policy.scratch)}") (subpath "/dev") (subpath "/private/var/folders") (subpath "/private/var/tmp"))',
-            '(deny file-read* (subpath "/Users"))', f"(allow file-read* {reads})",
-            # directory metadata (stat/realpath) of the ancestors of allowed paths, so an interpreter or library under /Users can start; no contents
-            "(allow file-read-metadata " + " ".join(f'(path-ancestors "{q(p)}")' for p in (policy.scratch, *policy.read_paths)) + ")"))
+            f'(allow file-write* (subpath "{q(policy.scratch)}") (literal "/dev/null"))',
+            f"(allow file-read* {' '.join(reads)} (literal \"/dev/null\") (literal \"/dev/urandom\"))",
+            "(allow file-read-metadata " + " ".join(f'(path-ancestors "{q(p)}")' for p in (policy.scratch, *policy.read_paths)) + ")",
+            "(allow process-exec " + " ".join(f'(subpath "{q(p)}")' for p in exec_roots) + ")"))
 
     def command(self, tool: Tool, args: Sequence[str], policy: SandboxPolicy) -> list[str]:
-        extra = SandboxPolicy(scratch=policy.scratch, read_paths=(*policy.read_paths, Path(tool.path)))      # the tool's own path needs metadata access too
+        extra = SandboxPolicy(scratch=policy.scratch, read_paths=(*policy.read_paths, *(Path(p) for p in tool.read_roots), Path(tool.path)))
         return [SANDBOX_EXEC, "-p", self.profile(extra), tool.path, *args]
 
 
@@ -316,7 +320,11 @@ def self_test(runner: Runner) -> tuple[bool, str]:
         return False, reason or "unavailable"
     outside = Path(tempfile.mkdtemp(prefix="channel360-canary-out-", dir=str(Path.home()) if Path.home().is_dir() and os.access(Path.home(), os.W_OK) else None))      # a private place the sandbox must not read or write
     secret = outside / "secret.txt"; secret.write_text("canary")
-    server = socket.socket(); server.bind(("127.0.0.1", 0)); server.listen(1); port = server.getsockname()[1]
+    try:
+        server = socket.socket(); server.bind(("127.0.0.1", 0)); server.listen(1); port = server.getsockname()[1]
+    except OSError:
+        shutil.rmtree(outside, ignore_errors=True)
+        return False, "network_canary_setup_unavailable"
     scratch = Path(tempfile.mkdtemp(prefix="channel360-canary-", dir="/private/tmp" if sys.platform == "darwin" else None)).resolve()
     try:
         script = ("import socket,sys\n"

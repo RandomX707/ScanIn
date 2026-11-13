@@ -16,7 +16,7 @@ UPLOAD → VIEW FAITHFULLY → UNDERSTAND → EDIT → PREVIEW → SAVE NATIVE V
 ## 1. Architecture
 
 All four features extend the existing engine. There is no new trust path: every new capability that touches an uploaded file
-runs in an OS-sandboxed worker (macOS Seatbelt verified; Linux Bubblewrap command construction only, not runtime-verified; see §11) and every new endpoint
+runs in an OS-sandboxed worker (the initial Seatbelt profile was verified; the tightened pre-push profile is not yet runtime-verified; Linux Bubblewrap command construction only, see §13) and every new endpoint
 is tenant-scoped through `api_tenant_transaction` (PostgreSQL row-level security).
 
 | Area | New / changed code | Sandbox |
@@ -27,8 +27,9 @@ is tenant-scoped through `api_tenant_transaction` (PostgreSQL row-level security
 | Word | `packages/workers/office_render.py`, `packages/api/render.py`, DOCX adapter (`fmt`, `props`, `media`) | LibreOffice under Seatbelt |
 | Signed PDFs | `packages/workers/sigcheck.py`, `packages/core/pdf_working_copy.py`, `packages/api/working_copy.py`, `components/SignaturePanel.tsx` | OpenSSL under Seatbelt; working-copy builder in the PDF worker |
 
-No database migration. The schema is unchanged (`0007_edit_set_supersession`). "Unsigned working copy" is recorded as an audit
-payload flag (`unsigned_working_copy: true` on `document.text_version_saved`) and inherited down the parent chain.
+The initial feature did not require a database migration (`0007_edit_set_supersession`). The pre-push hardening follow-up adds
+`0008_version_lineage_class`; see §13. Initially, "Unsigned working copy" was derived from an audit payload flag and parent chain;
+the follow-up moves this classification into durable version metadata.
 
 ### 1.1 Comparison engine
 
@@ -260,6 +261,9 @@ include upload/inspection, index creation, viewport requests, save, native reope
 
 ## 11. Known limitations and unresolved blockers
 
+The entries below describe the original implementation verification. The pre-push follow-up in §13 supersedes sandbox and
+deployment-readiness claims where its stricter profile or database migration could not be verified.
+
 * **ZIP scope:** original `QCR.zip` and `RFQ.zip` are absent. ZIP acceptance was recorded as `SKIPPED — OUT OF SCOPE`, not PASS;
   no archives were reconstructed. The hostile-archive browser case did run and pass.
 * **macOS sandbox:** Seatbelt runtime confinement is verified. Office rendering and signature validation fail closed when their
@@ -368,3 +372,45 @@ include upload/inspection, index creation, viewport requests, save, native reope
 * `tests/unit/test_sigcheck.py`
 * `tests/unit/test_xlsx_transitive_dependencies.py`
 * `tests/unit/test_corpus_runner_hardening.py`
+
+## 13. Pre-push hardening follow-up (2026-11-14)
+
+This follow-up addresses the four independent pre-push findings. The code changes are present locally; the environment did not permit the database-backed or macOS sandbox verification needed to certify all of them.
+
+* **Sandbox policy:** `packages/workers/sandbox.py` now generates a deny-default Seatbelt policy, allows reads from the current job scratch, explicit tool/runtime roots and narrowly named system roots, permits writes only in that scratch plus `/dev/null`, and denies network operations. Shared `/private/var/folders` and `/private/var/tmp` grants are gone. Child executable permissions are based on the registered tool roots. The live canary did **not** pass: the tightened profile could not launch its harmless runtime on this host (`sandbox-exec` returned an exec permission failure/abort). The two-job filesystem, network and child-process assertions therefore skipped. **macOS confinement for this profile is not runtime verified; document processing remains fail-closed when the profile self-test fails.** Do not deploy this sandbox profile until the full live canaries and legitimate PDF/DOCX/XLSX processing pass on the supported macOS host.
+* **Isolated-stack inputs:** `scripts/dev/iso_config.py` validates database identifiers (including PostgreSQL’s 63-byte limit), tenant UUIDs, non-shared distinct ports and loopback PostgreSQL targets before the stack script creates state or touches credentials. SQL identifiers and literals are quoted independently of validation. Existing databases must carry the isolated-stack ownership comment before migrations can run. Validation-only tests passed; no PostgreSQL instance was available to test provisioning or cleanup. The script still requires PostgreSQL 16 and the repository’s three isolated test roles.
+* **XLSX comparison retention:** `packages/core/compare.py` now retains a deterministic prefix bounded by both record count and serialized record bytes while continuing to scan all indexed cells and count all detected changes. Results distinguish `scan_status=COMPLETE` from `list_status=TRUNCATED` and report detected/returned counts and `has_more`. The UI states that changes beyond the retained prefix are not navigable. The process cache is bounded by entry count and retained-result bytes. Focused comparisons and the memory-bound test passed; the real-stack workbook benchmark was not run because the isolated database/API stack could not be started.
+* **Working-copy lineage:** migration `0008_version_lineage_class` adds durable lineage metadata and backfills signed-working-copy roots and their descendants from the full audit table. Unknown legacy lineage remains explicitly `unknown`; it is not shown as an ordinary saved version. New text and native descendants inherit the parent classification, and signature verification remains a separate field. API/UI classification now reads version metadata rather than the latest 500 audit events. Unit tests cover missing audit pages, descendants, branches, unknown legacy status and separation from verification outcomes. Migration execution, restart persistence, >500/>1,000-event database cases and tenant isolation remain unverified because no PostgreSQL server was available.
+
+### Verification performed for this follow-up
+
+* Focused unit checks: **34 passed, 8 skipped**. The skips are live confinement checks; the Seatbelt profile could not pass its runtime self-test.
+* Full local `tests/unit` plus `tests/integration`: **582 passed, 19 skipped, 2 failed**. Both failures are environment-confinement failures in existing restricted-worker tests: `/bin/ps` execution is denied to the memory monitor, and a restricted PDF worker exits before returning a result. They were not reclassified as passes and the worker policy was not weakened.
+* `tests/m1`: **5 passed, 32 skipped** because migration/application/worker PostgreSQL URLs were not configured. `pg_isready` found no listener at `127.0.0.1:5432`. A fresh private PostgreSQL cluster initialization was attempted under `.runtime/review-pg`; initialization failed because the host denied System V shared-memory creation. No database was created or modified.
+* Frontend production build (`npm run build`): **passed**. Playwright was not run because its configured API/database-backed stack was unavailable; the shared services were left untouched.
+* XLSX index-fidelity and benchmark scripts: **not run**; both require the isolated API and stakeholder workbook corpus. No corpus file or shared document storage was read, changed or staged in this follow-up.
+* PostgreSQL backend, durable-lineage migration, DOCX/PDF end-to-end checks, tenant authorization, download gates and non-ZIP stakeholder acceptance: **not verified** in this environment.
+
+### Deployment steps and current readiness
+
+There are no new environment variables or runtime dependencies. Apply the new lineage schema with the normal Alembic `upgrade head` migration step before serving the updated API; migration `0008_version_lineage_class` is required. Continue provisioning the isolated stack only with a loopback PostgreSQL 16 target and the existing isolated roles. The application requires its configured scanner, LibreOffice and OpenSSL as before. Do not deploy until macOS Seatbelt live canaries, migration/backfill tests, the complete PostgreSQL suite, production-build Playwright, XLSX benchmark/fidelity and document acceptance suites pass in isolated resources. Linux Bubblewrap and container confinement remain **NOT VERIFIED**. Rollback of application code requires restoring the prior build; downgrade `0008_version_lineage_class` removes only the new metadata column and constraint, but doing so discards persisted lineage classification and should only follow a database backup and deliberate rollback approval.
+
+### Additional source and regression files in this follow-up
+
+* `apps/web/src/lib/api.ts`
+* `apps/web/src/pages/Compare.tsx`
+* `apps/web/src/pages/Library.tsx`
+* `apps/web/src/pages/Workspace.tsx`
+* `docs/document-experience-upgrade.md`
+* `packages/api/compare.py`
+* `packages/api/workspace.py`
+* `packages/core/compare.py`
+* `packages/db/migrations/versions/0008_version_lineage_class.py`
+* `packages/registry/documents.py`
+* `packages/workers/sandbox.py`
+* `scripts/dev/iso_config.py`
+* `scripts/dev/isolated-stack.sh`
+* `tests/unit/test_compare_indexed.py`
+* `tests/unit/test_iso_config.py`
+* `tests/unit/test_sandbox.py`
+* `tests/unit/test_working_copy_lineage.py`

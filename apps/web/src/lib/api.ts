@@ -199,6 +199,8 @@ export type Comparison = {
   relation: { type: "same" | "base_is_ancestor" | "target_is_ancestor" | "branch" | "unrelated"; path_numbers: number[]; common_ancestor?: string };
   path: VersionCard[]; identical_bytes: boolean; changes: Change[]; summary: { added: number; removed: number; modified: number; total: number; truncated: boolean };
   limits: string[]; note: string | null; state?: "ready" | "building"; complete?: boolean; examined_cells?: number; message?: string;
+  scan_status?: "COMPLETE" | "PARTIAL"; list_status?: "COMPLETE" | "TRUNCATED";
+  total_changes_detected?: number; returned_changes?: number; has_more?: boolean;
   categories?: Record<string, number>;
   progress?: { base: string; target: string }; page?: { offset: number; limit: number; total: number }; signature?: { base: { status: string; validated: boolean }; target: { status: string; validated: boolean } };
   pages?: { base: { page: number; width: number; height: number }[]; target: { page: number; width: number; height: number }[] };

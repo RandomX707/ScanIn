@@ -65,8 +65,8 @@ class DocumentRepository:
             {"id": file_id, "tenant": self.tenant_id, "sha256": stored.sha256,
              "size": stored.size_bytes, "mime": media_type, "key": stored.key})
         self.connection.execute(text("""INSERT INTO document_versions
-            (id,tenant_id,document_id,kind,file_id,sha256)
-            VALUES (:version,:tenant,:document,'original',:file,:sha256)"""),
+            (id,tenant_id,document_id,kind,lineage_class,file_id,sha256)
+            VALUES (:version,:tenant,:document,'original','original',:file,:sha256)"""),
             {"version": version_id, "tenant": self.tenant_id, "document": document_id,
              "file": file_id, "sha256": stored.sha256})
         append_event(connection=self.connection, actor_id=actor_id, action="document.original_registered",
@@ -109,7 +109,7 @@ class DocumentRepository:
             {"tenant": self.tenant_id, "limit": limit}).mappings().all()
         if not documents:
             return []
-        rows = self.connection.execute(text("""SELECT v.document_id,v.id AS version_id,v.parent_version_id,v.kind,
+        rows = self.connection.execute(text("""SELECT v.document_id,v.id AS version_id,v.parent_version_id,v.kind,v.lineage_class,
             v.created_at,f.size_bytes,f.mime,
             COALESCE(m.outcome, ev.outcome) AS verification_outcome
             FROM document_versions v JOIN files f ON f.tenant_id=v.tenant_id AND f.id=v.file_id
@@ -180,7 +180,7 @@ class DocumentRepository:
 
     def get_version(self, document_id: UUID, version_id: UUID) -> dict[str, object] | None:
         row = self.connection.execute(text("""SELECT d.id AS document_id,d.tenant_id,d.filename,
-            d.ingestion_state,v.id AS version_id,v.parent_version_id,v.kind,v.sha256,
+            d.ingestion_state,v.id AS version_id,v.parent_version_id,v.kind,v.lineage_class,v.sha256,
             f.size_bytes,f.storage_key,f.mime,f.file_role
             FROM documents AS d JOIN document_versions AS v
               ON v.tenant_id=d.tenant_id AND v.document_id=d.id
@@ -190,7 +190,7 @@ class DocumentRepository:
         return dict(row) if row is not None else None
 
     def list_versions(self, document_id: UUID) -> list[dict[str, object]]:
-        rows = self.connection.execute(text("""SELECT v.id AS version_id,v.parent_version_id,v.kind,
+        rows = self.connection.execute(text("""SELECT v.id AS version_id,v.parent_version_id,v.kind,v.lineage_class,
             v.sha256,v.created_at,f.size_bytes,f.mime,d.current_version_id=(v.id) AS is_current
             ,e.id AS edit_set_id,e.status AS edit_set_status,m.outcome AS verification_outcome,
             m.adapter AS verification_adapter,m.manifest AS verification_manifest
@@ -260,6 +260,11 @@ class DocumentRepository:
             {"tenant": self.tenant_id, "document": document_id, "version": base_version_id}).scalar_one_or_none()
         if current is None or parent_exists is None:
             raise ValueError("stale_base_version")
+        parent_lineage = self.connection.execute(text("""SELECT lineage_class FROM document_versions
+            WHERE tenant_id=:tenant AND document_id=:document AND id=:version"""),
+            {"tenant": self.tenant_id, "document": document_id, "version": base_version_id}).scalar_one()
+        lineage_class = ("unsigned_working_copy" if details.get("unsigned_working_copy") is True or parent_lineage == "unsigned_working_copy"
+                         else "unknown" if parent_lineage == "unknown" else "standard")
         file_id, version_id = uuid4(), uuid4()
         self.connection.execute(text("""INSERT INTO files
             (id,tenant_id,sha256,size_bytes,mime,storage_key,file_role)
@@ -267,10 +272,10 @@ class DocumentRepository:
             {"id": file_id, "tenant": self.tenant_id, "sha256": stored.sha256,
              "size": stored.size_bytes, "mime": media_type, "key": stored.key})
         self.connection.execute(text("""INSERT INTO document_versions
-            (id,tenant_id,document_id,parent_version_id,file_id,kind,sha256,created_at)
-            VALUES (:id,:tenant,:document,:parent,:file,'derived',:sha256,clock_timestamp())"""),
+            (id,tenant_id,document_id,parent_version_id,file_id,kind,lineage_class,sha256,created_at)
+            VALUES (:id,:tenant,:document,:parent,:file,'derived',:lineage,:sha256,clock_timestamp())"""),
             {"id": version_id, "tenant": self.tenant_id, "document": document_id,
-             "parent": base_version_id, "file": file_id, "sha256": stored.sha256})
+             "parent": base_version_id, "file": file_id, "lineage": lineage_class, "sha256": stored.sha256})
         self.connection.execute(text("""UPDATE documents SET current_version_id=:version
             WHERE tenant_id=:tenant AND id=:document"""),
             {"version": version_id, "tenant": self.tenant_id, "document": document_id})
@@ -442,6 +447,9 @@ class DocumentRepository:
         if stored.document_id != document_id:
             raise PermissionError("stored file document does not match edit set")
 
+        base_lineage = self.connection.execute(text("SELECT lineage_class FROM document_versions WHERE tenant_id=:tenant AND id=:version"),
+                                               {"tenant": self.tenant_id, "version": base_version_id}).scalar_one()
+        lineage_class = "unsigned_working_copy" if base_lineage == "unsigned_working_copy" else "unknown" if base_lineage == "unknown" else "standard"
         file_id, version_id = uuid4(), uuid4()
         self.connection.execute(text("""INSERT INTO files
             (id,tenant_id,sha256,size_bytes,mime,storage_key,file_role)
@@ -450,10 +458,10 @@ class DocumentRepository:
              "size": stored.size_bytes, "mime": manifest.get("media_type", "application/octet-stream"),
              "key": stored.key})
         self.connection.execute(text("""INSERT INTO document_versions
-            (id,tenant_id,document_id,parent_version_id,file_id,kind,sha256,edit_set_id,created_at)
-            VALUES (:id,:tenant,:document,:parent,:file,'derived',:sha256,:edit_set,clock_timestamp())"""),
+            (id,tenant_id,document_id,parent_version_id,file_id,kind,lineage_class,sha256,edit_set_id,created_at)
+            VALUES (:id,:tenant,:document,:parent,:file,'derived',:lineage,:sha256,:edit_set,clock_timestamp())"""),
             {"id": version_id, "tenant": self.tenant_id, "document": document_id,
-             "parent": base_version_id, "file": file_id, "sha256": stored.sha256, "edit_set": edit_set_id})
+             "parent": base_version_id, "file": file_id, "lineage": lineage_class, "sha256": stored.sha256, "edit_set": edit_set_id})
         self.connection.execute(text("""INSERT INTO verification_manifests
             (tenant_id,edit_set_id,source_sha256,output_sha256,outcome,adapter,adapter_version,manifest)
             VALUES (:tenant,:edit,:source,:output,:outcome,:adapter,:version,CAST(:manifest AS jsonb))"""),

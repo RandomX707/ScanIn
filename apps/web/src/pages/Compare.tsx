@@ -16,7 +16,7 @@ type Props = {
 
 const KIND_LABEL = { added: "Added", removed: "Removed", modified: "Modified" } as const;
 const CATEGORY_LABEL: Record<string, string> = { text: "Text", value: "Cell value", formula: "Formula", format: "Formatting", structure: "Structure", image: "Image" };
-export const CLASS_LABEL: Record<string, string> = { original: "Original source", derived: "Saved version", unsigned_working_copy: "Unsigned working copy · not official" };
+export const CLASS_LABEL: Record<string, string> = { original: "Original source", standard: "Saved version", derived: "Saved version", unknown: "Lineage unavailable · status unverified", unsigned_working_copy: "Unsigned working copy · not official" };
 const SIGNATURE_LABEL: Record<string, string> = {
   none: "No digital signature", signed: "Signature structure present · not validated", signature_range_mismatch: "Malformed signature · not trusted",
   modified_after_signing: "Changed after signing · not trusted", unsigned_signature_field: "Empty signature field",
@@ -178,8 +178,10 @@ export function ComparePage({ folder, baseId, targetId, onChange, onHistory, onF
               <button className={`pill sum-mod ${filter === "modified" ? "on" : ""}`} onClick={() => setFilter(filter === "modified" ? "all" : "modified")}>~{counts?.modified} modified</button>
               {categories.length > 1 ? categories.map((c) => <button key={c} className={`pill ${filter === c ? "on" : ""}`} onClick={() => setFilter(filter === c ? "all" : c)}>{CATEGORY_LABEL[c]}</button>) : null}
               {cmp.format === "docx" ? <span className="stage-note">“Text” = the wording changed. “Formatting” = same words, different look.</span> : null}
-              {cmp.complete === false ? <span className="pill sum-del" data-testid="completeness">PARTIAL — not every change is listed</span>
-                : <span className="pill sum-add" data-testid="completeness">COMPLETE{cmp.examined_cells ? ` · ${cmp.examined_cells.toLocaleString()} cells examined` : ""}</span>}
+              {cmp.scan_status === "COMPLETE" && cmp.list_status === "TRUNCATED"
+                ? <span className="pill sum-del" data-testid="completeness">Scan COMPLETE · list TRUNCATED — showing {cmp.returned_changes?.toLocaleString()} of {cmp.total_changes_detected?.toLocaleString()} changes; remaining changes are not navigable</span>
+                : cmp.complete === false ? <span className="pill sum-del" data-testid="completeness">PARTIAL — not every change is listed</span>
+                  : <span className="pill sum-add" data-testid="completeness">COMPLETE{cmp.examined_cells ? ` · ${cmp.examined_cells.toLocaleString()} cells examined` : ""}</span>}
             </div>
             <div className="compare-nav">
               <div className="seg" role="group" aria-label="Content to show">

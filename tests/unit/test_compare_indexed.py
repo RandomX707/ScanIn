@@ -1,5 +1,6 @@
 """Complete streamed XLSX comparison over windowed indexes: every cell examined, nothing dropped, nothing invented."""
 import sqlite3
+import tracemalloc
 
 from packages.core import compare as c
 
@@ -76,3 +77,52 @@ def test_summary_counts_cover_everything_even_when_a_page_is_requested():
     b = make_db(500, 10, edits={(r, 1): f"new{r}" for r in range(1, 501)})
     out = run(a, b)
     assert out["summary"]["total"] == 500 and len(out["changes"]) == 500 and out["complete"]
+
+
+def test_full_scan_reports_truncated_change_list_and_keeps_exact_counts(monkeypatch):
+    monkeypatch.setattr(c, "MAX_CHANGES", 100)
+    monkeypatch.setattr(c, "MAX_CHANGE_BYTES", 20_000)
+    edits = {(r, 1): f"edited-{r}" for r in range(1, 501)}
+    out = run(make_db(500, 2), make_db(500, 2, edits=edits))
+    assert out["scan_status"] == "COMPLETE"
+    assert out["list_status"] == "TRUNCATED"
+    assert out["complete"] is True
+    assert out["has_more"] is True
+    assert out["total_changes_detected"] == 500
+    assert out["returned_changes"] == len(out["changes"]) == 100
+    assert out["summary"] == {"added": 0, "removed": 0, "modified": 500, "total": 500, "truncated": True}
+    assert out["retained_change_bytes"] <= 20_000
+    assert [change["label"] for change in out["changes"][:3]] == ["S!A1", "S!A2", "S!A3"]
+
+
+def test_change_retention_memory_is_bounded_during_high_change_scan(monkeypatch):
+    monkeypatch.setattr(c, "MAX_CHANGES", 100)
+    monkeypatch.setattr(c, "MAX_CHANGE_BYTES", 20_000)
+    edits = {(r, 1): f"different-{r}" for r in range(1, 10_001)}
+    a, b = make_db(10_000, 1), make_db(10_000, 1, edits=edits)
+    tracemalloc.start()
+    try:
+        out = run(a, b)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert out["scan_status"] == "COMPLETE" and out["total_changes_detected"] == 10_000
+    assert out["returned_changes"] == 100 and out["list_status"] == "TRUNCATED"
+    assert out["retained_change_bytes"] <= 20_000
+    assert peak < 2 * 1024 * 1024
+
+
+def test_full_scan_handles_worksheets_with_different_sizes_and_sheet_order():
+    a1, b1 = make_db(3, 2), make_db(3, 2, edits={(3, 2): "changed"})
+    a2, b2 = make_db(1, 1), sqlite3.connect(":memory:")
+    b2.execute("CREATE TABLE cells (r INTEGER, c INTEGER, v TEXT, t TEXT, s INTEGER, id TEXT, fp TEXT, e INTEGER, rs TEXT, PRIMARY KEY (r, c)) WITHOUT ROWID")
+    b2.execute("INSERT INTO cells VALUES (4,1,'new-row','string',0,'id','fp',1,NULL)")
+    base = {"styles": [{}], "sheets": [
+        {"index": 0, "name": "First", "merges": [], "images": [], "cols": {}, "rows": {}, "freeze": None, "hidden": False},
+        {"index": 1, "name": "Second", "merges": [], "images": [], "cols": {}, "rows": {}, "freeze": None, "hidden": False},
+    ]}
+    target = {**base, "sheets": [dict(base["sheets"][0]), dict(base["sheets"][1])]}
+    out = c.diff_xlsx_indexed(base, target, lambda i: Handle((a1, a2)[i]), lambda i: Handle((b1, b2)[i]))
+    assert out["examined_cells"] == 8
+    assert [(change["label"], change["kind"]) for change in out["changes"]] == [
+        ("First!B3", "modified"), ("Second!A1", "removed"), ("Second!A4", "added")]
