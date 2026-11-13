@@ -232,3 +232,6 @@ export const getSheetWindow = (documentId: string, versionId: string, sheet: str
 export const getSheetCell = (documentId: string, versionId: string, sheet: string, row: number, col: number) =>
   json<{ id: string; fp: string; v: string; t: string | null; e: boolean; r: string | null }>(`/api/documents/${documentId}/versions/${versionId}/sheet/cell?sheet=${encodeURIComponent(sheet)}&row=${row}&col=${col}`);
 export const cancelSheetIndex = (documentId: string, versionId: string) => json<{ cancelled: boolean }>(`/api/documents/${documentId}/versions/${versionId}/sheet/index`, { method: "DELETE" });
+
+export type FontReport = { declared: string[]; rendered: string[]; substituted: { declared: string; replaced_with: string | null; exact: boolean }[] };
+export const getRenderFonts = (documentId: string, versionId: string) => json<FontReport>(`/api/documents/${documentId}/versions/${versionId}/render/fonts`);

@@ -256,9 +256,12 @@ class DocxAdapter:
             targets_by_block.setdefault(key, []).append(target.id)
         for block in blocks:
             block["target_ids"] = targets_by_block.get(block["id"], [])
+        fonts = sorted({f for part, root in roots.items()
+                        if part == "word/document.xml" or re.fullmatch(r"word/(?:header|footer)\d+\.xml", part)
+                        for f in root.xpath("//w:rFonts/@w:ascii | //w:rFonts/@w:hAnsi", namespaces=NS)})[:60]
         media = [{"name": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
                  for name, data in sorted(parts.items()) if re.fullmatch(r"(?:word/)?media/[^/]+", name)][:200]
-        return {"paragraph_count": len(blocks), "blocks": blocks, "media": media,
+        return {"paragraph_count": len(blocks), "blocks": blocks, "media": media, "fonts": fonts,
                 "document_properties": {"has_macros": any(name.lower().endswith("vbaproject.bin") for name in parts),
                                         "protected": "document_protected" in self._document_reasons(parts, roots),
                                         "tracked_changes": "tracked_changes_present" in self._document_reasons(parts, roots)},

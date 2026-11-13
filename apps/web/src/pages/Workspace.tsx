@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Shell";
 import {
-  ApiError, ext, fetchRenderBytes, fetchVersionFile, folderName, getChunks, getPreview, humanDate, saveBlob, size, typeLabel,
+  ApiError, ext, fetchRenderBytes, fetchVersionFile, getRenderFonts, folderName, getChunks, getPreview, humanDate, saveBlob, size, typeLabel,
   type Chunks, type Folder, type FolderVersion, type Preview,
 } from "../lib/api";
 import { EditsTab } from "./Edits";
@@ -228,6 +228,7 @@ function OriginalTab({ documentId, root, folderName: name, download, page }: { d
   const [preview, setPreview] = useState<Preview | null>(null);
   const urlRef = useRef<string | null>(null);
   const [renderFailed, setRenderFailed] = useState(false);
+  const [fonts, setFonts] = useState<Awaited<ReturnType<typeof getRenderFonts>> | null>(null);
   const [signature, setSignature] = useState<Preview["signature"] | null>(null);
   useEffect(() => {
     if (e !== "pdf") return;
@@ -249,6 +250,12 @@ function OriginalTab({ documentId, root, folderName: name, download, page }: { d
   }, [documentId, root.version_id, native, sourceText]);
 
   const faithful = preview?.format === "docx" && preview.render?.available === true && !renderFailed;
+  useEffect(() => {
+    if (!faithful) return;
+    let live = true;
+    getRenderFonts(documentId, root.version_id).then((f) => { if (live) setFonts(f); }).catch(() => undefined);
+    return () => { live = false; };
+  }, [faithful, documentId, root.version_id]);
   const note = faithful ? "Page-accurate preview rendered locally for viewing only. Your original DOCX is unchanged; editing still saves a native DOCX."
     : native ? "Native preview from the exact original file. No conversion or document rewriting."
     : sourceText ? "Displaying the actual source text from the original file, without the parser’s transformations."
@@ -268,7 +275,17 @@ function OriginalTab({ documentId, root, folderName: name, download, page }: { d
           ? (e === "pdf" ? <iframe key={page ?? 0} src={page ? `${url}#page=${page}` : url} title="Original PDF · native document viewer" className="native-pdf-frame" /> : <img src={url} alt="Exact original uploaded image" className="native-original-image" />)
           : <div className="stage-note">Opening the original file…</div>)
           : sourceText ? <pre className="raw-source" aria-label="Exact original source text">{text ?? "Loading exact original source…"}</pre>
-            : faithful ? <PageViewer title="Original document pages" fetchBytes={() => fetchRenderBytes(documentId, root.version_id).catch((e) => { setRenderFailed(true); throw e; })} note={preview?.render?.note} testId="docx-page-viewer" initialPage={page} />
+            : faithful ? (
+              <>
+                <PageViewer title="Original document pages" fetchBytes={() => fetchRenderBytes(documentId, root.version_id).catch((e) => { setRenderFailed(true); throw e; })} note={preview?.render?.note} testId="docx-page-viewer" initialPage={page} />
+                {fonts?.substituted.length ? (
+                  <div className="viewer-note" data-testid="font-substitution">
+                    <b>Fonts not available on this server were replaced in the preview:</b>{" "}
+                    {fonts.substituted.map((f) => `${f.declared} → ${f.replaced_with ?? "a similar fallback font"}`).join("; ")}. Line breaks and glyph shapes can differ slightly from Word; the original file is unchanged.
+                  </div>
+                ) : null}
+              </>
+            )
             : <>{preview?.format === "docx" ? <div className="extracted-banner"><Icon name="layers" size={14} /> {preview.render?.available === false ? "PAGE PREVIEW UNAVAILABLE" : "PAGE PREVIEW FAILED"} · SHOWING EXTRACTED TEXT, NOT THE ORIGINAL LAYOUT · DOWNLOAD EXACT FILE ABOVE</div> : null}<div className="extracted-banner"><Icon name="layers" size={14} /> EXTRACTED TEXT · NOT A NATIVE OFFICE RENDER · DOWNLOAD EXACT FILE ABOVE</div>{preview ? <ExtractedPreview preview={preview} documentId={documentId} versionId={root.version_id} /> : <p className="stage-note">{text ?? "Reading the file…"}</p>}</>}
       </div>
     </>

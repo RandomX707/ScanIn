@@ -84,3 +84,53 @@ def render_version(document_id: str, version_id: str, request: Request,
                     headers={"X-Render-Engine": "libreoffice-sandboxed", "X-Render-Cache": "hit" if cached else "miss",
                              "X-Render-Note": FIDELITY_NOTE, "Content-Disposition": 'inline; filename="preview.pdf"',
                              "X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=300"})
+
+
+_ALIASES = {"calibri": ("carlito",), "calibrilight": ("carlito",), "arial": ("liberationsans", "arimo"), "timesnewroman": ("liberationserif", "tinos", "times"),
+            "cambria": ("caladea",), "couriernew": ("liberationmono", "cousine"), "symbol": ("opensymbol",), "wingdings": ("opensymbol",)}
+
+
+def _norm_font(name: str) -> str:
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def font_report(declared: list[str], pdf: bytes) -> dict[str, object]:
+    """Declared-vs-rendered fonts of a preview. A declared font counts as present when it, or its metric-compatible stand-in
+    (Calibri/Carlito, Arial/Liberation Sans, Times New Roman/Liberation Serif, Cambria/Caladea...), is drawn on the pages."""
+    import io
+    from pypdf import PdfReader
+    from packages.workers.office_render import font_map
+    rendered: set[str] = set()
+    for page in PdfReader(io.BytesIO(pdf)).pages:
+        for font in ((page.get("/Resources") or {}).get("/Font") or {}).values():
+            rendered.add(str(font.get_object().get("/BaseFont", "")).split("+")[-1])
+    rendered_norm = {_norm_font(r) for r in rendered}
+    mapping = {_norm_font(k): v for k, v in font_map().items()}
+    substituted = []
+    for name in declared:
+        n = _norm_font(name)
+        if any(n in r or r.startswith(n) for r in rendered_norm) or any(a in r for a in _ALIASES.get(n, ()) for r in rendered_norm):
+            continue
+        replaced_by = mapping.get(n)
+        if replaced_by is not None and _norm_font(replaced_by) in rendered_norm or (replaced_by and any(a in r for a in _ALIASES.get(_norm_font(replaced_by), ()) for r in rendered_norm)):
+            substituted.append({"declared": name, "replaced_with": replaced_by, "exact": False})
+        else:
+            substituted.append({"declared": name, "replaced_with": None, "exact": False})
+    return {"declared": declared, "rendered": sorted(rendered), "substituted": substituted}
+
+
+@router.get("/documents/{document_id}/versions/{version_id}/render/fonts")
+def render_fonts(document_id: str, version_id: str, request: Request, identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
+    """Which declared fonts were replaced in the page preview (the original file is never changed)."""
+    try:
+        doc, ver = UUID(document_id), UUID(version_id)
+    except ValueError:
+        raise APIError(404, "not_found", "The requested version was not found.") from None
+    pdf, _suffix, _cached = rendered_pdf(request, identity, doc, ver)
+    version, _source = _source_version(request, identity, doc, ver)
+    with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
+        original = DocumentRepository(connection, identity.tenant_id).get_original(doc)
+    name = str(original["filename"] if original else version["filename"])
+    report = request.app.state.restricted_parser.inspect(request.app.state.document_storage.root / str(version["storage_key"]), filename=name)
+    declared = list((report.details or {}).get("fonts", []))
+    return font_report(declared, pdf)

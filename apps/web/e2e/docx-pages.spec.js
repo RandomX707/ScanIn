@@ -37,6 +37,8 @@ test.describe('Health Quote Format.docx is shown as real pages', () => {
     expect(paint.header).toBeGreaterThan(0.01);
     expect(paint.illustration).toBeGreaterThan(0.02);
     expect(paint.corner[0]).toBeGreaterThan(245);                                         // the file defines no dark page background
+    // a font the document names but this server lacks is disclosed, never silently swapped
+    await expect(page.getByTestId('font-substitution')).toContainText('MingLiU_HKSCS-ExtB', { timeout: 30_000 });
     await page.screenshot({ path: path.join(evidence, 'browser-original-tab.png') });
 
     // page navigation and zoom

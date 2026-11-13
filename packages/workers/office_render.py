@@ -11,6 +11,7 @@ Linux (bubblewrap) is not implemented for this worker: it reports unavailable ra
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -44,6 +45,37 @@ def _magic_ok(data: bytes, suffix: str) -> bool:
     if suffix == ".rtf":
         return data[:5] == b"{\\rtf"
     return False
+
+
+# Windows-only fonts Word files often name for LATIN text. When they are not installed the renderer would pick an arbitrary fallback
+# (for example a Hebrew serif face); a conventional Latin serif/sans is a far better stand-in. Override with IDW_OFFICE_FONT_MAP (JSON).
+DEFAULT_FONT_MAP = {
+    "MingLiU_HKSCS-ExtB": "Times New Roman", "MingLiU_HKSCS": "Times New Roman", "MingLiU": "Times New Roman", "PMingLiU": "Times New Roman", "PMingLiU-ExtB": "Times New Roman",
+    "SimSun": "Times New Roman", "SimSun-ExtB": "Times New Roman", "NSimSun": "Times New Roman", "MS Mincho": "Times New Roman", "MS PMincho": "Times New Roman",
+    "Microsoft YaHei": "Arial", "SimHei": "Arial", "MS Gothic": "Arial", "MS PGothic": "Arial", "Microsoft JhengHei": "Arial", "Malgun Gothic": "Arial",
+}
+
+
+def font_map() -> dict[str, str]:
+    mapping = dict(DEFAULT_FONT_MAP)
+    configured = os.environ.get("IDW_OFFICE_FONT_MAP")
+    if configured:
+        try:
+            extra = json.loads(configured)
+            mapping.update({str(k): str(v) for k, v in extra.items() if isinstance(k, str) and isinstance(v, str)})
+        except ValueError:
+            pass
+    return mapping
+
+
+def _font_substitution_xml(mapping: dict[str, str]) -> str:
+    from xml.sax.saxutils import escape
+    nodes = "".join(
+        f'<node oor:name="{i}" oor:op="replace"><prop oor:name="Always" oor:op="fuse"><value>true</value></prop><prop oor:name="OnScreenOnly" oor:op="fuse"><value>false</value></prop>'
+        f'<prop oor:name="ReplaceFont" oor:op="fuse"><value>{escape(k)}</value></prop><prop oor:name="SubstituteFont" oor:op="fuse"><value>{escape(v)}</value></prop></node>'
+        for i, (k, v) in enumerate(mapping.items()))
+    return ('<item oor:path="/org.openoffice.Office.Common/Font/Substitution"><prop oor:name="Replacement" oor:op="fuse"><value>true</value></prop></item>'
+            f'<item oor:path="/org.openoffice.Office.Common/Font/Substitution"><node oor:name="FontPairs">{nodes}</node></item>')
 
 
 class OfficeRenderUnavailable(RuntimeError):
@@ -118,7 +150,7 @@ class SandboxedOfficeRenderer:
             (scratch / "tmp").mkdir(mode=0o700)
             profile_user = scratch / "profile" / "user"
             profile_user.mkdir(parents=True, mode=0o700)
-            (profile_user / "registrymodifications.xcu").write_text(_REGISTRY, encoding="utf-8")
+            (profile_user / "registrymodifications.xcu").write_text(_REGISTRY.replace("</oor:items>", _font_substitution_xml(font_map()) + "</oor:items>"), encoding="utf-8")
             source = scratch / "in" / f"input{suffix}"
             source.write_bytes(data)
             os.chmod(source, 0o400)
