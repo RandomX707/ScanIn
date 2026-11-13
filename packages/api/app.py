@@ -19,6 +19,8 @@ from packages.api.documents import router as documents_router
 from packages.api.dashboard import router as dashboard_router
 from packages.api.archives import router as archives_router
 from packages.api.workspace import router as workspace_router
+from packages.api.render import router as render_router
+from packages.workers.office_render import SandboxedOfficeRenderer
 from packages.api.logging_config import RequestLogMiddleware
 from packages.api.local_demo import router as local_demo_router
 from packages.api.settings import Settings, get_settings
@@ -61,6 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.worker_engine = worker_engine
     app.state.document_storage = ImmutableLocalStorage(runtime_settings.storage_root)
     app.state.restricted_parser = RestrictedParser(Path(__file__).resolve().parents[2])
+    app.state.office_renderer = SandboxedOfficeRenderer()
     app.state.pdf_editor = RestrictedPdfEditor(Path(__file__).resolve().parents[2])
     app.state.ingestion_pipeline = IngestionOrchestrator(
         app.state.document_storage,
@@ -70,6 +73,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(documents_router)
     app.include_router(dashboard_router)
     app.include_router(workspace_router)
+    app.include_router(render_router)
     app.include_router(archives_router)
     app.include_router(local_demo_router)
     app.add_middleware(RequestLogMiddleware)

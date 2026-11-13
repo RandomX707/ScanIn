@@ -535,8 +535,12 @@ def version_preview(document_id: str, version_id: str, request: Request,
                                "e": editable, "r": reason})
             level = str(report.capability.get("level"))
             reasons = list(report.capability.get("reasons") or [])
+            renderer = request.app.state.office_renderer
+            from packages.api.render import FIDELITY_NOTE
+            render = {"available": renderer.available(), "engine": "libreoffice-sandboxed", "note": FIDELITY_NOTE,
+                      "reason": renderer.reason_unavailable()}
             return done("docx", "docx" if level == "editable" else "none",
-                        None if level == "editable" else file_reason(reasons, suffix), blocks=blocks)
+                        None if level == "editable" else file_reason(reasons, suffix), blocks=blocks, render=render)
         if suffix == ".pdf":
             report = request.app.state.restricted_parser.inspect(path, filename=name, include_targets=True)
             details = report.details or {}

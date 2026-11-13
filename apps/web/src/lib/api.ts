@@ -145,6 +145,7 @@ export type Preview = {
   signature?: { status: string; validated: boolean }; styles?: CellStyle[];
   text?: string; html?: string | null; encoding?: string; kind?: string; sheets?: Sheet[]; blocks?: DocxBlock[]; slides?: string[][];
   pages?: { page: number; width: number; height: number; scanned: boolean }[]; fields?: PdfField[]; text_available?: boolean;
+  render?: { available: boolean; engine: string; note: string; reason: string | null };
 };
 export const getPreview = (documentId: string, versionId: string) => json<Preview>(`/api/documents/${documentId}/versions/${versionId}/preview`);
 
@@ -168,3 +169,14 @@ export type SaveBody = { html?: string; changes?: { target_id: string; fingerpri
 export type SaveResult = { version_id: string; outcome: string; note: string | null; version: FolderVersion | null };
 export const saveVersion = (documentId: string, versionId: string, body: SaveBody) =>
   json<SaveResult>(`/api/documents/${documentId}/versions/${versionId}/save`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+/** Preview-only page rendering of an Office document (never the editing source, never a saved version). */
+export async function fetchRenderBytes(documentId: string, versionId: string): Promise<ArrayBuffer> {
+  const response = await request(`/api/documents/${documentId}/versions/${versionId}/render`);
+  if (!response.ok) {
+    let body: { code?: string; message?: string } = {};
+    try { body = await response.json(); } catch { /* generic */ }
+    throw new ApiError(response.status, body.code ?? "render_unavailable", body.message ?? "The page preview is unavailable.");
+  }
+  return response.arrayBuffer();
+}

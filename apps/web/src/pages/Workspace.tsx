@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Shell";
 import {
-  ApiError, ext, fetchVersionFile, folderName, getChunks, getPreview, humanDate, saveBlob, size, typeLabel,
+  ApiError, ext, fetchRenderBytes, fetchVersionFile, folderName, getChunks, getPreview, humanDate, saveBlob, size, typeLabel,
   type Chunks, type Folder, type FolderVersion, type Preview,
 } from "../lib/api";
 import { EditsTab } from "./Edits";
 import { SheetGrid } from "./SheetGrid";
+import { PageViewer } from "../components/PageViewer";
 
 const SOURCE_TEXT = ["txt", "text", "md", "markdown", "csv", "json", "xml", "rtf", "html", "htm"];
 const NATIVE = ["pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp"];
@@ -26,7 +27,8 @@ function statusFor(version: FolderVersion, name: string, chunks: Chunks | null):
     if (e === "pdf") return "Scanned PDF · OCR needed";
     if (["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(e)) return "Native image · no OCR";
   }
-  if (["docx", "xlsx", "xls", "pptx"].includes(e)) return "Extracted · layout approximate";
+  if (e === "docx") return "Page preview · layout rendered locally";
+  if (["xlsx", "xls", "pptx"].includes(e)) return "Extracted · layout approximate";
   return "Parsed";
 }
 
@@ -211,6 +213,7 @@ function OriginalTab({ documentId, root, folderName: name, download, page }: { d
   const [url, setUrl] = useState<string | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const urlRef = useRef<string | null>(null);
+  const [renderFailed, setRenderFailed] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -224,7 +227,9 @@ function OriginalTab({ documentId, root, folderName: name, download, page }: { d
     return () => { live = false; if (urlRef.current) { URL.revokeObjectURL(urlRef.current); urlRef.current = null; } };
   }, [documentId, root.version_id, native, sourceText]);
 
-  const note = native ? "Native preview from the exact original file. No conversion or document rewriting."
+  const faithful = preview?.format === "docx" && preview.render?.available === true && !renderFailed;
+  const note = faithful ? "Page-accurate preview rendered locally for viewing only. Your original DOCX is unchanged; editing still saves a native DOCX."
+    : native ? "Native preview from the exact original file. No conversion or document rewriting."
     : sourceText ? "Displaying the actual source text from the original file, without the parser’s transformations."
       : "Exact native Office rendering is not supported here. This reading preview is reconstructed; use Download exact source to open the real file in its native application.";
   return (
@@ -233,7 +238,7 @@ function OriginalTab({ documentId, root, folderName: name, download, page }: { d
       <div className="section-title"><h3>Your original document.</h3><span className="pill"><Icon name="shield" size={13} /> Source never overwritten</span></div>
       <div className="source-banner"><Icon name="shield" size={14} /> <span>{note}</span></div>
       <div className="reader-toolbar">
-        <span className="stage-note">{name} · {size(root.size_bytes)} · {native ? "Native file preview" : sourceText ? "Exact source text" : "Office reading preview"}</span>
+        <span className="stage-note">{name} · {size(root.size_bytes)} · {faithful ? "Page-accurate preview" : native ? "Native file preview" : sourceText ? "Exact source text" : "Office reading preview"}</span>
         <button className="btn outline small" onClick={download}><Icon name="download" size={14} /> Download exact source</button>
       </div>
       <div className={`source-paper ${native ? "binary-original" : ""} ${sourceText ? "raw-original" : ""}`} id="source-view">
@@ -241,7 +246,8 @@ function OriginalTab({ documentId, root, folderName: name, download, page }: { d
           ? (e === "pdf" ? <iframe key={page ?? 0} src={page ? `${url}#page=${page}` : url} title="Original PDF · native document viewer" className="native-pdf-frame" /> : <img src={url} alt="Exact original uploaded image" className="native-original-image" />)
           : <div className="stage-note">Opening the original file…</div>)
           : sourceText ? <pre className="raw-source" aria-label="Exact original source text">{text ?? "Loading exact original source…"}</pre>
-            : <><div className="extracted-banner"><Icon name="layers" size={14} /> EXTRACTED TEXT · NOT A NATIVE OFFICE RENDER · DOWNLOAD EXACT FILE ABOVE</div>{preview ? <ExtractedPreview preview={preview} /> : <p className="stage-note">{text ?? "Reading the file…"}</p>}</>}
+            : faithful ? <PageViewer title="Original document pages" fetchBytes={() => fetchRenderBytes(documentId, root.version_id).catch((e) => { setRenderFailed(true); throw e; })} note={preview?.render?.note} testId="docx-page-viewer" />
+            : <>{preview?.format === "docx" ? <div className="extracted-banner"><Icon name="layers" size={14} /> {preview.render?.available === false ? "PAGE PREVIEW UNAVAILABLE" : "PAGE PREVIEW FAILED"} · SHOWING EXTRACTED TEXT, NOT THE ORIGINAL LAYOUT · DOWNLOAD EXACT FILE ABOVE</div> : null}<div className="extracted-banner"><Icon name="layers" size={14} /> EXTRACTED TEXT · NOT A NATIVE OFFICE RENDER · DOWNLOAD EXACT FILE ABOVE</div>{preview ? <ExtractedPreview preview={preview} /> : <p className="stage-note">{text ?? "Reading the file…"}</p>}</>}
       </div>
     </>
   );
