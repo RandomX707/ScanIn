@@ -204,8 +204,9 @@ def _picture(zf: zipfile.ZipFile, drawing: str) -> list[dict[str, Any]]:
     return out
 
 
-def extract(data: bytes) -> dict[str, Any] | None:
-    """Per-sheet layout, or None when the package can't be read safely."""
+def extract(data: bytes, *, max_rows: int = MAX_ROWS, max_cols: int = MAX_COLS) -> dict[str, Any] | None:
+    """Per-sheet layout, or None when the package can't be read safely. The default caps keep the in-page preview small; the
+    windowed index passes the real worksheet limits so nothing is silently clipped."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
         wb_raw = _read(zf, "xl/workbook.xml")
@@ -230,13 +231,13 @@ def extract(data: bytes) -> dict[str, Any] | None:
                 lo, hi = int(c.get("min", 0)), int(c.get("max", 0))
                 width = float(c.get("width", 0) or 0)
                 hidden = c.get("hidden") in ("1", "true")
-                for i in range(max(lo, 1), min(hi, MAX_COLS) + 1):
+                for i in range(max(lo, 1), min(hi, max_cols) + 1):
                     cols[str(i)] = 0.0 if hidden else width
             rows: dict[str, float] = {}
             cell_style: dict[str, int] = {}
             for r in root.iterfind("m:sheetData/m:row", NS):
                 n = int(r.get("r", 0))
-                if n > MAX_ROWS:
+                if n > max_rows:
                     break
                 if r.get("hidden") in ("1", "true"):
                     rows[str(n)] = 0.0
@@ -251,8 +252,8 @@ def extract(data: bytes) -> dict[str, Any] | None:
                     c1, r1, c2, r2 = range_boundaries(mc.get("ref", ""))
                 except (ValueError, TypeError):
                     continue
-                if r1 <= MAX_ROWS and c1 <= MAX_COLS:
-                    merges.append([r1, c1, min(r2, MAX_ROWS), min(c2, MAX_COLS)])
+                if r1 <= max_rows and c1 <= max_cols:
+                    merges.append([r1, c1, min(r2, max_rows), min(c2, max_cols)])
             images: list[dict[str, Any]] = []
             drawing = root.find("m:drawing", NS)
             if drawing is not None:

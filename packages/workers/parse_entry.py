@@ -91,7 +91,16 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
                                   **({"requested": len(target_ids), "found": 0} if target_ids is not None else {})}
         result["targets_truncated"] = False
     elif include_targets and supported:
-        if windowed:
+        fast_selected = None
+        if target_ids is not None and not windowed and callable(getattr(source_adapter, "targets_by_id_fast", None)):
+            # Exact lookup of a few cells: build only those targets (the same per-cell logic as the full scan). Any id that is not an
+            # ordinary value cell falls through to the full scan below, so unsupported/read-only cells are reported exactly as before.
+            found = source_adapter.targets_by_id_fast(data, target_ids)
+            if all(i in found for i in target_ids):
+                fast_selected = [found[i] for i in target_ids]
+        if fast_selected is not None:
+            total = len(fast_selected)
+        elif windowed:
             total = source_adapter.target_count(data)
         else:
             # Every parser-discovered value stays viewable (and eligible for sidecar corrections) with
@@ -112,7 +121,7 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
             total = len(all_targets)
         if target_ids is not None:
             wanted = set(target_ids)
-            selected = (source_adapter.targets_by_id(data, target_ids) if windowed
+            selected = (fast_selected if fast_selected is not None else source_adapter.targets_by_id(data, target_ids) if windowed
                         else [target for target in all_targets if target.id in wanted])
             result["targets"] = [_target_dict(target) for target in selected]
             result["targets_page"] = {"mode": "lookup", "offset": 0, "limit": MAX_TARGET_LOOKUP_IDS,

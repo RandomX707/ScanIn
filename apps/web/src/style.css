@@ -198,3 +198,8 @@ html,body{max-width:100%;overflow-x:clip}
 .wc-banner{background:#9e0d14;color:#fff;border-radius:10px;padding:10px 14px;margin:10px 0;display:grid;gap:3px;font-family:'DM Sans',system-ui,sans-serif}.wc-banner b{letter-spacing:.04em}.wc-banner span{font-size:12px;opacity:.95}
 .wc-modal{max-width:560px}.wc-ack{display:flex;gap:10px;align-items:flex-start;font-size:13px;margin:14px 0;color:#27413a}.wc-actions{display:flex;gap:10px;justify-content:flex-end}
 .pill.wc{background:#9e0d14;color:#fff;border-color:#9e0d14}
+.virtual-building .viewer-note{padding:18px;font-size:13px}.goto-form{display:inline-flex;gap:4px;margin-right:6px}.goto-form input{height:34px;width:112px;border:1px solid #cfd9cc;border-radius:8px;padding:0 8px;font:600 12px 'DM Sans',system-ui,sans-serif}
+.vs-scroll{min-height:360px}.sg-v{user-select:none}.sg-v .cell-text{overflow:hidden;text-overflow:clip;line-height:1.25}
+.sg-vh{display:flex;align-items:center;justify-content:center;font:700 11px 'DM Sans',system-ui,sans-serif;box-sizing:border-box}
+.vs-editor{outline:none}
+.compare-progress{display:grid;gap:8px;padding:18px;background:#f1f6ee;border:1px solid #cfe0cc;border-radius:12px}.list-pager{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 12px;border-top:1px solid #eef1ec;position:sticky;bottom:0;background:#fff}

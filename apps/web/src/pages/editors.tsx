@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Cell, DocxBlock, PdfField, Preview, SaveBody } from "../lib/api";
 import { SheetGrid } from "./SheetGrid";
 import { SheetWorkspace } from "../components/SheetWorkspace";
+import { VirtualWorkbook } from "../components/VirtualWorkbook";
 
 type OnBody = (body: SaveBody | null) => void;
 
@@ -89,7 +90,7 @@ export function TextEditor({ preview, formatting, onBody, onReset }: { preview: 
 
 /* ------------------------------------------------------------------------------------------------ grid */
 
-export function GridEditor({ preview, onBody }: { preview: Preview; onBody: OnBody }) {
+export function GridEditor({ preview, onBody, documentId, versionId }: { preview: Preview; onBody: OnBody; documentId?: string; versionId?: string }) {
   const sheets = useMemo(() => (preview.sheets ?? []).filter((s) => s.rows.length), [preview]);
   const [active, setActive] = useState(0);
   const [edits, setEdits] = useState<Record<string, { cell: NonNullable<Cell>; value: string }>>({});
@@ -100,6 +101,13 @@ export function GridEditor({ preview, onBody }: { preview: Preview; onBody: OnBo
     const changes = Object.values(next).map(({ cell: c, value: v }) => ({ target_id: c.id, fingerprint: c.fp, value: v }));
     onBody(changes.length ? { changes } : null);
   };
+  if (preview.virtual && documentId && versionId) {
+    return (
+      <div className="editable grid-editor no-toolbar" role="region" aria-label="Editable cells">
+        <VirtualWorkbook documentId={documentId} versionId={versionId} edits={edits} onEdit={update} label="Editable workbook" testId="sheet-editor" />
+      </div>
+    );
+  }
   if (!sheets.length) return <div className="empty"><h3>No values found</h3><p>This file has no cells to edit.</p></div>;
   const sheet = sheets[Math.min(active, sheets.length - 1)];
   if (sheets.every((s) => s.layout)) {

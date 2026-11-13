@@ -150,9 +150,11 @@ export type Preview = {
   text?: string; html?: string | null; encoding?: string; kind?: string; sheets?: Sheet[]; blocks?: DocxBlock[]; slides?: string[][];
   pages?: { page: number; width: number; height: number; scanned: boolean }[]; fields?: PdfField[]; text_available?: boolean;
   partial?: boolean;
+  virtual?: { state: string; error?: string | null; total_cells?: number; sheets?: { name: string; max_row: number; max_col: number }[] };
   render?: { available: boolean; engine: string; note: string; reason: string | null };
 };
-export const getPreview = (documentId: string, versionId: string) => json<Preview>(`/api/documents/${documentId}/versions/${versionId}/preview`);
+const forceVirtual = () => { try { return sessionStorage.getItem("channel360.virtual") === "1"; } catch { return false; } };
+export const getPreview = (documentId: string, versionId: string, virtual = forceVirtual()) => json<Preview>(`/api/documents/${documentId}/versions/${versionId}/preview${virtual ? "?virtual=true" : ""}`);
 
 export type PdfTextEdit = { id: string; old: string; new: string };
 export type PdfRun = { id: string; page: number; text: string; bbox: [number, number, number, number]; font: string; size: number; e: boolean; r: string | null };
@@ -196,11 +198,16 @@ export type Comparison = {
   document_id: string; name: string; format: "pdf" | "xlsx" | "docx" | "text"; base: VersionCard; target: VersionCard;
   relation: { type: "same" | "base_is_ancestor" | "target_is_ancestor" | "branch" | "unrelated"; path_numbers: number[]; common_ancestor?: string };
   path: VersionCard[]; identical_bytes: boolean; changes: Change[]; summary: { added: number; removed: number; modified: number; total: number; truncated: boolean };
-  limits: string[]; note: string | null; signature?: { base: { status: string; validated: boolean }; target: { status: string; validated: boolean } };
+  limits: string[]; note: string | null; state?: "ready" | "building"; complete?: boolean; examined_cells?: number; message?: string;
+  categories?: Record<string, number>;
+  progress?: { base: string; target: string }; page?: { offset: number; limit: number; total: number }; signature?: { base: { status: string; validated: boolean }; target: { status: string; validated: boolean } };
   pages?: { base: { page: number; width: number; height: number }[]; target: { page: number; width: number; height: number }[] };
 };
-export const compareVersions = (documentId: string, base: string, target: string) =>
-  json<Comparison>(`/api/documents/${documentId}/compare?base=${base}&target=${target}`);
+export type CompareOptions = { offset?: number; limit?: number; kind?: string; category?: string; wait?: number };
+export const compareVersions = (documentId: string, base: string, target: string, o: CompareOptions = {}) =>
+  json<Comparison>(`/api/documents/${documentId}/compare?base=${base}&target=${target}&offset=${o.offset ?? 0}&limit=${o.limit ?? 500}&wait=${o.wait ?? 8}${o.kind ? `&kind=${o.kind}` : ""}${o.category ? `&category=${o.category}` : ""}`);
+export const getCompareMarks = (documentId: string, base: string, target: string, sheet: string, r1: number, r2: number, c1: number, c2: number) =>
+  json<{ marks: [number, number, "added" | "removed" | "modified"][] }>(`/api/documents/${documentId}/compare/marks?base=${base}&target=${target}&sheet=${encodeURIComponent(sheet)}&r1=${r1}&r2=${r2}&c1=${c1}&c2=${c2}`);
 
 export async function createWorkingCopy(documentId: string, versionId: string): Promise<{ version_id: string; note: string }> {
   return json(`/api/documents/${documentId}/versions/${versionId}/working-copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ acknowledge: true }) });
@@ -208,3 +215,20 @@ export async function createWorkingCopy(documentId: string, versionId: string): 
 
 export type HistoryVersion = VersionCard & { signature: { state: string; label: string; validated: boolean; structure: string } | null };
 export const getHistory = (documentId: string) => json<{ versions: HistoryVersion[] }>(`/api/documents/${documentId}/history`).then((r) => r.versions);
+
+export type SheetMetaSheet = { index: number; name: string; max_row: number; max_col: number; content_col?: number; cell_count: number; default_col?: number | null; default_row?: number | null;
+  merges: [number, number, number, number][]; cols: Record<string, number>; rows: Record<string, number>; images: SheetImage[]; freeze?: { rows: number; cols: number } | null;
+  zoom: number; hidden: boolean; protected: boolean };
+export type SheetMeta = { state: "ready"; total_cells: number; capability: { level: string; reasons: string[] }; styles: CellStyle[]; sheets: SheetMetaSheet[] };
+export type SheetBuild = { state: "building" | "failed" | "cancelled"; error?: string | null; elapsed_s?: number };
+/** [row, col, value, type, style index, editable, reason] */
+export type WindowCell = [number, number, string, string | null, number, number, string | null];
+export async function getSheetMeta(documentId: string, versionId: string, wait = 2): Promise<SheetMeta | SheetBuild> {
+  try { return await json<SheetMeta | SheetBuild>(`/api/documents/${documentId}/versions/${versionId}/sheet/meta?wait=${wait}`); }
+  catch (e) { if (e instanceof ApiError && e.status === 409) return { state: "failed", error: e.code }; throw e; }
+}
+export const getSheetWindow = (documentId: string, versionId: string, sheet: string, r1: number, r2: number, c1: number, c2: number) =>
+  json<{ state: string; cells: WindowCell[] }>(`/api/documents/${documentId}/versions/${versionId}/sheet/window?sheet=${encodeURIComponent(sheet)}&r1=${r1}&r2=${r2}&c1=${c1}&c2=${c2}`);
+export const getSheetCell = (documentId: string, versionId: string, sheet: string, row: number, col: number) =>
+  json<{ id: string; fp: string; v: string; t: string | null; e: boolean; r: string | null }>(`/api/documents/${documentId}/versions/${versionId}/sheet/cell?sheet=${encodeURIComponent(sheet)}&row=${row}&col=${col}`);
+export const cancelSheetIndex = (documentId: string, versionId: string) => json<{ cancelled: boolean }>(`/api/documents/${documentId}/versions/${versionId}/sheet/index`, { method: "DELETE" });

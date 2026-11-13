@@ -8,6 +8,7 @@ import { EditsTab } from "./Edits";
 import { SheetGrid } from "./SheetGrid";
 import { PageViewer } from "../components/PageViewer";
 import { SheetWorkspace } from "../components/SheetWorkspace";
+import { VirtualWorkbook } from "../components/VirtualWorkbook";
 import { SignatureStatus, WorkingCopyBanner } from "../components/SignaturePanel";
 
 const SOURCE_TEXT = ["txt", "text", "md", "markdown", "csv", "json", "xml", "rtf", "html", "htm"];
@@ -175,7 +176,10 @@ function decode(buffer: ArrayBuffer): string {
   catch { return new TextDecoder("windows-1252").decode(buffer); }
 }
 
-export function ExtractedPreview({ preview }: { preview: Preview }) {
+export function ExtractedPreview({ preview, documentId, versionId }: { preview: Preview; documentId?: string; versionId?: string }) {
+  if (preview.format === "xlsx" && preview.virtual && documentId && versionId) {
+    return <div className="grid-editor no-toolbar"><VirtualWorkbook documentId={documentId} versionId={versionId} readOnly label="Original workbook" testId="sheet-viewer" /></div>;
+  }
   if (preview.format === "docx") {
     const nodes: React.ReactNode[] = [];
     const blocks = preview.blocks ?? [];
@@ -265,7 +269,7 @@ function OriginalTab({ documentId, root, folderName: name, download, page }: { d
           : <div className="stage-note">Opening the original file…</div>)
           : sourceText ? <pre className="raw-source" aria-label="Exact original source text">{text ?? "Loading exact original source…"}</pre>
             : faithful ? <PageViewer title="Original document pages" fetchBytes={() => fetchRenderBytes(documentId, root.version_id).catch((e) => { setRenderFailed(true); throw e; })} note={preview?.render?.note} testId="docx-page-viewer" initialPage={page} />
-            : <>{preview?.format === "docx" ? <div className="extracted-banner"><Icon name="layers" size={14} /> {preview.render?.available === false ? "PAGE PREVIEW UNAVAILABLE" : "PAGE PREVIEW FAILED"} · SHOWING EXTRACTED TEXT, NOT THE ORIGINAL LAYOUT · DOWNLOAD EXACT FILE ABOVE</div> : null}<div className="extracted-banner"><Icon name="layers" size={14} /> EXTRACTED TEXT · NOT A NATIVE OFFICE RENDER · DOWNLOAD EXACT FILE ABOVE</div>{preview ? <ExtractedPreview preview={preview} /> : <p className="stage-note">{text ?? "Reading the file…"}</p>}</>}
+            : <>{preview?.format === "docx" ? <div className="extracted-banner"><Icon name="layers" size={14} /> {preview.render?.available === false ? "PAGE PREVIEW UNAVAILABLE" : "PAGE PREVIEW FAILED"} · SHOWING EXTRACTED TEXT, NOT THE ORIGINAL LAYOUT · DOWNLOAD EXACT FILE ABOVE</div> : null}<div className="extracted-banner"><Icon name="layers" size={14} /> EXTRACTED TEXT · NOT A NATIVE OFFICE RENDER · DOWNLOAD EXACT FILE ABOVE</div>{preview ? <ExtractedPreview preview={preview} documentId={documentId} versionId={root.version_id} /> : <p className="stage-note">{text ?? "Reading the file…"}</p>}</>}
       </div>
     </>
   );

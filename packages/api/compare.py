@@ -9,7 +9,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID
 
+import logging
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import JSONResponse
 
 from packages.api.auth import AuthenticatedIdentity, require_identity
 from packages.api.db_context import api_tenant_transaction
@@ -22,7 +24,6 @@ from packages.workers.pdf_edit import PdfEditUnavailable
 
 router = APIRouter(prefix="/api", tags=["compare"])
 TEXT_SUFFIXES = set(extraction.TEXT_EXTENSIONS) | {".json", ".csv"}
-XLSX_COMPARE_PAGES = 8          # 8 pages x 2000 targets = the first 16,000 cells (file order) of a very large workbook
 
 
 def lineage_classes(versions: list[dict[str, Any]], events: list[dict[str, Any]]) -> dict[str, str]:
@@ -89,35 +90,6 @@ def _snapshot_docx(request: Request, path: Path, name: str) -> dict[str, Any]:
             "media": details.get("media", [])}
 
 
-def _snapshot_xlsx(request: Request, path: Path, name: str) -> dict[str, Any]:
-    from packages.api.workspace import _all_targets_ex
-    # Deterministic window: both versions are read to the SAME depth, so a very large workbook is compared over the same cells on
-    # both sides (a time budget would cut each side at a different point and invent 'added' cells).
-    report, targets, incomplete = _all_targets_ex(request, path, name, pages=XLSX_COMPARE_PAGES)
-    if report.status != "inspected":
-        raise APIError(422, "compare_unreadable", "This version couldn't be read safely for comparison.")
-    layout = (report.details or {}).get("layout") or {}
-    styles = layout.get("styles", [])
-    layout_sheets = {item["name"]: item for item in layout.get("sheets", [])}
-    sheets: dict[str, dict[str, Any]] = {n: {"cells": {}, "styles": {}, "merges": [], "images": [], "cols": None, "rows": None} for n in (report.sheets or [])}
-    for t in targets:
-        sheet = sheets.setdefault(str(t["sheet"]), {"cells": {}, "styles": {}, "merges": [], "images": [], "cols": None, "rows": None})
-        value = t.get("value") or {}
-        raw = value.get("value")
-        kind = "formula" if str(t.get("reason") or "") in {"formula_cell", "array_formula"} else value.get("type")
-        sheet["cells"][str(t["cell"])] = {"v": "" if raw is None else str(raw), "t": kind}
-    for n, sheet in sheets.items():
-        lay = layout_sheets.get(n) or {}
-        for addr, idx in (lay.get("cells") or {}).items():
-            if isinstance(idx, int) and 0 <= idx < len(styles) and styles[idx]:
-                sheet["styles"][addr] = styles[idx]
-        sheet["merges"] = [list(m) for m in lay.get("merges", [])]
-        sheet["images"] = sorted(hashlib.sha256(str(i.get("src", "")).encode()).hexdigest()[:16] + f"@{(i.get('from') or {}).get('row')}:{(i.get('from') or {}).get('col')}"
-                                 for i in lay.get("images", []))
-        sheet["cols"] = lay.get("cols"); sheet["rows"] = lay.get("rows")
-    return {"sheets": sheets, "incomplete": incomplete}
-
-
 def _snapshot_text(source: bytes) -> dict[str, Any]:
     text, _ = extraction.decode_text(source)
     return {"lines": [{"t": line} for line in text.splitlines()[:50000]]}
@@ -148,8 +120,6 @@ def snapshot(request: Request, identity: AuthenticatedIdentity, document_id: UUI
             result = ("pdf", _snapshot_pdf(request, path))
         elif suffix == ".docx":
             result = ("docx", _snapshot_docx(request, path, name))
-        elif suffix == ".xlsx":
-            result = ("xlsx", _snapshot_xlsx(request, path, name))
         elif suffix in TEXT_SUFFIXES:
             result = ("text", _snapshot_text(source))
         else:
@@ -191,9 +161,65 @@ def load_family(request: Request, identity: AuthenticatedIdentity, document_id: 
     return versions, events, {"filename": str(original["filename"] if original else document["filename"])}
 
 
+def _page(result: dict[str, Any], offset: int, limit: int, kind: str | None = None, category: str | None = None) -> dict[str, Any]:
+    """A page of the (optionally filtered) change list. `summary` always describes the WHOLE comparison, never just the page."""
+    changes = result["changes"]
+    categories: dict[str, int] = {}
+    for c in changes:
+        categories[c["category"]] = categories.get(c["category"], 0) + 1
+    if kind or category:
+        changes = [c for c in changes if (not kind or c["kind"] == kind) and (not category or c["category"] == category)]
+    return {**result, "changes": changes[offset:offset + limit], "categories": categories, "page": {"offset": offset, "limit": limit, "total": len(changes)}}
+
+
+def _xlsx_comparison(request: Request, identity: AuthenticatedIdentity, doc: UUID, vb: UUID, vt: UUID, rows: dict[str, dict[str, Any]], wait: float):
+    """COMPLETE comparison of two workbook versions from their windowed indexes, or a `building` state (never a partial result)."""
+    import time
+    from packages.api.sheet_index import ensure_index, load_meta, open_sheet
+    deadline = time.monotonic() + wait
+    while True:
+        sb, dir_b, job_b = ensure_index(request, identity, doc, vb, wait=0.0)
+        st, dir_t, job_t = ensure_index(request, identity, doc, vt, wait=0.0)
+        if sb == "ready" and st == "ready":
+            break
+        failed = [x for x in (job_b, job_t) if x is not None and x.state in ("failed", "cancelled")]
+        if failed:
+            raise APIError(422 if failed[0].state == "failed" else 409, "compare_unavailable",
+                           "This workbook could not be prepared for comparison." if failed[0].state == "failed" else "The comparison was cancelled.")
+        if time.monotonic() >= deadline:
+            return JSONResponse({"state": "building", "complete": False, "progress": {"base": sb, "target": st},
+                                 "message": "Preparing both workbooks for a complete comparison…"}, status_code=202)
+        time.sleep(0.1)
+    cache: dict = request.app.state.__dict__.setdefault("compare_results", {})
+    key = (str(identity.tenant_id), str(rows[str(vb)]["sha256"]), str(rows[str(vt)]["sha256"]))
+    if key not in cache:
+        started = time.monotonic()
+        meta_b, meta_t = load_meta(dir_b), load_meta(dir_t)
+        result = engine.diff_xlsx_indexed(meta_b, meta_t, lambda i: open_sheet(dir_b, i), lambda i: open_sheet(dir_t, i))
+        if len(cache) > 6:
+            cache.clear()
+        cache[key] = result
+        _audit_compare(request, identity, doc, vb, vt, result, time.monotonic() - started)
+    return cache[key]
+
+
+def _audit_compare(request: Request, identity: AuthenticatedIdentity, doc: UUID, vb: UUID, vt: UUID, result: dict[str, Any], seconds: float) -> None:
+    """One audit record per completed large comparison (who compared which versions, how much was examined, the outcome)."""
+    from packages.audit.chain import append_event
+    try:
+        with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
+            append_event(connection=connection, actor_id=identity.subject, action="document.compare_completed", subject=str(doc),
+                         payload={"document_id": str(doc), "base_version_id": str(vb), "target_version_id": str(vt), "outcome": "COMPLETE" if result.get("complete", True) else "PARTIAL",
+                                  "examined_cells": result.get("examined_cells"), "changes": result["summary"]["total"], "seconds": round(seconds, 1)})
+    except Exception:  # noqa: BLE001 - the audit write must not break reading a comparison; it is logged
+        logging.getLogger("idw.api").error("compare_audit_failed")
+
+
 @router.get("/documents/{document_id}/compare")
 def compare_versions(document_id: str, request: Request, base: str = Query(), target: str = Query(),
-                     identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, Any]:
+                     offset: int = Query(default=0, ge=0), limit: int = Query(default=5000, ge=1, le=5000), wait: float = Query(default=20.0, ge=0, le=60),
+                     kind: str | None = Query(default=None, pattern="^(added|removed|modified)$"), category: str | None = Query(default=None, max_length=20),
+                     identity: AuthenticatedIdentity = Depends(require_identity)) -> Any:
     try:
         doc, vb, vt = UUID(document_id), UUID(base), UUID(target)
     except ValueError:
@@ -215,26 +241,53 @@ def compare_versions(document_id: str, request: Request, base: str = Query(), ta
     path_cards = [card(v) for v in rel["path"]]
     result: dict[str, Any] = {"document_id": document_id, "name": meta["filename"], "base": card(str(vb)), "target": card(str(vt)),
                               "relation": {**rel, "path_numbers": [numbers[v] for v in rel["path"]]}, "path": path_cards}
+    same_file = str(by_id[str(vb)]["sha256"]) == str(by_id[str(vt)]["sha256"])
+    result["identical_bytes"] = same_file
+    suffix = PurePosixPath(meta["filename"]).suffix.lower()
+    if same_file:
+        fmt = "xlsx" if suffix == ".xlsx" else "pdf" if suffix == ".pdf" else "docx" if suffix == ".docx" else "text"
+        return {**result, "format": fmt, "changes": [], "summary": engine._summary([], False), "limits": [], "complete": True, "page": {"offset": 0, "limit": limit, "total": 0},
+                "note": "These two versions are the same file; there is nothing to compare."}
+    if suffix == ".xlsx":
+        outcome = _xlsx_comparison(request, identity, doc, vb, vt, by_id, wait)
+        if isinstance(outcome, JSONResponse):
+            return outcome
+        note = None if outcome["changes"] else "The files differ at the byte level, but no differences were found in the content that is compared."
+        return {**result, "format": "xlsx", **_page(outcome, offset, limit, kind, category), "note": note, "state": "ready"}
     vbase, source_b = _source_version(request, identity, doc, vb)
     vtarget, source_t = _source_version(request, identity, doc, vt)
-    result["identical_bytes"] = hashlib.sha256(source_b).hexdigest() == hashlib.sha256(source_t).hexdigest()
     fmt_b, snap_b = snapshot(request, identity, doc, vbase, source_b, meta["filename"])
-    if result["identical_bytes"]:
-        return {**result, "format": fmt_b, "changes": [], "summary": engine._summary([], False), "limits": [],
-                "note": "These two versions are the same file; there is nothing to compare."}
     fmt_t, snap_t = snapshot(request, identity, doc, vtarget, source_t, meta["filename"])
     differ = diff_lines if fmt_b == "text" else engine.DIFFERS[fmt_b]
     diff = differ(snap_b, snap_t)
-    if snap_b.get("incomplete") or snap_t.get("incomplete"):
-        diff["limits"] = [*diff["limits"], f"This workbook is very large: only its first {XLSX_COMPARE_PAGES * 2000:,} cells (in file order) were compared, the same cells on both sides. "
-                                           "Changes beyond that point are NOT reported."]
-        diff["summary"] = {**diff["summary"], "incomplete": True}
     note = None if diff["changes"] else "The files differ at the byte level, but no differences were found in the content that is compared."
     if fmt_b == "pdf":
         result["signature"] = {"base": _sig(source_b), "target": _sig(source_t)}
         result["pages"] = {"base": [{"page": p["page"], "width": p["width"], "height": p["height"]} for p in snap_b["pages"]],
                            "target": [{"page": p["page"], "width": p["width"], "height": p["height"]} for p in snap_t["pages"]]}
-    return {**result, "format": fmt_b, **diff, "note": note}
+    return {**result, "format": fmt_b, **_page(diff, offset, limit, kind, category), "note": note, "state": "ready"}
+
+
+@router.get("/documents/{document_id}/compare/marks")
+def compare_marks(document_id: str, request: Request, base: str = Query(), target: str = Query(), sheet: str = Query(max_length=200),
+                  r1: int = Query(ge=1), r2: int = Query(ge=1), c1: int = Query(ge=1), c2: int = Query(ge=1),
+                  identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, Any]:
+    """Changed cells inside a window of a completed XLSX comparison, for highlighting in the virtual viewer."""
+    try:
+        doc, vb, vt = UUID(document_id), UUID(base), UUID(target)
+    except ValueError:
+        raise APIError(404, "not_found", "The requested version was not found.") from None
+    versions, _events, _meta = load_family(request, identity, doc)
+    by_id = {str(v["version_id"]): v for v in versions}
+    if str(vb) not in by_id or str(vt) not in by_id:
+        raise APIError(404, "not_found", "The requested version was not found.")
+    cache = request.app.state.__dict__.get("compare_results", {})
+    key = (str(identity.tenant_id), str(by_id[str(vb)]["sha256"]), str(by_id[str(vt)]["sha256"]))
+    if key not in cache:
+        raise APIError(409, "comparison_not_ready", "Run the comparison first.")
+    marks = [[c["rc"][0], c["rc"][1], c["kind"]] for c in cache[key]["changes"]
+             if c.get("rc") and c["location"].get("sheet") == sheet and r1 <= c["rc"][0] <= r2 and c1 <= c["rc"][1] <= c2]
+    return {"marks": marks}
 
 
 def _sig(data: bytes) -> dict[str, Any]:
@@ -256,7 +309,7 @@ def changes_from_parent(document_id: str, version_id: str, request: Request,
         raise APIError(404, "not_found", "The requested version was not found.")
     if not item["parent_version_id"]:
         raise APIError(422, "no_parent", "The original has no earlier version to compare with.")
-    return compare_versions(document_id, request, base=str(item["parent_version_id"]), target=str(ver), identity=identity)
+    return compare_versions(document_id, request, base=str(item["parent_version_id"]), target=str(ver), offset=0, limit=5000, wait=20.0, kind=None, category=None, identity=identity)
 
 
 @router.get("/documents/{document_id}/history")

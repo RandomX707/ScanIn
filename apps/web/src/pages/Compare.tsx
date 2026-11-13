@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "./Shell";
 import {
-  ApiError, compareVersions, fetchRenderBytes, fetchVersionFile, folderName, getPreview, humanDate, size,
-  type Change, type Comparison, type Folder, type Preview, type VersionCard,
+  ApiError, cancelSheetIndex, compareVersions, fetchRenderBytes, fetchVersionFile, folderName, humanDate, size,
+  type Change, type Comparison, type Folder, type VersionCard,
 } from "../lib/api";
 import { PageViewer, type Highlight } from "../components/PageViewer";
-import { SheetWorkspace } from "../components/SheetWorkspace";
-import type { CellMark } from "./SheetGrid";
+import { VirtualWorkbook } from "../components/VirtualWorkbook";
 import { wordDiff, type Piece } from "../lib/textdiff";
 
 type Props = {
@@ -78,31 +77,45 @@ export function ComparePage({ folder, baseId, targetId, onChange, onHistory, onF
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<"changes" | "all">("all");
   const [filter, setFilter] = useState<string>("all");
-  const [current, setCurrent] = useState(0);
-  const [previews, setPreviews] = useState<{ base: Preview; target: Preview } | null>(null);
+  const [offset, setOffset] = useState(0);                         // first change of the page being shown
+  const [current, setCurrent] = useState(0);                       // index within the page
+  const [progress, setProgress] = useState<Comparison | null>(null);   // set while workbooks are being prepared for a complete comparison
+  const [cancelled, setCancelled] = useState(false);
   const family = folder?.versions ?? [];
+  const isSheet = family.length > 0 && /\.xlsx$/i.test(folder?.name ?? "");
+  const PAGE = isSheet ? 500 : 5000;
+
+  // a different pair of versions starts over
+  useEffect(() => { setCmp(null); setError(null); setOffset(0); setCurrent(0); setProgress(null); setCancelled(false); }, [documentId, baseId, targetId, filter]);
 
   useEffect(() => {
-    if (!documentId) return;
-    let live = true;
-    setCmp(null); setError(null); setCurrent(0); setPreviews(null);
-    compareVersions(documentId, baseId, targetId)
-      .then((c) => { if (live) setCmp(c); })
+    if (!documentId || cancelled) return;
+    let live = true; let timer: number | undefined;
+    const kind = ["added", "removed", "modified"].includes(filter) ? filter : undefined;
+    const category = filter !== "all" && !kind ? filter : undefined;
+    const run = () => compareVersions(documentId, baseId, targetId, { offset, limit: PAGE, kind, category, wait: 6 })
+      .then((c) => {
+        if (!live) return;
+        if (c.state === "building") { setProgress(c); timer = window.setTimeout(run, 1200); return; }
+        setProgress(null); setCmp(c);
+      })
       .catch((e) => { if (live) { const m = e instanceof ApiError ? e.message : "The comparison could not be made."; setError(m); notify(m, true); } });
-    return () => { live = false; };
-  }, [documentId, baseId, targetId, notify]);
+    void run();
+    return () => { live = false; window.clearTimeout(timer); };
+  }, [documentId, baseId, targetId, filter, offset, notify, cancelled, PAGE]);
 
-  useEffect(() => {
-    if (!cmp || cmp.format !== "xlsx") return;
-    let live = true;
-    Promise.all([getPreview(documentId, baseId), getPreview(documentId, targetId)]).then(([b, t]) => { if (live) setPreviews({ base: b, target: t }); }).catch(() => undefined);
-    return () => { live = false; };
-  }, [cmp, documentId, baseId, targetId]);
-
-  const visible = useMemo(() => (cmp?.changes ?? []).filter((c) => filter === "all" || c.category === filter || c.kind === filter), [cmp, filter]);
+  const visible = cmp?.changes ?? [];
+  const total = cmp?.page?.total ?? visible.length;
+  const globalIndex = offset + Math.min(current, Math.max(0, visible.length - 1));
   const active = visible[Math.min(current, Math.max(0, visible.length - 1))] ?? null;
-  const go = useCallback((delta: number) => { if (visible.length) setCurrent((i) => (i + delta + visible.length) % visible.length); }, [visible.length]);
-  useEffect(() => { setCurrent(0); }, [filter]);
+  const go = useCallback((delta: number) => {
+    if (!total) return;
+    const next = (globalIndex + delta + total) % total;
+    const pageStart = Math.floor(next / PAGE) * PAGE;
+    if (pageStart !== offset) { setOffset(pageStart); setCmp(null); }
+    setCurrent(next - pageStart);
+  }, [total, globalIndex, offset, PAGE]);
+  const cancelPreparing = () => { setCancelled(true); setProgress(null); void Promise.allSettled([cancelSheetIndex(documentId, baseId), cancelSheetIndex(documentId, targetId)]); };
 
   const highlights = useMemo(() => {
     const base: Highlight[] = [], target: Highlight[] = [];
@@ -115,22 +128,14 @@ export function ComparePage({ folder, baseId, targetId, onChange, onHistory, onF
   }, [visible]);
   const changedPages = useMemo(() => Array.from(new Set(visible.map((c) => c.page).filter((p): p is number => !!p))).sort((a, b) => a - b), [visible]);
 
-  const marks = useMemo(() => {
-    const base: Record<string, Record<string, CellMark>> = {}, target: Record<string, Record<string, CellMark>> = {};
-    for (const c of visible) {
-      const { sheet, cell } = c.location; if (!sheet || !cell) continue;
-      if (c.kind !== "added") (base[sheet] ??= {})[cell] = c.kind === "removed" ? "del" : "mod";
-      if (c.kind !== "removed") (target[sheet] ??= {})[cell] = c.kind === "added" ? "add" : "mod";
-    }
-    return { base, target };
-  }, [visible]);
-  const focus = useMemo(() => (active?.location.sheet && active.location.cell ? { sheet: active.location.sheet, cell: active.location.cell, nonce: current } : null), [active, current]);
+  const focus = useMemo(() => (active?.location.sheet && active.location.cell ? { sheet: active.location.sheet, cell: active.location.cell, nonce: globalIndex + 1 } : null), [active, globalIndex]);
 
   if (!folder) return <main className="main"><div className="empty"><h3>Loading…</h3></div></main>;
   const numberOf = (id: string) => family.find((v) => v.version_id === id)?.number ?? 0;
+  const numberOfId = numberOf;
   const label = (v: Folder["versions"][number]) => `v${v.number} · ${v.kind === "original" ? "Original" : `from v${v.parent_number ?? "?"}`}`;
   const counts = cmp?.summary;
-  const categories = Array.from(new Set((cmp?.changes ?? []).map((c) => c.category)));
+  const categories = Object.keys(cmp?.categories ?? {});
 
   return (
     <main className="main compare-page" data-testid="compare-page">
@@ -148,7 +153,14 @@ export function ComparePage({ folder, baseId, targetId, onChange, onHistory, onF
             disabled={!family.find((v) => v.version_id === targetId)?.parent_number}>Compare with parent</button>
         </div>
       </section>
-      {error ? <div className="empty"><h3>Comparison unavailable</h3><p>{error}</p></div> : !cmp ? <p className="stage-note">Comparing the saved files…</p> : (
+      {error ? <div className="empty"><h3>Comparison unavailable</h3><p>{error}</p></div> : !cmp ? cancelled ? <div className="viewer-note" role="status">The comparison was cancelled. Nothing was changed.</div>
+        : progress ? (
+          <div className="compare-progress viewer-note" role="status" data-testid="compare-progress">
+            <b>Preparing both workbooks for a complete comparison…</b>
+            <span>Version {numberOfId(baseId)}: {progress.progress?.base ?? "…"} · Version {numberOfId(targetId)}: {progress.progress?.target ?? "…"}. Large workbooks are read once, then compared cell by cell; no partial result is shown.</span>
+            <button className="btn outline small" onClick={cancelPreparing}>Cancel</button>
+          </div>
+        ) : <p className="stage-note">Comparing the saved files…</p> : (
         <>
           <section className="compare-audit" aria-label="Version lineage and audit details">
             <p className="relation" data-testid="relation">{relationText(cmp)}</p>
@@ -164,22 +176,30 @@ export function ComparePage({ folder, baseId, targetId, onChange, onHistory, onF
               <button className={`pill sum-del ${filter === "removed" ? "on" : ""}`} onClick={() => setFilter(filter === "removed" ? "all" : "removed")}>−{counts?.removed} removed</button>
               <button className={`pill sum-mod ${filter === "modified" ? "on" : ""}`} onClick={() => setFilter(filter === "modified" ? "all" : "modified")}>~{counts?.modified} modified</button>
               {categories.length > 1 ? categories.map((c) => <button key={c} className={`pill ${filter === c ? "on" : ""}`} onClick={() => setFilter(filter === c ? "all" : c)}>{CATEGORY_LABEL[c]}</button>) : null}
-              {counts?.truncated ? <span className="stage-note">Showing the first {counts.total} changes.</span> : null}
+              {cmp.complete === false ? <span className="pill sum-del" data-testid="completeness">PARTIAL — not every change is listed</span>
+                : <span className="pill sum-add" data-testid="completeness">COMPLETE{cmp.examined_cells ? ` · ${cmp.examined_cells.toLocaleString()} cells examined` : ""}</span>}
             </div>
             <div className="compare-nav">
               <div className="seg" role="group" aria-label="Content to show">
                 <button className={mode === "changes" ? "active" : ""} onClick={() => setMode("changes")}>Changed content</button>
                 <button className={mode === "all" ? "active" : ""} onClick={() => setMode("all")}>Show all content</button>
               </div>
-              <button className="btn outline small" aria-label="Previous change" disabled={!visible.length} onClick={() => go(-1)}>‹ Previous</button>
-              <span className="stage-note" aria-live="polite">{visible.length ? `Change ${Math.min(current, visible.length - 1) + 1} of ${visible.length}` : "No changes"}</span>
-              <button className="btn dark small" aria-label="Next change" disabled={!visible.length} onClick={() => go(1)}>Next ›</button>
+              <button className="btn outline small" aria-label="Previous change" disabled={!total} onClick={() => go(-1)}>‹ Previous</button>
+              <span className="stage-note" aria-live="polite">{total ? `Change ${globalIndex + 1} of ${total.toLocaleString()}` : "No changes"}</span>
+              <button className="btn dark small" aria-label="Next change" disabled={!total} onClick={() => go(1)}>Next ›</button>
             </div>
           </section>
           {cmp.note ? <div className="source-banner"><Icon name="shield" size={14} /> <span>{cmp.note}</span></div> : null}
           <div className={`compare-body ${cmp.format}`}>
             <aside className="change-list" aria-label="Changes">
               {visible.length ? visible.map((c, i) => <ChangeRow key={c.id} change={c} active={i === current} onPick={() => setCurrent(i)} />) : <p className="stage-note" style={{ padding: 14 }}>{cmp.summary.total ? "No changes match this filter." : "No differences found in the compared content."}</p>}
+              {total > PAGE ? (
+                <div className="list-pager" data-testid="change-pager">
+                  <button className="btn outline small" disabled={offset === 0} onClick={() => { setOffset(Math.max(0, offset - PAGE)); setCurrent(0); setCmp(null); }}>‹ Earlier</button>
+                  <span className="stage-note">{(offset + 1).toLocaleString()}–{Math.min(offset + PAGE, total).toLocaleString()} of {total.toLocaleString()}</span>
+                  <button className="btn outline small" disabled={offset + PAGE >= total} onClick={() => { setOffset(offset + PAGE); setCurrent(0); setCmp(null); }}>Later ›</button>
+                </div>
+              ) : null}
               <div className="limits">{cmp.limits.map((l) => <p key={l} className="stage-note">{l}</p>)}</div>
             </aside>
             <div className="compare-visual">
@@ -192,12 +212,10 @@ export function ComparePage({ folder, baseId, targetId, onChange, onHistory, onF
                 </div>
               ) : null}
               {cmp.format === "xlsx" && mode === "all" ? (
-                previews?.base.sheets && previews.target.sheets ? (
-                  <div className="side-by-side">
-                    <div><div className="viewer-heading">v{cmp.base.number} · base</div><SheetWorkspace sheets={previews.base.sheets} styles={previews.base.styles ?? []} readOnly marks={marks.base} focus={focus} label="Base workbook" testId="sheet-base" /></div>
-                    <div><div className="viewer-heading">v{cmp.target.number} · target</div><SheetWorkspace sheets={previews.target.sheets} styles={previews.target.styles ?? []} readOnly marks={marks.target} focus={focus} label="Target workbook" testId="sheet-target" /></div>
-                  </div>
-                ) : <p className="stage-note">Opening both workbooks…</p>
+                <div className="side-by-side">
+                  <div><div className="viewer-heading">v{cmp.base.number} · base</div><VirtualWorkbook key={`b-${baseId}`} documentId={documentId} versionId={baseId} readOnly compare={{ base: baseId, target: targetId, side: "base" }} focus={focus} label="Base workbook" testId="sheet-base" /></div>
+                  <div><div className="viewer-heading">v{cmp.target.number} · target</div><VirtualWorkbook key={`t-${targetId}`} documentId={documentId} versionId={targetId} readOnly compare={{ base: baseId, target: targetId, side: "target" }} focus={focus} label="Target workbook" testId="sheet-target" /></div>
+                </div>
               ) : null}
               {cmp.format === "docx" && mode === "all" ? (
                 <div className="side-by-side">

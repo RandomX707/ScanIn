@@ -22,6 +22,8 @@ from packages.api.workspace import router as workspace_router
 from packages.api.render import router as render_router
 from packages.api.compare import router as compare_router
 from packages.api.working_copy import router as working_copy_router
+from packages.api.sheet_index import SheetIndexManager, router as sheet_index_router
+from packages.workers.xlsx_index import RestrictedXlsxIndexer
 from packages.workers.sigcheck import SignatureValidator
 from packages.workers.office_render import SandboxedOfficeRenderer
 from packages.api.logging_config import RequestLogMiddleware
@@ -68,6 +70,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.restricted_parser = RestrictedParser(Path(__file__).resolve().parents[2])
     app.state.office_renderer = SandboxedOfficeRenderer()
     app.state.signature_validator = SignatureValidator()
+    app.state.sheet_index = SheetIndexManager(RestrictedXlsxIndexer(Path(__file__).resolve().parents[2]))
     app.state.pdf_editor = RestrictedPdfEditor(Path(__file__).resolve().parents[2])
     app.state.ingestion_pipeline = IngestionOrchestrator(
         app.state.document_storage,
@@ -80,6 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(render_router)
     app.include_router(compare_router)
     app.include_router(working_copy_router)
+    app.include_router(sheet_index_router)
     app.include_router(archives_router)
     app.include_router(local_demo_router)
     app.add_middleware(RequestLogMiddleware)

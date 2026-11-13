@@ -8,6 +8,7 @@ import site
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -193,7 +194,7 @@ class RestrictedSubprocess:
     def run(self, argv: Sequence[str], *, input_path: str | Path | None = None,
             timeout_seconds: int = 30, read_paths: Sequence[str | Path] = (),
             write_paths: Sequence[str | Path] = (), executable_paths: Sequence[str | Path] = (),
-            environment_overrides: dict[str, str] | None = None) -> RestrictedResult:
+            environment_overrides: dict[str, str] | None = None, cancel: "threading.Event | None" = None) -> RestrictedResult:
         if timeout_seconds < 1:
             raise ValueError("timeout_must_be_positive")
         plan = self.build_command(argv, input_path=input_path, read_paths=read_paths,
@@ -215,12 +216,12 @@ class RestrictedSubprocess:
                 raise
 
         try:
-            return self._run_bounded(command, env, timeout_seconds)
+            return self._run_bounded(command, env, timeout_seconds, cancel)
         finally:
             if profile_file is not None:
                 Path(profile_file.name).unlink(missing_ok=True)
 
-    def _run_bounded(self, command: list[str], env: dict[str, str], timeout_seconds: int) -> RestrictedResult:
+    def _run_bounded(self, command: list[str], env: dict[str, str], timeout_seconds: int, cancel: "threading.Event | None" = None) -> RestrictedResult:
         import resource
 
         def apply_limits() -> None:
@@ -244,6 +245,8 @@ class RestrictedSubprocess:
         next_memory_check = 0.0
         try:
             while True:
+                if cancel is not None and cancel.is_set():
+                    raise RestrictedWorkerFailed("worker_cancelled")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RestrictedWorkerFailed("worker_timeout")

@@ -8,11 +8,12 @@ Change record: {id, kind: added|removed|modified, category: text|value|formula|f
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from difflib import SequenceMatcher
 from typing import Any
 
-MAX_CHANGES = 3000
+MAX_CHANGES = 200_000          # safety bound on memory; if ever exceeded the result says so (complete=False) instead of pretending
 
 
 def _norm(text: str) -> str:
@@ -57,19 +58,23 @@ def _align(base: list[str], target: list[str]) -> list[tuple[str, int | None, in
     return out
 
 
-def _summary(changes: list[dict[str, Any]], truncated: bool) -> dict[str, Any]:
+def _summary(changes: list[dict[str, Any]], truncated: bool, total: int | None = None) -> dict[str, Any]:
     counts = {"added": 0, "removed": 0, "modified": 0}
     for c in changes:
         counts[c["kind"]] += 1
-    return {**counts, "total": len(changes), "truncated": truncated}
+    return {**counts, "total": len(changes) if total is None else total, "truncated": truncated}
 
 
 def _finish(changes: list[dict[str, Any]], notes: list[str]) -> dict[str, Any]:
-    truncated = len(changes) > MAX_CHANGES
+    """All changes are kept (and later paginated by the API). Only a pathological result beyond the safety bound is cut, and then
+    `complete` is False and the counts say so."""
+    total = len(changes)
+    cut = total > MAX_CHANGES
+    summary = _summary(changes, cut, total)          # counts over EVERYTHING found, before any cut
     changes = changes[:MAX_CHANGES]
     for index, change in enumerate(changes):
         change["id"] = f"c{index + 1}"
-    return {"changes": changes, "summary": _summary(changes, truncated), "limits": notes}
+    return {"changes": changes, "summary": summary, "limits": notes, "complete": not cut}
 
 
 # ------------------------------------------------------------------ PDF
@@ -223,6 +228,93 @@ def diff_docx(base: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
     notes = ["Compared paragraph and table text, paragraph/run formatting and embedded images (by content hash). "
              "The position of images and shapes on the page is not compared; use the page view to inspect layout."]
     return _finish(changes, notes)
+
+
+# ------------------------------------------------------------------ XLSX (complete, streamed from the windowed indexes)
+FORMULA_REASONS = {"formula_cell", "array_formula"}
+
+
+def _ordered_cells(conn, ) -> Any:
+    return conn.execute("SELECT r,c,v,t,s,rs FROM cells ORDER BY r,c")
+
+
+def _addr(r: int, c: int) -> str:
+    col = ""
+    n = c
+    while n:
+        n, rem = divmod(n - 1, 26)
+        col = chr(65 + rem) + col
+    return f"{col}{r}"
+
+
+def diff_xlsx_indexed(meta_a: dict[str, Any], meta_b: dict[str, Any], open_a, open_b) -> dict[str, Any]:
+    """Complete workbook comparison. `open_a(i)` / `open_b(i)` return a sqlite connection of the sheet index. Cells are walked as two
+    ordered streams (row, column), so every cell of both workbooks is examined exactly once and nothing is dropped or invented."""
+    styles_a, styles_b = meta_a.get("styles", []), meta_b.get("styles", [])
+    sheets_a = {s["name"]: s for s in meta_a["sheets"]}
+    sheets_b = {s["name"]: s for s in meta_b["sheets"]}
+    changes: list[dict[str, Any]] = []
+    examined = 0
+    for name in list(sheets_a) + [n for n in sheets_b if n not in sheets_a]:
+        if name not in sheets_b:
+            changes.append({"kind": "removed", "category": "structure", "location": {"sheet": name}, "label": f"Sheet {name}", "before": "worksheet present", "after": None})
+            continue
+        if name not in sheets_a:
+            changes.append({"kind": "added", "category": "structure", "location": {"sheet": name}, "label": f"Sheet {name}", "before": None, "after": "worksheet present"})
+            continue
+        a, b = sheets_a[name], sheets_b[name]
+        ca_conn, cb_conn = open_a(a["index"]), open_b(b["index"])
+        try:
+            ia, ib = iter(_ordered_cells(ca_conn)), iter(_ordered_cells(cb_conn))
+            ra, rb = next(ia, None), next(ib, None)
+            while ra is not None or rb is not None:
+                key_a = (ra[0], ra[1]) if ra is not None else None
+                key_b = (rb[0], rb[1]) if rb is not None else None
+                if key_b is None or (key_a is not None and key_a < key_b):
+                    cell_a, cell_b, rc = ra, None, key_a
+                    ra = next(ia, None)
+                elif key_a is None or key_b < key_a:
+                    cell_a, cell_b, rc = None, rb, key_b
+                    rb = next(ib, None)
+                else:
+                    cell_a, cell_b, rc = ra, rb, key_a
+                    ra, rb = next(ia, None), next(ib, None)
+                examined += 1
+                va = cell_a[2] if cell_a else ""
+                vb = cell_b[2] if cell_b else ""
+                ta = ("formula" if (cell_a and cell_a[5] in FORMULA_REASONS) else (cell_a[3] if cell_a else None))
+                tb = ("formula" if (cell_b and cell_b[5] in FORMULA_REASONS) else (cell_b[3] if cell_b else None))
+                is_formula = ta == "formula" or tb == "formula"
+                address = _addr(*rc)
+                if (va, ta) != (vb, tb) and not (va == vb and not is_formula and {ta, tb} <= {"null", None, "string"}):
+                    kind = "added" if va in ("", None) and ta in (None, "null") else "removed" if vb in ("", None) and tb in (None, "null") else "modified"
+                    changes.append({"kind": kind, "category": "formula" if is_formula else "value", "location": {"sheet": name, "cell": address}, "rc": list(rc),
+                                    "label": f"{name}!{address}", "before": va if cell_a else None, "after": vb if cell_b else None})
+                sa = styles_a[cell_a[4]] if cell_a and cell_a[4] is not None and 0 <= cell_a[4] < len(styles_a) else None
+                sb = styles_b[cell_b[4]] if cell_b and cell_b[4] is not None and 0 <= cell_b[4] < len(styles_b) else None
+                if sa != sb:
+                    description = _style_diff(sa, sb)
+                    if description:
+                        changes.append({"kind": "modified", "category": "format", "location": {"sheet": name, "cell": address}, "rc": list(rc),
+                                        "label": f"{name}!{address}", "before": None, "after": None, "detail": description})
+        finally:
+            ca_conn.close(); cb_conn.close()
+        ma, mb = {tuple(x) for x in a.get("merges", [])}, {tuple(x) for x in b.get("merges", [])}
+        for rng in sorted(ma - mb):
+            changes.append({"kind": "removed", "category": "structure", "location": {"sheet": name}, "label": f"{name} merged range", "before": _rng(rng), "after": None})
+        for rng in sorted(mb - ma):
+            changes.append({"kind": "added", "category": "structure", "location": {"sheet": name}, "label": f"{name} merged range", "before": None, "after": _rng(rng)})
+        pics = lambda m: sorted(f"{hashlib.sha256(str(i.get('src', '')).encode()).hexdigest()[:16]}@{(i.get('from') or {}).get('row')}:{(i.get('from') or {}).get('col')}" for i in m.get("images", []))  # noqa: E731
+        if pics(a) != pics(b):
+            changes.append({"kind": "modified", "category": "image", "location": {"sheet": name}, "label": f"{name} pictures",
+                            "before": f"{len(a.get('images', []))} picture(s)", "after": f"{len(b.get('images', []))} picture(s)"})
+        if a.get("cols") != b.get("cols") or a.get("rows") != b.get("rows") or a.get("freeze") != b.get("freeze") or bool(a.get("hidden")) != bool(b.get("hidden")):
+            changes.append({"kind": "modified", "category": "format", "location": {"sheet": name}, "label": f"{name} row/column sizes and panes",
+                            "before": None, "after": None, "detail": "column widths, row heights, frozen panes or visibility differ"})
+    result = _finish(changes, ["Compared every cell of every worksheet (values, formulas, resolved formatting), merged ranges, pictures, sizes and "
+                               "frozen panes. Calculated values of formulas are not recomputed."])
+    result["examined_cells"] = examined
+    return result
 
 
 DIFFERS = {"pdf": diff_pdf, "xlsx": diff_xlsx, "docx": diff_docx}

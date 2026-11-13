@@ -263,6 +263,42 @@ def save_version(document_id: str, version_id: str, payload: SaveRequest, reques
     return {**result, "version": version}
 
 
+def _col_letters(n: int) -> str:
+    out = ""
+    while n:
+        n, rem = divmod(n - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+def _index_grid(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID, max_rows: int = 500, max_cols: int = 40):
+    """(sheets in the grid shape the section builder uses, styles) for a LARGE workbook, read from its windowed index. The reading map
+    looks at the top of each sheet (like the classic preview did); the viewer, editor and comparison see all of it."""
+    from packages.api.sheet_index import ensure_index, load_meta, open_sheet
+    state, directory, _job = ensure_index(request, identity, document_id, version_id, wait=25.0)
+    if state != "ready":
+        return None
+    meta = load_meta(directory)
+    sheets = []
+    for item in [x for x in meta["sheets"] if not x.get("hidden")][:6]:
+        db = open_sheet(directory, int(item["index"]))
+        try:
+            found = db.execute("SELECT r,c,v,t,s,e,rs FROM cells WHERE r<=? AND c<=? ORDER BY r,c", (max_rows, max_cols)).fetchall()
+        finally:
+            db.close()
+        width = min(max((c for _, c, *_ in found), default=0), max_cols); height = min(max((r for r, *_ in found), default=0), max_rows)
+        grid = [[None] * width for _ in range(height)]
+        style_of: dict[str, int] = {}
+        for r, c, v, t, st, e, rs in found:
+            if st is not None and st >= 0:
+                style_of[f"{_col_letters(c)}{r}"] = st
+            if t is not None:
+                grid[r - 1][c - 1] = {"v": v, "t": t, "e": bool(e), "r": rs, "id": "", "fp": ""}
+        sheets.append({"name": item["name"], "rows": grid, "truncated": item["max_row"] > max_rows or item["max_col"] > max_cols,
+                       "layout": {"merges": [m for m in item["merges"] if m[0] <= max_rows and m[1] <= max_cols], "cells": style_of, "cols": {}, "rows": {}}})
+    return sheets, meta["styles"]
+
+
 def _version_text(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID) -> str:
     """Readable text of one immutable version (empty when it has none, e.g. scanned PDFs and images)."""
     cache: dict = request.app.state.__dict__.setdefault("chunk_text_cache", {})
@@ -276,6 +312,14 @@ def _version_text(request: Request, identity: AuthenticatedIdentity, document_id
     name = str(original["filename"] if original else version["filename"])
     suffix = PurePosixPath(name).suffix.lower()
     text = ""
+    if suffix == ".xlsx" and _is_large_workbook(source):
+        grid = _index_grid(request, identity, document_id, version_id)
+        if grid is not None:
+            targets = [{"sheet": sh["name"], "cell": f"{_col_letters(ci + 1)}{ri + 1}", "value": {"value": cell["v"]}}
+                       for sh in grid[0] for ri, row in enumerate(sh["rows"]) for ci, cell in enumerate(row) if cell and cell["v"] != ""]
+            text = extraction.xlsx_text(targets, [sh["name"] for sh in grid[0]])
+        cache[key] = text
+        return text
     if suffix in {".pdf", ".docx", ".xlsx", ".pptx"} and source.startswith((b"%PDF-", b"PK\x03\x04")):
         try:
             report = request.app.state.restricted_parser.inspect(
@@ -356,6 +400,13 @@ def _semantic_chunks(request: Request, identity: AuthenticatedIdentity, document
             outline = request.app.state.pdf_editor.outline(path)
             segmented = policy_sections.segment(outline)
             chunks = policy_sections.to_chunks(segmented) if segmented["sections"] else policy_sections.outline_chunks(outline)
+        elif suffix == ".xlsx" and _is_large_workbook(source):
+            grid = _index_grid(request, identity, document_id, version_id)
+            chunks = None
+            if grid is not None:
+                chunks = []
+                for sheet in grid[0]:
+                    chunks.extend(sheet_sections.sheet_chunks(sheet, grid[1]))
         elif suffix == ".xlsx":
             report, targets = _all_targets(request, path, name)
             if report.status == "inspected":
@@ -519,8 +570,35 @@ def _grid(targets: list[dict[str, object]], sheets: list[str]) -> list[dict[str,
     return result
 
 
+def _is_large_workbook(source: bytes) -> bool:
+    """Worksheet XML (uncompressed, from the zip directory only: nothing is decompressed) big enough that paging every cell is too slow."""
+    import zipfile
+    from packages.api.sheet_index import VIRTUAL_XML_BYTES
+    try:
+        with zipfile.ZipFile(io.BytesIO(source)) as z:
+            return sum(i.file_size for i in z.infolist() if i.filename.startswith("xl/worksheets/")) > VIRTUAL_XML_BYTES
+    except zipfile.BadZipFile:
+        return False
+
+
+def _virtual_xlsx_preview(request: Request, identity: AuthenticatedIdentity, document_id: UUID, version_id: UUID, done) -> dict[str, object]:
+    """Windowed workbook: metadata only here; the browser asks for cell windows. While the index is being built, say so (never partial)."""
+    from packages.api.sheet_index import ensure_index, load_meta
+    state, directory, job = ensure_index(request, identity, document_id, version_id, wait=1.5)
+    if state != "ready":
+        failed = state in ("failed", "cancelled")
+        return done("xlsx", "none", "This large workbook couldn't be prepared for viewing." if failed else "Preparing this large workbook…",
+                    sheets=[], styles=[], virtual={"state": state, "error": job.error if job else None})
+    meta = load_meta(directory)
+    capability = meta["capability"]
+    editable = capability["level"] == "editable"
+    reasons = list(capability.get("reasons") or [])
+    return done("xlsx", "grid" if editable else "none", None if editable else (cell_reason(reasons[0]) if reasons else file_reason(reasons, ".xlsx")),
+                sheets=[], styles=[], virtual={"state": "ready", "total_cells": meta["total_cells"], "sheets": [{"name": x["name"], "max_row": x["max_row"], "max_col": x["max_col"]} for x in meta["sheets"]]})
+
+
 @router.get("/documents/{document_id}/versions/{version_id}/preview")
-def version_preview(document_id: str, version_id: str, request: Request,
+def version_preview(document_id: str, version_id: str, request: Request, virtual: bool = Query(default=False),
                     identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
     """Render model of one version: Original-tab previews plus what the Edits tab may edit in place."""
     try:
@@ -557,6 +635,8 @@ def version_preview(document_id: str, version_id: str, request: Request,
             report = request.app.state.restricted_parser.inspect(path, filename=name)
             slides = (report.details or {}).get("slides", [])
             return done("pptx", "none", file_reason([], suffix), slides=slides)
+        if suffix == ".xlsx" and (virtual or _is_large_workbook(source)):
+            return _virtual_xlsx_preview(request, identity, parsed_document, parsed_version, done)
         if suffix in {".csv", ".xlsx"}:
             # A very large sheet costs seconds per page of targets: read what fits in the budget and say so (partial=True).
             report, targets, partial = _all_targets_ex(request, path, name, pages=10, budget_seconds=25.0)

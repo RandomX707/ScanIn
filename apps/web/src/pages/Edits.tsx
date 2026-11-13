@@ -33,11 +33,18 @@ export function EditsTab(props: EditsProps) {
   const dirty = body !== null;
   const bodyRef = useRef<SaveBody | null>(null);
 
+  const [reload, setReload] = useState(0);
   useEffect(() => {
     let live = true;
     getPreview(documentId, version.version_id).then((p) => { if (live) setPreview(p); }).catch(() => { if (live) notify("The editor could not be opened.", true); });
     return () => { live = false; };
-  }, [documentId, version.version_id, notify]);
+  }, [documentId, version.version_id, notify, reload]);
+  // A very large workbook is indexed once before it can be edited; check again until it is ready (the viewer shows progress).
+  useEffect(() => {
+    if (preview?.virtual?.state !== "building") return;
+    const t = window.setTimeout(() => setReload((n) => n + 1), 1500);
+    return () => window.clearTimeout(t);
+  }, [preview]);
 
   const onBody = useCallback((next: SaveBody | null) => {
     bodyRef.current = next; setBody(next); props.setDirty(next !== null);
@@ -77,6 +84,9 @@ export function EditsTab(props: EditsProps) {
   if (!preview) return <>{head}<p className="stage-note">Opening the editor…</p></>;
   const mode = preview.edit.mode;
   const workingCopy = preview.classification === "unsigned_working_copy";
+  if (mode === "none" && preview.virtual?.state === "building") {
+    return <>{head}<div className="viewer-note" role="status">Preparing this large workbook so it can be edited quickly…</div></>;
+  }
   if (mode === "none") {
     return (
       <>
@@ -106,7 +116,7 @@ export function EditsTab(props: EditsProps) {
       </div>
       {rich && <RichEditor key={resetKey} preview={preview} onBody={onBody} onReset={reset} />}
       {mode === "text" && !rich && <TextEditor key={resetKey} preview={preview} formatting={false} onBody={onBody} onReset={reset} />}
-      {mode === "grid" && <GridEditor key={resetKey} preview={preview} onBody={onBody} />}
+      {mode === "grid" && <GridEditor key={resetKey} preview={preview} onBody={onBody} documentId={documentId} versionId={version.version_id} />}
       {mode === "docx" && <DocxEditor key={resetKey} preview={preview} onBody={onBody} />}
       {mode === "pdf_text" && <PdfTextEditor key={resetKey} documentId={documentId} versionId={version.version_id} preview={preview} notify={notify}
         fetchBytes={async () => (await fetchVersionFile(documentId, version.version_id)).arrayBuffer()} onBody={onBody} />}
