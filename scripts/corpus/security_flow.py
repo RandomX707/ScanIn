@@ -1,16 +1,17 @@
 """Security checks for the new endpoints on the ISOLATED stack. Prints counts/status codes only."""
 from __future__ import annotations
-import hashlib, io, json, re, sys, urllib.error, urllib.request, zipfile
+import hashlib, io, json, os, re, sys, urllib.error, urllib.request, zipfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dev"))
-from iso_client import Client, token  # noqa: E402
+from iso_client import API, Client, token  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]; CORPUS = ROOT / "Policy Copies"
+OUT = Path(os.environ.get("CHANNEL360_RESULTS_DIR") or (ROOT / ".private/feature-results"))
 results = []
 def check(name, ok, detail=""):
     results.append((name, bool(ok), str(detail))); print(("PASS " if ok else "FAIL ") + name + (f" — {detail}" if detail else "")); return ok
 def raw(method, path, tok, body=None):
-    req = urllib.request.Request("http://127.0.0.1:8010" + path, data=body, method=method, headers=({"Authorization": f"Bearer {tok}"} if tok else {}) | ({"Content-Type": "application/json"} if body else {}))
+    req = urllib.request.Request(API + path, data=body, method=method, headers=({"Authorization": f"Bearer {tok}"} if tok else {}) | ({"Content-Type": "application/json"} if body else {}))
     try: return urllib.request.urlopen(req).status
     except urllib.error.HTTPError as e: return e.code
 
@@ -78,7 +79,8 @@ def main():
     check("render of a PDF is refused cleanly (415, not a crash)", a.call("GET", f"/api/documents/{reg['document_id']}/versions/{reg['version_id']}/render", raw=True)[0] == 415, "")
     check("compare of unrelated version ids is a clean 404", a.call("GET", f"/api/documents/{reg['document_id']}/compare?base={vd}&target={vd}")[0] == 404, "")
     failed = [r for r in results if not r[1]]
-    (ROOT / ".private/feature-results/security.json").write_text(json.dumps([{"check": n, "pass": ok} for n, ok, _ in results], indent=1))
+    OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / "security.json").write_text(json.dumps([{"check": n, "pass": ok} for n, ok, _ in results], indent=1))
     print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed"); sys.exit(1 if failed else 0)
 
 if __name__ == "__main__":

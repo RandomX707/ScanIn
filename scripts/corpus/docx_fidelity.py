@@ -1,7 +1,7 @@
 """Feature-C acceptance on the real Health Quote Format.docx: measured fidelity vs ground truth read from the DOCX XML,
 plus native edit -> save -> reopen -> re-render. Prints measurements only; page images stay under .private/."""
 from __future__ import annotations
-import hashlib, io, json, re, sys, zipfile
+import hashlib, io, json, os, re, sys, zipfile
 from collections import Counter
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dev"))
@@ -11,7 +11,7 @@ from lxml import etree  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "Policy Copies/QCR/Health Quote Format.docx"
-OUT = ROOT / ".private/visual-evidence/docx"; OUT.mkdir(parents=True, exist_ok=True)
+OUT = Path(os.environ.get("CHANNEL360_RESULTS_DIR") or (ROOT / ".private/visual-evidence/docx")); OUT.mkdir(parents=True, exist_ok=True)
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W}
 results, metrics = [], {}
@@ -70,7 +70,7 @@ def main():
     check("heading colour BA2F4F (defined in the DOCX) is rendered", "BA2F4F" in gt["colors"] | gt["fills"] and brand > 0.0005, f"{brand:.3%} of pixels")
     corner = p1[5:30, 5:30].reshape(-1, 3).mean(axis=0)
     check("page background matches the file: it defines none, so white — not a dark canvas", (not gt["background"]) and corner.min() > 245, f"w:background present={gt['background']}, corner rgb={corner.astype(int).tolist()}")
-    check("bullets/lists are rendered (list paragraphs exist and bullet glyph runs are drawn)", gt["list_paras"] > 5 and "•" in text or "➢" in text or "" in text or "o " in text, gt["list_paras"])
+    check("bullets/lists are rendered (list paragraphs exist and bullet glyphs are extractable)", gt["list_paras"] > 5 and any(marker in text for marker in ("•", "➢", "◦", "▪", "o ")), gt["list_paras"])
     check("tables are present in the DOCX and their text is in the pages", gt["tables"] >= 1 and "base quote comparison" in text, gt["tables"])
     # original untouched
     check("original DOCX byte-identical after rendering", hashlib.sha256(c.file(d, v1)[1]).hexdigest() == sha, "")
@@ -112,7 +112,7 @@ def main():
     check("sections whose heading can be located link to the rendered page (ambiguous ones are not linked)", len(linked) >= 1, f"{len(linked)}/{len(ch)} sections have a page")
     print("\nMEASUREMENTS", json.dumps(metrics))
     failed = [r for r in results if not r[1]]
-    (ROOT / ".private/feature-results/docx-fidelity.json").write_text(json.dumps({"checks": [{"check": n, "pass": ok} for n, ok, _ in results], "metrics": metrics}, indent=1))
+    (OUT / "docx-fidelity.json").write_text(json.dumps({"checks": [{"check": n, "pass": ok} for n, ok, _ in results], "metrics": metrics}, indent=1))
     print(f"{len(results) - len(failed)} passed, {len(failed)} failed"); sys.exit(1 if failed else 0)
 
 if __name__ == "__main__":

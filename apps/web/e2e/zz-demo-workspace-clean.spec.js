@@ -16,7 +16,8 @@ test('the demo workspace gains no test documents', async ({ page }) => {
   expect(folders.filter((f) => f.name.startsWith('e2e-')).map((f) => f.name)).toEqual([]);
 
   await page.goto('/');
-  await expect(page.locator('.recent-chip').first()).toBeVisible();
+  // Fresh isolated databases may have no demo documents yet, so the recent row can be empty.
+  await expect(page.locator('.hero-copy h1')).toBeVisible();
   const recent = await page.locator('.recent-chip span').allTextContents();
   expect(recent.filter((t) => t.startsWith('e2e-'))).toEqual([]);
   await page.getByRole('button', { name: 'History' }).first().click();

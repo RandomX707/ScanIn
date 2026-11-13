@@ -659,6 +659,21 @@ class XlsxAdapter:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
         source_sha = hashlib.sha256(source).hexdigest()
         result: list[EditTarget] = []
+        masters: dict[tuple[str, str], tuple[str, str]] = {}
+        for f_sheet, f_cell in formulas:
+            f_node = f_cell.find(f"{{{MAIN}}}f")
+            if f_node.get("t") == "shared" and f_node.get("si") is not None and (f_node.text or "").strip():
+                masters[(f_sheet, f_node.get("si"))] = (f_cell.get("r", ""), f_node.text or "")
+
+        def display_formula(sheet_name: str, cell_el) -> str:
+            """Formula text to SHOW. A shared-formula child stores no text of its own: show the formula derived from its master (never a bare '=')."""
+            node = cell_el.find(f"{{{MAIN}}}f")
+            text = node.text or ""
+            if node.get("t") == "shared" and not text.strip():
+                master = masters.get((sheet_name, node.get("si") or ""))
+                derived = _translate_shared_formula(master[1], master[0], cell_el.get("r", "")) if master else None
+                return derived if derived is not None else text
+            return text
         for sheet, part in sheets.items():
             root = _xml(parts[part][1])
             seen: set[str] = set()
@@ -676,7 +691,7 @@ class XlsxAdapter:
                         if formula.get("t") in {"array", "dataTable"} or (formula.get("ref") and ":" in formula.get("ref", "")):
                             reason = "array_formula"
                     result.append(EditTarget(f"xlsx:{sheet}!{ref}", source_sha, sheet, ref,
-                                             (TypedValue("string", "=" + (cell.find(f"{{{MAIN}}}f").text or ""),
+                                             (TypedValue("string", "=" + display_formula(sheet, cell),
                                                           native=cell.find(f"{{{MAIN}}}f").text or "")
                                               if cell.find(f"{{{MAIN}}}f") is not None
                                               else _rich_text_value(cell, shared) if reason == "rich_text"

@@ -2,8 +2,9 @@
 
 Version comparison · Excel workspace · Word page rendering · Digitally signed PDF working copies
 
-Status: implemented and verified on an **isolated stack** (own database, own storage, own tenants). The shared application on
-`:8000` / `:5174` was not restarted or modified by this work. Nothing in this document contains stakeholder content, extracted
+Status: implemented and final hardening/regression verified on an **isolated stack** (database `channel360_iso_harden`, storage
+`.runtime/iso-final/storage`, fresh tenants). The shared application on `:8000` / `:5174` was not restarted or modified by this
+work. Nothing in this document contains stakeholder content, extracted
 field values, document copies or secrets; private evidence stays under `.private/` (git-ignored).
 
 Workflow now supported end to end:
@@ -15,7 +16,7 @@ UPLOAD → VIEW FAITHFULLY → UNDERSTAND → EDIT → PREVIEW → SAVE NATIVE V
 ## 1. Architecture
 
 All four features extend the existing engine. There is no new trust path: every new capability that touches an uploaded file
-runs in an OS-sandboxed worker (macOS Seatbelt; Linux Bubblewrap exists for the original parsers, see §8) and every new endpoint
+runs in an OS-sandboxed worker (macOS Seatbelt verified; Linux Bubblewrap command construction only, not runtime-verified; see §11) and every new endpoint
 is tenant-scoped through `api_tenant_transaction` (PostgreSQL row-level security).
 
 | Area | New / changed code | Sandbox |
@@ -141,37 +142,41 @@ XLSX `layout` (`freeze`, `zoom`, `hidden`, `protected`, style `nf`).
 
 * **Database:** none. No schema change, no data change, no reprocessing: sections, comparison, previews and signature status are
   computed on read; old documents work as soon as the backend runs the new code.
-* **Packages:** none new (`pypdf`, `reportlab`, `pdfjs-dist` already present). Host needs LibreOffice and OpenSSL 3+ on macOS.
+* **Packages:** none new (`pypdf`, `reportlab`, `pdfjs-dist` already present). The verified macOS host needs LibreOffice, OpenSSL 3+,
+  PostgreSQL 16 and the configured malware scanner service. Seatbelt must be available for document workers.
 * **Frontend:** served live by Vite on `:5174` (or `npm run build`); no new npm dependency.
-* **Deploy:** restart only the backend with the same environment (back up the database and storage first); verify
-  `/openapi.json` lists the new paths. Requires explicit approval; **not done by this work**.
+* **Deploy:** no deployment was performed. Deployment is not ready for environments that require Linux/container confinement:
+  those runtimes remain unverified. For the supported macOS deployment, back up database and storage, use the existing environment,
+  ensure LibreOffice/OpenSSL 3+/PostgreSQL 16/scanner/Seatbelt are present, restart the backend, then verify `/openapi.json` lists
+  the new paths. This run made no database migration.
 
 ## 6. Rollback
 
-Code-only rollback; data is untouched by the new code (the only new stored artefacts are normal versions and the disposable
-`.preview-cache`, which can be deleted at any time). Start the previous revision's code with the preserved environment file
-(see the backup folder's `ROLLBACK.md` procedure). Working-copy versions already created remain valid PDF versions; an older
-backend lists them as ordinary saved versions.
+Code-only rollback; there is no schema migration to reverse. Stop the changed backend, restore the previously deployed backend
+revision and its preserved environment, and keep the database and storage in place. The last confirmed remote revision before
+this feature series is `1ba0813ac9a703c45747bf7cccb90f656ab7b4d8`; use the deployment's recorded prior revision if it differs.
+Preview cache files are disposable. Saved native versions and unsigned working-copy versions remain ordinary immutable versions;
+the earlier backend can list them without the newer UI metadata.
 
 ## 7. Verification results
 
-Everything below ran against the **isolated stack** (database `channel360_iso_*`, own storage, fresh tenants per run) on the real
-private stakeholder corpus. Counts only; no document content is reproduced here.
+Final hardening results below ran against the **fresh isolated stack** (database `channel360_iso_harden`, storage
+`.runtime/iso-final/storage`, fresh tenants) on the real private stakeholder corpus. Counts only; no document content is reproduced.
 
 | Suite | Result |
 |---|---|
-| Backend `pytest tests` on a fresh isolated PostgreSQL database (migrator/app/worker roles, grants applied) | **690 passed, 0 failed, 0 skipped** (without database credentials: 658 passed, 32 skipped) |
-| New backend unit tests (comparison engine 6, sandboxed Office render 5, real-CMS signature validation 8, working-copy builder 5) | 24 passed |
-| Playwright, whole suite, production build of the frontend | **77 tests: 76 passed, 1 skipped, 0 failed**. The skip is the `QCR.zip`/`RFQ.zip` test (original archives absent, see §10); it passes (3/3 in its spec) against reconstructed archives |
-| Stakeholder acceptance runner (17 documents + archive stage), 289 checks | **18 PASS, 0 SAFE RESTRICTION, 0 FAIL — 289/289**. Archive stage ran on *reconstructed* archives (§10) |
-| Version comparison flow (PDF direct/cumulative/branch/reverse, XLSX incl. INCOMPLETE derivative, DOCX, authorization) | 31/31 |
-| Signed-PDF flow (Health, Motor, Marine + unsigned control; status, acknowledgement, working copy, edit, lineage, audit, compare) | 82/82 |
-| Security flow (5 new endpoints x unauthenticated / wrong role / other tenant; no path or tenant leakage; tampered and fabricated signatures; malformed DOCX; unsupported types) | 23/23 |
-| XLSX layout vs an independent openpyxl parse of all 9 workbooks (merges, widths, heights, hidden rows/columns, frozen panes, pictures, protection, number formats) | 91/91 |
-| DOCX fidelity and native edit/save/reopen on `Health Quote Format.docx` | 26/26 |
-| Four-feature real-browser journeys (`document-experience.spec.js`) | 4/4 |
-| Compare / signed-PDF / Excel-workspace (9 workbooks) / DOCX-pages / 72-page viewer browser specs | 3 / 2 / 9 / 1 / 1, all passing |
-| Performance and stability (`perf_check.py`) | 16/16 |
+| Backend `pytest tests` with migration/app/worker roles on fresh `channel360_iso_backend` | **718 passed, 0 failed, 0 skipped** |
+| Focused runner regressions (selection eligibility, explicit ZIP skip, isolated storage-reader guard, Excel numeric coercion) | **4 passed**; shared-formula and XLSX adapter targeted set: 52 passed |
+| Playwright full suite, production build | **91 tests: 90 passed, 1 skipped, 0 failed**. The skip is the original QCR/RFQ ZIP import scenario; the hostile archive test passed. |
+| Non-ZIP stakeholder acceptance (`--skip-zip`) | **17 documents, 279/279 checks pass**; ZIP recorded `SKIPPED — OUT OF SCOPE` (0 checks) |
+| Version comparison flow: PDF/XLSX/DOCX, branch/ancestor/reverse, completeness and download gates | **31/31** |
+| Additional XLSX/DOCX branch-history flow | **11/11** |
+| Signed-PDF flow: Health, Motor, malformed Marine and unsigned control | **82/82** |
+| New-endpoint security: auth roles, tenant isolation, signature tamper/fabrication, malformed and unsupported files | **23/23** |
+| XLSX index fidelity vs independent openpyxl parse of 9 workbooks | **36/36** |
+| DOCX fidelity and native edit/save/reopen, `Health Quote Format.docx` | **26/26** |
+| Download eligibility tests (included in backend suite) | **5/5**; `INCOMPLETE` XLSX remains HTTP 409 |
+| XLSX benchmark: small RFQ, medium QCR, 60k and 180k synthetic workbooks | **32/32 checks**; all four comparisons COMPLETE |
 
 ### 7.1 Repeatability of the browser test that failed once
 One run of the full browser suite failed once (`manager-ui` DOCX upload: the workspace never appeared within 60 s) and passed on
@@ -185,84 +190,95 @@ re-run. A re-run is not treated as proof of stability, so the scenario was repea
 | Vite dev server, a non-component source module edited every 3 s during the runs | 14 | **1** (dev server logged 62 page reloads) |
 | Production build served by `vite preview`, the same edits | 14 | 0 |
 
-Finding: the failure is reproduced by hot-reloading the dev server mid-test (page state is lost mid-flow), which matches what
-was happening when it first failed (frontend sources were being edited while the suite ran). It is a test-environment
-interference, not a product defect, but the original instance cannot be proven to be this cause because its artefacts were
-overwritten. Mitigation: `C360_ISO_WEB_MODE=preview scripts/dev/isolated-stack.sh up` serves a production build; all final
-browser runs used it.
+Finding: the earlier DOCX upload timeout is reproduced by hot-reloading the dev server mid-test. In this final rerun, one
+additional test assumption failed because a fresh local demo tenant correctly had no recent-document chips. The isolation
+assertions showed no added demo documents; the test now accepts an empty recent row and checks the home page. The full production
+suite then passed 90 tests with the single archive skip.
 
 ## 8. Measured fidelity
 
 **Word (`Health Quote Format.docx`, LibreOffice preview vs the file's own XML):** page size error 0.01 pt (A4); text coverage
-100 %; hyperlinks 12/12 present as real links; embedded images 2/2; logo block spans 52 % of the page width; illustration paints
+100 %; hyperlinks 12/12 present as real links; embedded images 2/2; logo block spans 48 % of the page width; illustration paints
 12.3 % of its band; the DOCX-defined heading colour is rendered (3.1 % of pixels); bullets and the comparison table render;
 4 pages. **The file defines no page background (no `w:background`), so the faithful rendering is a white page; a dark canvas
 seen elsewhere comes from the viewer's own theme, not from the file.** Native edit: exactly one paragraph differs, media/styles/
 numbering/theme/settings/headers/footers are byte-identical, the saved file re-renders to the same 4 pages, and the change touches
 0.05 % of the pixels of one page.
 
-**Excel (9 workbooks):** layout model equals an independent parse for sheet names, merged ranges, column widths, row heights,
-hidden rows/columns/sheets, frozen panes, picture anchors, sheet protection and number formats (91/91). The browser spec
-verifies, per workbook: headers and formula bar, every formula shown and locked, zoom proportional (90 % = 0.90 of 100 %), fit
-width, sticky headers while scrolling, full screen covering the viewport with the selected cell preserved, unsaved edits
-surviving expand/collapse, native save. Native edits reopen independently with only the edited cell changed.
+**Excel (9 stakeholder workbooks plus two synthetic sizes):** the independent index comparison confirms every non-empty cell,
+formula string, merge, picture anchor, column width and frozen pane (36/36). The production browser suite exercises sheet
+navigation, zoom, fit width, scrolling, full screen, formula locking, selection persistence and edits for the real workbooks.
+Acceptance independently opens saved XLSX files and checks edited cells. A numeric string entered into an empty cell may reopen
+as an Excel number; edits to existing text must remain exact. Formula results are not recalculated.
 
 **Signed PDFs:** Health and Motor: signature intact, signer **not trusted** (no trust policy configured). Marine: **malformed**
 (byte range runs past the end of the file). A one-byte change inside a signed range reports "does not verify"; a fabricated
 signature object is reported malformed; none is ever reported trusted. Working copies of all three are unsigned (no signature
 structure of any kind), carry the notice on every page, keep original page text, and the signed originals stay byte-identical.
 
-## 9. Performance (isolated stack, idle machine)
+## 9. Performance (fresh isolated stack, idle machine)
 
-| Case | Result |
-|---|---|
-| 72-page Fire PDF: import+inspect / preview / sections (cold) | 0.39 s / 0.32 s / 4.5 s |
-| 72-page PDF: verified edit+save / compare cold / compare repeat (cache) | 2.4 s / 6.9 s / 0.03 s |
-| 72-page viewer in the browser: first page painted / scroll through all 72 pages / console errors | 7.9 s (includes the cold compare) / 4.3 s / 0 |
-| History with signature status of every version | 0.01 s |
-| DOCX render: cold / cached / 6 parallel requests | 1.3 s / 0.005 s / 0.97 s total |
-| Synthetic 180,000-cell workbook: import / preview / native save | 4.0 s / 25.6 s (flagged *partial*) / 34 s |
-| Same workbook: compare cold / repeat | 90 s (first 16,000 cells, flagged incomplete) / 0.03 s |
-| API process memory after the run | 80 → 102 MB |
+| Workbook | Import+inspect | Index ready | First viewport | Scroll window p50 / max | Native save | COMPLETE compare | Cells examined |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Small RFQ (604 cells) | 0.28 s | 0.23 s | 9 ms | 4 / 9 ms | 0.61 s | 0.23 s | 604 |
+| Medium QCR (312 cells) | 0.17 s | 0.22 s | 6 ms | 3 / 4 ms | 0.54 s | 0.22 s | 312 |
+| Synthetic 60,000 (60,830 indexed cells) | 1.38 s | 1.74 s | 7 ms | 4 / 5 ms | 3.88 s | 1.84 s | 60,830 |
+| Synthetic 180,000 (180,830 indexed cells) | 3.79 s | 4.79 s | 8 ms | 5 / 6 ms | 11.37 s | 5.02 s | 180,830 |
 
-Pre-optimisation baseline (kept in `.private/feature-results/perf-baseline-prefix.json`): workbooks of 60,000 and 180,000 cells
-returned `503` after the 30 s worker timeout and a 15,000-cell workbook took 7.4 s to import. Two defects in the XLSX adapter
-caused this (per-cell re-scan of data validations and per-cell SHA-256 of the whole file); fixing them made inspection linear
-(180,000 cells: 38.8 s → 2.2 s in the adapter). A pre-fix benchmark that was still running was terminated.
+Each case saved two permitted text edits, independently reopened the native XLSX, and found both edits in a COMPLETE comparison.
+The RFQ text selections were 53 and 49 characters long, exercising the former 40-character failure. The 60k and 180k comparisons
+included cells beyond the initial viewport. Sampled API RSS before/after each case was 26.9→85.2 MB, 85.2→86.1 MB,
+86.1→349.9 MB, then 349.9→225.1 MB. These are point samples, not peak memory; the final decrease shows memory reclamation,
+while 349.9 MB was the largest observed sample.
+
+Historical comparison: an earlier run reported about 8 seconds for the 180k initial index/view, 34 seconds for native save and
+90 seconds for a comparison that examined only 16,000 cells and was marked incomplete. The final run measured 4.79 seconds to
+index, 11.37 seconds to save and 5.02 seconds for a COMPLETE comparison of 180,830 cells. The older and current numbers are from
+separate runs, not a same-process controlled benchmark.
+
+Earlier pre-optimisation measurements reported `503` timeouts for 60k/180k workbooks and a 7.4-second import at 15k cells.
+Adapter optimisations removed per-cell data-validation rescans and repeated whole-file hashing. The current end-to-end figures
+include upload/inspection, index creation, viewport requests, save, native reopen and comparison.
 
 ## 10. Failures found during verification, and how each was resolved
 
 | # | Finding | Resolution |
 |---|---|---|
 | 1 | XLSX inspection was quadratic; 60,000+ cells timed out (`503`) | Hoisted per-sheet work out of the per-cell loop (behaviour unchanged, all XLSX tests and acceptance pass) |
-| 2 | Comparison of a very large workbook reported 2,999 phantom "added" cells (each side was cut at a different point by a time budget) | Both sides now read the same fixed window (first 16,000 cells), flagged `incomplete`, limit stated; verified: exactly one real change |
-| 3 | Large-workbook preview took 77 s | Time-boxed to 25 s and flagged `partial` in the API and UI |
-| 4 | Acceptance runner's audit-chain check connected to the **shared** `channel360_test` database (read-only, by a hard-coded URL) | Now reads only the isolated database; refuses any other name. One read-only connection attempt to the shared database occurred before this was caught; nothing was written |
+| 2 | Earlier large-workbook comparison stopped at 16,000 cells and could omit later changes | Current indexed comparison examines all 180,830 cells and reports `complete`; benchmark found both the first-window and far-row edits |
+| 3 | Earlier 180k index/view and save took about 8 s and 34 s | Final isolated run measured 4.79 s index, 11.37 s save and 5.02 s complete comparison; no timeout was raised |
+| 4 | An inherited audit helper had a hard-coded shared database URL and an old storage root | Replaced with an isolated-only database guard and configured `.runtime` storage; execution was verified against the fresh isolated database |
 | 5 | My signed-PDF flow silently skipped the Marine edit check (that PDF stores one word per text object) | Missing editable text is now an explicit failing check; Marine edits and saves; 82/82 |
 | 6 | A browser test failed once | Cause reproduced and mitigated (§7.1) |
 | 7 | Several test-script defects (wrong selector scope, whitespace-normalised text, caret placement in a wrapped paragraph, page-1-only line search) | Fixed in the tests; no product behaviour was changed to make a test pass |
-| 8 | An earlier `APIError(details=…)` call passed `details` positionally (500 instead of 422) in two new endpoints | Fixed; covered by tests |
+| 8 | Benchmark text selection could raise `IndexError` when short filters left fewer than three cells in a window | Selects non-empty strings with the API editable flag; tests cover strings over 40 chars and exclude formula/protected cells |
+| 9 | Acceptance's native XLSX reopen assertion was unconditional (`or True`) | It now opens saved files independently and checks every edited value; Excel numeric coercion is accepted only for cells that were blank |
+| 10 | A fresh-database browser test required a recent-document chip | It now accepts an empty demo workspace while still checking for leaked test documents |
+| 11 | DOCX bullet fidelity assertion accepted every document because it tested `"" in text` | It now requires a supported bullet/list marker; the real DOCX run passed |
+| 12 | Comparison/signature/security raw requests were pinned to port 8010 | They now use the isolated client's configured API URL and passed on port 8011 |
+| 13 | An earlier `APIError(details=…)` call passed `details` positionally (500 instead of 422) in two new endpoints | Fixed; covered by tests |
 
 ## 11. Known limitations and unresolved blockers
 
-* **BLOCKED — original archives:** `QCR.zip` and `RFQ.zip` are no longer in `Policy Copies/` (only extracted folders). The archive
-  stage and its browser test were therefore run on archives **reconstructed** from the retained extraction with identical entry
-  names, paths and file bytes (`scripts/corpus/rebuild_archives.py`, `CHANNEL360_ZIP_DIR`). They are labelled RECONSTRUCTED in the
-  results. Re-run with the original archives when they are available.
-* **Platform:** the new sandboxed workers (Office render, signature validation) are implemented for macOS Seatbelt only. On
-  hosts without it they report *unavailable* and the UI falls back to labelled extracted text / "not validated"; they never run
-  unconfined. Linux Bubblewrap profiles for these two workers are not written.
+* **ZIP scope:** original `QCR.zip` and `RFQ.zip` are absent. ZIP acceptance was recorded as `SKIPPED — OUT OF SCOPE`, not PASS;
+  no archives were reconstructed. The hostile-archive browser case did run and pass.
+* **macOS sandbox:** Seatbelt runtime confinement is verified. Office rendering and signature validation fail closed when their
+  sandbox or required host dependency is unavailable; documents never run unconfined.
+* **Linux:** Bubblewrap command construction has unit tests only. Runtime sandboxing is **not verified**, so Linux is not supported
+  for deployment of these document workers until a confined runtime check passes.
+* **Containers:** container runtime confinement is **not verified**. Do not treat the macOS or Bubblewrap command-construction
+  results as container support.
 * **Word fidelity:** LibreOffice is not Word. Fonts that are not installed are substituted and some effects can differ slightly;
   this is stated beside every page preview. Editing remains bounded to supported text (multi-run paragraphs, fields, text boxes
   stay read-only with an explanation); layout-changing edits are refused rather than approximated.
-* **Comparison limits (reported with every result):** PDF — visible text and its position only (not drawings/annotations);
-  DOCX — text, tables, paragraph/run formatting and image content hashes, not image/shape position; XLSX — values, formulas,
-  resolved formatting, merges, pictures and sizes, never recalculated values; very large workbooks — first 16,000 cells.
-* **Large workbooks:** a 180,000-cell sheet previews partially (25 s), saves in ~34 s and compares in ~90 s; the worker re-reads the
-  whole workbook for every 2,000-target page. A windowed XLSX adapter would remove this and was not attempted because it would
-  touch the verified ordering/fingerprint logic.
-* **Excel:** display-window cap of 500 rows x 40 columns (flagged); formulas are shown, never recalculated; pictures are
-  preserved but not editable; `INCOMPLETE` (stale formula results) derivatives keep their download gate.
+* **Supported environment:** verified macOS with Seatbelt, LibreOffice, OpenSSL 3+, PostgreSQL 16 and the configured scanner.
+  Linux and container document processing are not verified or supported by this report.
+* **Comparison limits (reported with every result):** PDF — visible text and position, not drawings/annotations; DOCX — text,
+  tables, paragraph/run formatting and image content hashes, not image/shape position; XLSX — values, formulas, resolved
+  formatting, merges, pictures and sizes, never recalculated values. The 180,830-cell benchmark compared completely; the browser
+  keeps a bounded viewport and requests further windows as the user scrolls.
+* **Excel:** formulas are shown and locked, never recalculated; pictures are preserved but not editable; `INCOMPLETE` derivatives
+  with stale formula results remain withheld by the download gate.
 * **Signatures:** trust requires an explicit CA file (`IDW_PDF_TRUST_CAFILE`); none is configured, so real signatures are
   "trust not established". Revocation (CRL/OCSP), long-term validation, timestamp-token validation and the legacy
   `adbe.pkcs7.sha1` container are not checked (a timestamp token's presence is reported, not validated). DocMDP is reported on a
@@ -271,7 +287,7 @@ caused this (per-cell re-scan of data validations and per-cell SHA-256 of the wh
   strip and metadata say so). Rotated pages show the strip rotated. Re-signing / newly-signed workflow is intentionally not
   implemented.
 * **Chunks to page links** exist for DOCX sections whose heading text can be located unambiguously; others are not linked.
-* **Shared application:** still runs the previous backend; deployment of this work needs explicit approval (§5).
+* **Shared application:** still runs the previous backend; this work did not restart or modify it. No deployment was performed.
 
 ## 12. Exact source files changed (since `1ba0813`)
 
@@ -337,6 +353,9 @@ caused this (per-cell re-scan of data validations and per-cell SHA-256 of the wh
 * `scripts/corpus/signed_flow.py`
 * `scripts/corpus/verify_office_edit.py`
 * `scripts/corpus/xlsx_fidelity.py`
+* `scripts/corpus/xlsx_benchmark.py` (inherited from Claude Code; finalized and benchmarked)
+* `scripts/corpus/xlsx_index_fidelity.py` (inherited from Claude Code; rerun)
+* `scripts/corpus/storage_read.py`
 * `scripts/dev/iso_client.py`
 * `scripts/dev/isolated-stack.sh`
 * `scripts/dev/issue_iso_token.py`
@@ -347,3 +366,5 @@ caused this (per-cell re-scan of data validations and per-cell SHA-256 of the wh
 * `tests/unit/test_office_render.py`
 * `tests/unit/test_pdf_working_copy.py`
 * `tests/unit/test_sigcheck.py`
+* `tests/unit/test_xlsx_transitive_dependencies.py`
+* `tests/unit/test_corpus_runner_hardening.py`

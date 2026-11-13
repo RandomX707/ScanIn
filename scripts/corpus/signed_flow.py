@@ -1,12 +1,13 @@
 """Live Feature-D check on the ISOLATED stack: signed stakeholder PDFs -> truthful status -> unsigned working copy -> edits."""
 from __future__ import annotations
-import hashlib, io, json, sys, urllib.error, urllib.request
+import hashlib, io, json, os, sys, urllib.error, urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dev"))
-from iso_client import Client, token  # noqa: E402
+from iso_client import API, Client, token  # noqa: E402
 import pypdf  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]; CORPUS = ROOT / "Policy Copies"
+OUT = Path(os.environ.get("CHANNEL360_RESULTS_DIR") or (ROOT / ".private/feature-results"))
 results = []
 def check(name, ok, detail=""):
     results.append((name, bool(ok), str(detail))); print(("PASS " if ok else "FAIL ") + name + (f" — {detail}" if detail else "")); return ok
@@ -14,7 +15,7 @@ MARKER = "DRAFT — MODIFIED COPY — NOT OFFICIAL"
 EXPECTED = {"Health Policy copy.pdf": "integrity_valid_trust_not_established", "Motor  Policy.pdf": "integrity_valid_trust_not_established", "Marine Policy copy.pdf": "malformed"}
 
 def raw_status(path, tok, method="POST", body=b'{"acknowledge":true}'):
-    req = urllib.request.Request("http://127.0.0.1:8010" + path, data=body, method=method, headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"} if tok else {"Content-Type": "application/json"})
+    req = urllib.request.Request(API + path, data=body, method=method, headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"} if tok else {"Content-Type": "application/json"})
     try: return urllib.request.urlopen(req).status
     except urllib.error.HTTPError as e: return e.code
 
@@ -80,5 +81,6 @@ if __name__ == "__main__":
     c = Client(); s, reg, _ = c.upload(CORPUS / "CAR Policy copy.pdf"); s, b, _ = c.post(f"/api/documents/{reg['document_id']}/versions/{reg['version_id']}/working-copy", {"acknowledge": True})
     check("unsigned PDF: working copy not offered (409 not_signed)", s == 409 and b["code"] == "not_signed", f"{s} {b.get('code')}")
     failed = [r for r in results if not r[1]]
-    (ROOT / ".private/feature-results/signed.json").write_text(json.dumps([{"check": n, "pass": ok} for n, ok, _ in results], indent=1))
+    OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / "signed.json").write_text(json.dumps([{"check": n, "pass": ok} for n, ok, _ in results], indent=1))
     print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed"); sys.exit(1 if failed else 0)

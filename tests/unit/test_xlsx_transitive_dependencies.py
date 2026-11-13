@@ -82,6 +82,11 @@ def test_shared_formula_children_are_translated_not_silently_ignored():
     orphan = _with_shared_formulas(base, lambda xml: xml.replace(b"<f>A2*2</f>", b'<f t="shared" si="7"/>'))
     assert _deps(orphan, "xlsx:S!A1")[1][1] is True     # child without a master: dependencies unknown
 
+    visible_formula = next(t for t in XlsxAdapter().unsupported_targets(source) if t.sheet == "S" and t.cell == "B2")
+    assert visible_formula.value.value == "=A2*2"
+    assert visible_formula.value.native == ""
+    assert not visible_formula.editable and visible_formula.reason == "formula_cell"
+
 
 @pytest.mark.parametrize("master,master_ref,child_ref,expected", [
     ("A1*2", "B1", "B3", "A3*2"),

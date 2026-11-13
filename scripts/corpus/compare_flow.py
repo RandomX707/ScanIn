@@ -1,12 +1,13 @@
 """Live Feature-A check on the ISOLATED stack: real stakeholder files, real edits, real comparisons. Prints counts only."""
 from __future__ import annotations
-import hashlib, json, sys
+import hashlib, json, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dev"))
-from iso_client import Client, new_tenant, token  # noqa: E402
+from iso_client import API, Client, new_tenant, token  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 CORPUS = ROOT / "Policy Copies"
+OUT = Path(os.environ.get("CHANNEL360_RESULTS_DIR") or (ROOT / ".private/feature-results"))
 results: list[tuple[str, bool, str]] = []
 
 
@@ -52,7 +53,7 @@ def pdf_flow():
     other = Client(); s, _, _ = other.call("GET", f"/api/documents/{d}/compare?base={v1}&target={v2}"); check("cross-tenant compare is 404", s == 404, s)
     import urllib.request, urllib.error
     def raw(tok):
-        req = urllib.request.Request(f"http://127.0.0.1:8010/api/documents/{d}/compare?base={v1}&target={v2}", headers=({"Authorization": f"Bearer {tok}"} if tok else {}))
+        req = urllib.request.Request(f"{API}/api/documents/{d}/compare?base={v1}&target={v2}", headers=({"Authorization": f"Bearer {tok}"} if tok else {}))
         try: return urllib.request.urlopen(req).status
         except urllib.error.HTTPError as e: return e.code
     check("compare without a token is 401", raw(None) == 401, raw(None))
@@ -116,7 +117,8 @@ def docx_flow():
 if __name__ == "__main__":
     pdf_flow(); xlsx_flow(); docx_flow()
     failed = [r for r in results if not r[1]]
-    out = ROOT / ".private/feature-results/compare.json"
+    OUT.mkdir(parents=True, exist_ok=True)
+    out = OUT / "compare.json"
     out.write_text(json.dumps([{"check": n, "pass": ok} for n, ok, _ in results], indent=1))
     print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed")
     sys.exit(1 if failed else 0)

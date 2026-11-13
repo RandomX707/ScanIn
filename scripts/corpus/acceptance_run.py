@@ -5,7 +5,8 @@ Writes .private/inventory/ACCEPTANCE_RESULTS.md (+ .json). Console output is ver
 Verdicts: PASS | SAFE RESTRICTION | FAIL.  Needs the isolated test stack (scripts/dev/start-test-stack.sh) and the private
 corpus + `scripts/corpus/inventory.py` manifest. Nothing here writes to the demo tenant.
 """
-import hashlib, io, json, os, random, re, subprocess, sys, time, urllib.parse, urllib.request, zipfile
+import argparse, hashlib, io, json, os, random, re, subprocess, sys, time, urllib.parse, urllib.request, zipfile
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,8 +16,8 @@ from ooxml_compare import compare as compare_xlsx  # noqa: E402
 API = os.environ.get("CHANNEL360_API", "http://127.0.0.1:8010")
 if API.rstrip("/").endswith((":8000", ":5174")):
     raise SystemExit("REFUSED: the acceptance runner uploads the whole corpus and must run against the isolated stack, never the shared app")
-OUT = ROOT / ".private/inventory"
-MANIFEST = json.load(open(OUT / "manifest.json"))
+OUT = Path(os.environ.get("CHANNEL360_RESULTS_DIR") or (ROOT / ".private/inventory"))
+MANIFEST = json.load(open(ROOT / ".private/inventory/manifest.json"))
 PY = sys.executable
 # The original QCR.zip / RFQ.zip must sit in "Policy Copies". If they are gone, CHANNEL360_ZIP_DIR may point at archives rebuilt with
 # scripts/corpus/rebuild_archives.py; the result is then labelled RECONSTRUCTED so it is never mistaken for the original archives.
@@ -25,6 +26,7 @@ ZIP_RECONSTRUCTED = bool(os.environ.get("CHANNEL360_ZIP_DIR"))
 ISO_DB = os.environ.get("C360_ISO_DB", "channel360_iso_dev")
 if not ISO_DB.startswith("channel360_iso_"):
     raise SystemExit("REFUSED: the acceptance runner only reads the isolated channel360_iso_* database")
+ISO_PGPASS = ROOT / ".runtime/iso-stack" / ("pgpass" if ISO_DB == "channel360_iso_dev" else f"pgpass.{ISO_DB}")
 
 
 def new_tenant():
@@ -91,9 +93,29 @@ class Result:
 
     @property
     def verdict(self):
+        if getattr(self, "skipped", False):
+            return "SKIPPED — OUT OF SCOPE"
         if any(not c["ok"] for c in self.checks):
             return "FAIL"
         return "SAFE RESTRICTION" if self.restriction else "PASS"
+
+
+def native_cell_value_matches(original_type, actual, expected):
+    """Excel may store a numeric string entered into a blank cell as a number; existing text must remain exact."""
+    if actual == expected:
+        return True
+    if original_type != "null" or isinstance(actual, bool):
+        return False
+    try:
+        return Decimal(str(actual)) == Decimal(str(expected))
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def skipped_zip_result():
+    result = Result("ZIP import", "zip")
+    result.skipped = True
+    return result
 
 
 def timed(res, key, fn):
@@ -233,7 +255,13 @@ def run_xlsx(cl: Client, o, path: Path, res: Result):
     res.check("package_only_edited_cells_changed", not cmp["problems"] and set(cmp.get("cells_changed", [])) == edited, f"{cmp['problems']} {cmp.get('cells_changed')}")
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(new))
-    res.check("native_xlsx_reopens", wb.worksheets[0].title == json.loads(json.dumps(sh["name"])) or True)
+    original_types = {cell["id"]: cell["t"] for cell in picks}
+    observed = [(item["target_id"].split("!")[-1], wb[sh["name"]][item["target_id"].split("!")[-1]].value,
+                 item["value"], original_types[item["target_id"]]) for item in changes] if sh["name"] in wb.sheetnames else []
+    matches = bool(observed) and all(native_cell_value_matches(cell_type, value, expected)
+                                     for _, value, expected, cell_type in observed)
+    res.check("native_xlsx_reopens_with_edited_values", matches,
+              observed if observed and not matches else "")
     res.check("v1_byte_identical", hashlib.sha256(cl.file(d, v)).hexdigest() == sha)
     fold = next(f for f in cl.json("/api/folders")["items"] if f["document_id"] == d)
     res.check("lineage_v2_parent_v1", fold["versions"][1]["parent_number"] == 1, [(x["number"], x["parent_number"], x["outcome"]) for x in fold["versions"]])
@@ -309,7 +337,10 @@ def run_archives(results):
     return res, cl
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Run isolated stakeholder corpus acceptance.")
+    parser.add_argument("--skip-zip", action="store_true", help="skip archive-specific acceptance and report it out of scope")
+    args = parser.parse_args(argv)
     results = []
     os.makedirs(OUT, exist_ok=True)
     docs = unique_docs()
@@ -322,11 +353,16 @@ def main():
             res.check("runner_exception", False, f"{type(exc).__name__}: {exc}")
         results.append(res)
         print(f"{res.verdict:17} {o['path'].split('/')[-1][:34]:34} {sum(c['ok'] for c in res.checks)}/{len(res.checks)} checks")
-    zres, zcl = run_archives(results)
+    if args.skip_zip:
+        zres = skipped_zip_result()
+        zcl = None
+    else:
+        zres, zcl = run_archives(results)
     results.append(zres)
-    print(f"{zres.verdict:17} {'ZIP import + hostile + duplicates':34} {sum(c['ok'] for c in zres.checks)}/{len(zres.checks)} checks")
-    # audit chain integrity for the ZIP tenant (also exercises every import/provenance event)
-    chain = subprocess.run([PY, "-I", "-c", f"""
+    print(f"{zres.verdict:27} {'ZIP import + hostile + duplicates':34} {sum(c['ok'] for c in zres.checks)}/{len(zres.checks)} checks")
+    # Audit chain integrity only applies when the ZIP tenant was created by this run.
+    if not args.skip_zip:
+        chain = subprocess.run([PY, "-I", "-c", f"""
 import sys,json; sys.path.insert(0,'{ROOT}')
 from uuid import UUID
 from sqlalchemy import create_engine
@@ -338,8 +374,8 @@ e=create_engine('postgresql+psycopg://channel360_test_app@127.0.0.1:5432/{ISO_DB
 ident=AuthenticatedIdentity(subject='x',tenant_id=UUID('{zcl.tok['tenant_id']}'),role='OWNER')
 with e.connect() as c, api_tenant_transaction(c, ident):
     print(json.dumps(verify_chain(c, ident.tenant_id)))
-"""], capture_output=True, text=True, env={**os.environ, "PGPASSFILE": str(ROOT / ".runtime/iso-stack/pgpass")})
-    zres.check("audit hash chain verifies for the tenant", chain.stdout.strip().startswith("[true"), (chain.stdout + chain.stderr).strip()[:100])
+"""], capture_output=True, text=True, env={**os.environ, "PGPASSFILE": str(ISO_PGPASS)})
+        zres.check("audit hash chain verifies for the tenant", chain.stdout.strip().startswith("[true"), (chain.stdout + chain.stderr).strip()[:100])
     # ---- write results
     json.dump([{"file": r.name, "kind": r.kind, "verdict": r.verdict, "restriction": r.restriction, "timings": r.timings, "checks": r.checks} for r in results],
               open(OUT / "ACCEPTANCE_RESULTS.json", "w"), indent=1)
@@ -357,7 +393,7 @@ with e.connect() as c, api_tenant_transaction(c, ident):
             lines.append(f"- {'PASS' if c['ok'] else '**FAIL**'} `{c['check']}`" + (f" — {c['detail']}" if c["detail"] and not c["ok"] else ""))
         lines.append("")
     (OUT / "ACCEPTANCE_RESULTS.md").write_text("\n".join(lines))
-    tally = {v: sum(1 for r in results if r.verdict == v) for v in ("PASS", "SAFE RESTRICTION", "FAIL")}
+    tally = {v: sum(1 for r in results if r.verdict == v) for v in ("PASS", "SAFE RESTRICTION", "FAIL", "SKIPPED — OUT OF SCOPE")}
     print("TOTAL", tally)
     return 1 if tally["FAIL"] else 0
 
