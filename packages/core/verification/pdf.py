@@ -4,9 +4,8 @@ import hashlib
 import io
 import json
 import math
-import os
 import shutil
-import sys
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -135,27 +134,19 @@ class PdfIndependentVerifier:
         if not candidate.startswith(source):
             return _blocked(source_hash, output_hash, "original_byte_prefix_not_preserved")
 
-        from packages.workers.sandbox import SandboxFailed, SandboxPolicy, SandboxUnavailable, confined_runner, resolve_tool
-        qpdf = resolve_tool("qpdf")
-        if qpdf is None:
+        qpdf = shutil.which("qpdf")
+        if not qpdf:
             return _blocked(source_hash, output_hash, "qpdf_unavailable")
+        qpdf = str(Path(qpdf).resolve())
         try:
-            runner = confined_runner()      # the candidate is document-derived input: never parse it outside the verified confinement
-            scratch = Path(tempfile.mkdtemp(prefix="channel360-pdf-verify-", dir="/private/tmp" if sys.platform == "darwin" else None)).resolve()
-            os.chmod(scratch, 0o700)
-            try:
-                path = scratch / "candidate.pdf"
+            with tempfile.TemporaryDirectory(prefix="channel360-pdf-verify-") as temp_dir:
+                path = Path(temp_dir) / "candidate.pdf"
                 path.write_bytes(candidate)
-                qcheck_code = runner.run(qpdf, ["--check", str(path)], SandboxPolicy(
-                    scratch=scratch, timeout_seconds=15, cpu_seconds=30, env=(("HOME", str(scratch)), ("TMPDIR", str(scratch))))).returncode
-            finally:
-                shutil.rmtree(scratch, ignore_errors=True)
-            if qcheck_code != 0:
+                qcheck = subprocess.run([qpdf, "--check", str(path)], capture_output=True, timeout=15, check=False)
+            if qcheck.returncode != 0:
                 return _blocked(source_hash, output_hash, "qpdf_check_failed")
-        except SandboxUnavailable:
-            return _blocked(source_hash, output_hash, "qpdf_check_unavailable:sandbox_not_verified")
-        except (OSError, SandboxFailed) as exc:
-            suffix = "timeout" if getattr(exc, "reason_code", "") == "sandbox_timeout" else type(exc).__name__.lower()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            suffix = "timeout" if isinstance(exc, subprocess.TimeoutExpired) else type(exc).__name__.lower()
             return _blocked(source_hash, output_hash, f"qpdf_check_unavailable:{suffix}")
 
         try:
