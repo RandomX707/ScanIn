@@ -4,6 +4,8 @@ Read-only: no endpoint here can create, modify or delete a document, version or 
 """
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import hashlib
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -114,6 +116,16 @@ def snapshot(request: Request, identity: AuthenticatedIdentity, document_id: UUI
 
 
 # ---------------------------------------------------------------- endpoints
+def _compare_cache(request: Request) -> "OrderedDict[tuple[str, str, str], dict[str, Any]]":
+    """The ONE process-wide store of completed comparisons. (Both writers and readers must use it: Starlette's State keeps attributes in
+    `_state`, so reading `state.__dict__` and assigning `state.x = ...` silently address different objects.)"""
+    cache = getattr(request.app.state, "compare_results", None)
+    if not isinstance(cache, OrderedDict):
+        cache = OrderedDict(cache or {})
+        request.app.state.compare_results = cache
+    return cache
+
+
 def _version_card(number: int, item: dict[str, Any], classes: dict[str, str], events_by_version: dict[str, dict[str, Any]],
                   parent_numbers: dict[str, int]) -> dict[str, Any]:
     vid = str(item["version_id"])
@@ -171,7 +183,7 @@ def _xlsx_comparison(request: Request, identity: AuthenticatedIdentity, doc: UUI
             return JSONResponse({"state": "building", "complete": False, "progress": {"base": sb, "target": st},
                                  "message": "Preparing both workbooks for a complete comparison…"}, status_code=202)
         time.sleep(0.1)
-    cache: dict = request.app.state.__dict__.setdefault("compare_results", {})
+    cache = _compare_cache(request)
     key = (str(identity.tenant_id), str(rows[str(vb)]["sha256"]), str(rows[str(vt)]["sha256"]))
     if key not in cache:
         started = time.monotonic()
@@ -179,11 +191,7 @@ def _xlsx_comparison(request: Request, identity: AuthenticatedIdentity, doc: UUI
         result = engine.diff_xlsx_indexed(meta_b, meta_t, lambda i: open_sheet(dir_b, i), lambda i: open_sheet(dir_t, i))
         # Bound process-wide retained comparison results by serialized size as well as entry count.
         # A single bounded result is retained so cell marks remain available for its visible prefix.
-        from collections import OrderedDict
-        if not isinstance(cache, OrderedDict):
-            cache = request.app.state.compare_results = OrderedDict(cache)
-        else:
-            cache.move_to_end(key) if key in cache else None
+        cache.move_to_end(key) if key in cache else None
         cache[key] = result
         def cache_bytes() -> int:
             return sum(int(item.get("retained_change_bytes", 0)) for item in cache.values())
@@ -319,7 +327,7 @@ def compare_marks(document_id: str, request: Request, base: str = Query(), targe
     by_id = {str(v["version_id"]): v for v in versions}
     if str(vb) not in by_id or str(vt) not in by_id:
         raise APIError(404, "not_found", "The requested version was not found.")
-    cache = request.app.state.__dict__.get("compare_results", {})
+    cache = _compare_cache(request)
     key = (str(identity.tenant_id), str(by_id[str(vb)]["sha256"]), str(by_id[str(vt)]["sha256"]))
     if key not in cache:
         raise APIError(409, "comparison_not_ready", "Run the comparison first.")
