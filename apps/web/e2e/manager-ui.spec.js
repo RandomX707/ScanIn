@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
-const python = path.join(root, '.venv/bin/python');
+const python = (process.env.IDW_E2E_PYTHON || path.join(root, '.venv/bin/python'));
 const fixtureDir = path.join(root, '.runtime/browser-fixtures');
 const mime = {
   html: 'text/html',

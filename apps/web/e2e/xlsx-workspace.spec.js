@@ -19,6 +19,13 @@ test.beforeEach(async ({ page }) => {
 });
 test.beforeAll(() => fs.mkdirSync(evidence, { recursive: true }));
 
+// Without the private evidence this file would register ZERO tests and vanish from the report. Say so explicitly instead (SKIPPED, with the prerequisite).
+if (!manifest || books.length !== 9) {
+  test('PREREQUISITE (private stakeholder corpus): Excel workspace on the real RFQ/QCR workbooks', () => {
+    test.skip(true, 'private stakeholder corpus/manifest not present (.private/ and Policy Copies/ are not part of the repository); these acceptance checks did NOT run');
+  });
+}
+
 test.describe('Excel workspace on the real RFQ/QCR workbooks', () => {
   test.skip(!manifest || books.length !== 9, 'private stakeholder corpus not present');
   for (const o of books) {

@@ -19,7 +19,8 @@ if urllib.parse.urlsplit(API).port in (8000, 5174, None):
 
 
 def _password(role: str) -> str:
-    for line in (ROOT / ".runtime/iso-stack/pgpass").read_text().splitlines():
+    own = ROOT / ".runtime/iso-stack" / ("pgpass" if DB == "channel360_iso_dev" else f"pgpass.{DB}")      # the stack script writes one file per isolated database
+    for line in (own if own.is_file() else ROOT / ".runtime/iso-stack/pgpass").read_text().splitlines():
         host, port, _db, user, pw = line.split(":", 4)
         if user == role:
             return pw

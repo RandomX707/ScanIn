@@ -14,6 +14,13 @@ const extracted = (o) => path.join(root, '.private/corpus', o.source.replace(/\.
 const run = () => JSON.parse(fs.readFileSync(path.join(root, '.runtime/e2e-run.json'), 'utf8'));
 const evidence = path.join(root, '.private/visual-evidence/xlsx-virtual');
 
+// Without the private evidence this file would register ZERO tests and vanish from the report. Say so explicitly instead (SKIPPED, with the prerequisite).
+if (!manifest || books.length !== 9) {
+  test('PREREQUISITE (private stakeholder corpus): Virtual viewer equals the classic grid on the real workbooks', () => {
+    test.skip(true, 'private stakeholder corpus/manifest not present (.private/ and Policy Copies/ are not part of the repository); these acceptance checks did NOT run');
+  });
+}
+
 test.describe('Virtual viewer equals the classic grid on the real workbooks', () => {
   test.skip(!manifest || books.length !== 9, 'private stakeholder corpus not present');
   for (const o of books) {

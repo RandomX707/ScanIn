@@ -18,6 +18,13 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript((token) => sessionStorage.setItem('channel360.demo.session', token), run().token);
 });
 
+// Without the private evidence this file would register ZERO tests and vanish from the report. Say so explicitly instead (SKIPPED, with the prerequisite).
+if (!manifest || docs.length !== 17) {
+  test('PREREQUISITE (private stakeholder corpus): Source-linked chunks on the 17 stakeholder documents', () => {
+    test.skip(true, 'private stakeholder corpus/manifest not present (.private/ and Policy Copies/ are not part of the repository); these acceptance checks did NOT run');
+  });
+}
+
 test.describe('Chunks: meaningful, source-linked sections for all 17 stakeholder documents', () => {
   test.skip(!manifest || docs.length !== 17, 'private stakeholder corpus not present');
   for (const o of docs) {

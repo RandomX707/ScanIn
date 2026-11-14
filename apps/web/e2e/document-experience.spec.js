@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
 const corpus = process.env.CHANNEL360_CORPUS_DIR || path.join(root, 'Policy Copies');
-const python = path.join(root, '.venv/bin/python');
+const python = (process.env.IDW_E2E_PYTHON || path.join(root, '.venv/bin/python'));
 const api = process.env.IDW_API_BASE_URL || 'http://127.0.0.1:8010';
 const run = () => JSON.parse(fs.readFileSync(path.join(root, '.runtime/e2e-run.json'), 'utf8'));
 const scratch = path.join(root, '.private/e2e-output'); const evidence = path.join(root, '.private/visual-evidence/together');
