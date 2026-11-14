@@ -373,44 +373,96 @@ deployment-readiness claims where its stricter profile or database migration cou
 * `tests/unit/test_xlsx_transitive_dependencies.py`
 * `tests/unit/test_corpus_runner_hardening.py`
 
-## 13. Pre-push hardening follow-up (2026-11-14)
+## 13. Pre-push security findings: final verification (2026-11-14)
 
-This follow-up addresses the four independent pre-push findings. The code changes are present locally; the environment did not permit the database-backed or macOS sandbox verification needed to certify all of them.
+Four independent pre-push findings were re-examined on this macOS host (Darwin 25.6, arm64, PostgreSQL 16 on loopback, LibreOffice 26.8, OpenSSL 4.1) using only isolated resources (`channel360_iso_*` databases, `.runtime/iso-stack/storage.*`, ports 8010/5180). The shared backend `:8000`, frontend `:5174`, database `channel360_test` and shared document storage were not touched. Nothing was pushed or deployed.
 
-* **Sandbox policy:** `packages/workers/sandbox.py` now generates a deny-default Seatbelt policy, allows reads from the current job scratch, explicit tool/runtime roots and narrowly named system roots, permits writes only in that scratch plus `/dev/null`, and denies network operations. Shared `/private/var/folders` and `/private/var/tmp` grants are gone. Child executable permissions are based on the registered tool roots. The live canary did **not** pass: the tightened profile could not launch its harmless runtime on this host (`sandbox-exec` returned an exec permission failure/abort). The two-job filesystem, network and child-process assertions therefore skipped. **macOS confinement for this profile is not runtime verified; document processing remains fail-closed when the profile self-test fails.** Do not deploy this sandbox profile until the full live canaries and legitimate PDF/DOCX/XLSX processing pass on the supported macOS host.
-* **Isolated-stack inputs:** `scripts/dev/iso_config.py` validates database identifiers (including PostgreSQL’s 63-byte limit), tenant UUIDs, non-shared distinct ports and loopback PostgreSQL targets before the stack script creates state or touches credentials. SQL identifiers and literals are quoted independently of validation. Existing databases must carry the isolated-stack ownership comment before migrations can run. Validation-only tests passed; no PostgreSQL instance was available to test provisioning or cleanup. The script still requires PostgreSQL 16 and the repository’s three isolated test roles.
-* **XLSX comparison retention:** `packages/core/compare.py` now retains a deterministic prefix bounded by both record count and serialized record bytes while continuing to scan all indexed cells and count all detected changes. Results distinguish `scan_status=COMPLETE` from `list_status=TRUNCATED` and report detected/returned counts and `has_more`. The UI states that changes beyond the retained prefix are not navigable. The process cache is bounded by entry count and retained-result bytes. Focused comparisons and the memory-bound test passed; the real-stack workbook benchmark was not run because the isolated database/API stack could not be started.
-* **Working-copy lineage:** migration `0008_version_lineage_class` adds durable lineage metadata and backfills signed-working-copy roots and their descendants from the full audit table. Unknown legacy lineage remains explicitly `unknown`; it is not shown as an ordinary saved version. New text and native descendants inherit the parent classification, and signature verification remains a separate field. API/UI classification now reads version metadata rather than the latest 500 audit events. Unit tests cover missing audit pages, descendants, branches, unknown legacy status and separation from verification outcomes. Migration execution, restart persistence, >500/>1,000-event database cases and tenant isolation remain unverified because no PostgreSQL server was available.
+| Finding | Final status | Evidence |
+|---|---|---|
+| F1 macOS sandbox | **FIXED and runtime-verified on macOS** | live Seatbelt canaries, DOCX/PDF/XLSX processing under confinement (section 13.1) |
+| F2 isolated-database guard | **FIXED and verified** (two further defects found and fixed) | hostile-input matrix, real provisioning and drop (section 13.2) |
+| F3 XLSX comparison memory | **FIXED and verified** | 180,000-cell stress with 174,150 changes (section 13.3) |
+| F4 working-copy lineage | **FIXED and verified on real PostgreSQL** (the committed migration was broken; fixed) | 0007 -> 0008 execution, rollback, empty database, restart, tenant isolation (section 13.4) |
 
-### Verification performed for this follow-up
+The environment restrictions Codex reported (`/bin/ps` denied, PostgreSQL cluster not initialising, sandbox worker not launching) are properties of that review environment: on this host `/bin/ps`, `sandbox-exec` and PostgreSQL work. The sandbox launch failure was nevertheless a **real application defect** (not only an environment restriction); the root causes are below.
 
-* Focused unit checks: **34 passed, 8 skipped**. The skips are live confinement checks; the Seatbelt profile could not pass its runtime self-test.
-* Full local `tests/unit` plus `tests/integration`: **582 passed, 19 skipped, 2 failed**. Both failures are environment-confinement failures in existing restricted-worker tests: `/bin/ps` execution is denied to the memory monitor, and a restricted PDF worker exits before returning a result. They were not reclassified as passes and the worker policy was not weakened.
-* `tests/m1`: **5 passed, 32 skipped** because migration/application/worker PostgreSQL URLs were not configured. `pg_isready` found no listener at `127.0.0.1:5432`. A fresh private PostgreSQL cluster initialization was attempted under `.runtime/review-pg`; initialization failed because the host denied System V shared-memory creation. No database was created or modified.
-* Frontend production build (`npm run build`): **passed**. Playwright was not run because its configured API/database-backed stack was unavailable; the shared services were left untouched.
-* XLSX index-fidelity and benchmark scripts: **not run**; both require the isolated API and stakeholder workbook corpus. No corpus file or shared document storage was read, changed or staged in this follow-up.
-* PostgreSQL backend, durable-lineage migration, DOCX/PDF end-to-end checks, tenant authorization, download gates and non-ZIP stakeholder acceptance: **not verified** in this environment.
+### 13.1 F1 - macOS Seatbelt confinement
 
-### Deployment steps and current readiness
+**Root causes of the launch failure** (found with minimal canaries, `/usr/bin/true` first, then the Python interpreter, then LibreOffice):
 
-There are no new environment variables or runtime dependencies. Apply the new lineage schema with the normal Alembic `upgrade head` migration step before serving the updated API; migration `0008_version_lineage_class` is required. Continue provisioning the isolated stack only with a loopback PostgreSQL 16 target and the existing isolated roles. The application requires its configured scanner, LibreOffice and OpenSSL as before. Do not deploy until macOS Seatbelt live canaries, migration/backfill tests, the complete PostgreSQL suite, production-build Playwright, XLSX benchmark/fidelity and document acceptance suites pass in isolated resources. Linux Bubblewrap and container confinement remain **NOT VERIFIED**. Rollback of application code requires restoring the prior build; downgrade `0008_version_lineage_class` removes only the new metadata column and constraint, but doing so discards persisted lineage classification and should only follow a database backup and deliberate rollback approval.
+1. A deny-default profile cannot start any process unless the root directory entry `/` is readable (`(literal "/")`; only that one entry, not its children).
+2. The interpreter/tool is reached through symlinks (virtualenv link, Homebrew `opt/` and `Cellar/` links, directory links). Every hop of the chain needs a literal read, an exec grant and metadata on its ancestors; the profile now resolves each hop (`SeatbeltRunner._chain`).
+3. `/etc`, `/var`, `/tmp` are firmlinks; the link entries themselves (not their targets) must be readable.
+4. LibreOffice additionally needs: the whole application bundle read-only (bundle root, not only `Contents`), Mach service lookups to start at all, local AF_UNIX sockets, and its single-instance IPC pipe `/private/var/tmp/OSL_PIPE_<uid>_SingleOfficeIPC_<hex>`. A blanket `(deny network*)` also broke it (launcher to `soffice.bin` socket); IP networking is still denied.
+5. Test defect: the live canary test generated a child snippet with an unescaped newline (syntax error), so it never tested anything.
 
-### Additional source and regression files in this follow-up
+**What stays denied.** `(deny default)`; no `(allow default)`; writes only in the job scratch and `/dev/null`; **no** grant of `/private/var/tmp` as a directory tree, `/private/var/folders` or `/private/tmp`; the only write outside scratch is the exact OSL pipe name pattern plus the `/private/var/tmp` directory entry itself (children are not granted); IP networking denied; no `/Users`, credentials, project directory, shared storage or other jobs' scratch. Mach lookups (`allow mach*`) are granted to LibreOffice only, because it does not start without them; they carry no file access but are broader than ideal and remain a documented residual risk. The OSL pipe name hash could not be derived per job, so the pattern allows any `OSL_PIPE_<uid>_SingleOfficeIPC_*` name (a document cannot choose other file names).
 
-* `apps/web/src/lib/api.ts`
-* `apps/web/src/pages/Compare.tsx`
-* `apps/web/src/pages/Library.tsx`
-* `apps/web/src/pages/Workspace.tsx`
-* `docs/document-experience-upgrade.md`
-* `packages/api/compare.py`
-* `packages/api/workspace.py`
-* `packages/core/compare.py`
-* `packages/db/migrations/versions/0008_version_lineage_class.py`
-* `packages/registry/documents.py`
-* `packages/workers/sandbox.py`
-* `scripts/dev/iso_config.py`
-* `scripts/dev/isolated-stack.sh`
-* `tests/unit/test_compare_indexed.py`
-* `tests/unit/test_iso_config.py`
-* `tests/unit/test_sandbox.py`
-* `tests/unit/test_working_copy_lineage.py`
+**Runtime evidence (real enforcement, not profile inspection):**
+
+* `GET /health/sandbox` and `scripts/dev/check-sandbox.py`: self-test PASSED (all forbidden actions refused, scratch writable), READY.
+* `tests/unit/test_sandbox.py`: **16 passed, 0 skipped** including the two-job isolation test (own scratch read/write allowed; other job's file read and write denied; unrelated `/private/var/tmp` file read/write denied; credential file under home denied; shared-storage listing denied; project file denied; IP connection denied; child process confined) and a real LibreOffice render under live Seatbelt.
+* Legitimate processing under confinement: DOCX rendering `docx_fidelity` **26/26**, `docx_geometry` **9/9**; PDF/signed `signed_flow` **82/82**; `security_flow` **23/23**; XLSX windowed index and save under the restricted worker `xlsx_benchmark` **32/32**, `xlsx_index_fidelity` **36/36**.
+
+**Not verified (reported as such):** Linux Bubblewrap: **NOT RUNTIME VERIFIED** (command construction is unit-tested only). Container confinement: **NOT VERIFIED**. Other macOS versions: not tested.
+
+### 13.2 F2 - isolated database and stack script
+
+Defects found by actually running the script (the previous unit tests only exercised the validator module): (a) `set --` in the validation block replaced the positional parameters, so `up`, `down`, `status` and `drop` printed usage and did nothing; (b) `set -- $(validator) || ...` masks the validator's exit status, so invalid ports were not refused; (c) one storage directory was shared by every isolated database; storage is now per database (`storage.<name>`, the original name keeps `storage`); (d) `drop` refused a database provisioned with `db` (no storage directory yet).
+
+Verified: refusal of `channel360_test`, `a;b`, an over-length name, ports 8000/5174/non-numeric/out-of-range, non-loopback PostgreSQL host, invalid port, malformed tenant UUID; ownership markers on database and storage; a disposable database (`channel360_iso_empty`) was provisioned, migrated and dropped; dropping `channel360_test` is refused. Pre-existing isolated databases were not deleted.
+
+### 13.3 F3 - XLSX comparison memory (`scripts/corpus/xlsx_compare_stress.py`, fresh process per scan)
+
+| Case | Cells scanned | Changes detected (independent oracle) | Returned | List status | Peak RSS / scan growth |
+|---|---|---|---|---|---|
+| small | 1,980 | 83 | 83 | COMPLETE | 78 MB / 1 MB |
+| 60,000 cells | 60,830 | 4,101 | 4,101 | COMPLETE | 86 MB / 9 MB |
+| 180,000 cells | 180,830 | 12,141 | 12,141 | COMPLETE | 92 MB / 15 MB |
+| 180,000 cells, every value cell changed | 180,830 | **174,150** | 98,222 | **TRUNCATED** | 162 MB / 85 MB |
+
+Counts equal an openpyxl cell-by-cell oracle in every case; no phantom additions or removals; formula edits (including the shared-formula column) counted; the tail edit far outside the first window is found. The scan stays COMPLETE while the retained list is capped at 16 MB / 200,000 records and flagged `list_status=TRUNCATED`, `has_more`, with `total_changes_detected` and `returned_changes`; the UI shows "Scan COMPLETE - list TRUNCATED - showing N of M". One defect fixed: the per-record `id` added at finalisation was not budgeted, so retained bytes could exceed the cap by about 12 percent. API-level comparison on the benchmark workbooks finds every edit (below).
+
+### 13.4 F4 - migration 0008 on real PostgreSQL (`scripts/dev/lineage_migration_check.py`)
+
+Executing the migration found that the committed version **did nothing** on a real database: every tenant table uses `FORCE ROW LEVEL SECURITY`, so the migration role saw zero rows, and not even `kind='original'` rows were classified. Fixed: the table owner lifts `FORCE` on `document_versions` and `audit_events` inside the migration transaction and restores it, and a post-condition raises if any original version is left unclassified. A second defect (a standard release whose parent was classified in the same `UPDATE` stayed `unknown`) is fixed by classifying with a recursive unknown-root query.
+
+Verified on disposable databases: migrations 0001-0007 applied; historical data seeded (signed-PDF-style original, unsigned working copy, descendants, branching descendants, standard releases, legacy versions without provenance, a second tenant whose audit event names a first-tenant version); 0008 executed; column `text NOT NULL DEFAULT 'unknown'` and the CHECK constraint present and enforced; backfill **16/16** (original, working copies and all descendants and branches, standard, unknown roots and their descendants stay `unknown`, cross-tenant event ignored); 2,200 further audit events appended with classifications unchanged; the isolated API restarted with identical History labels (**14/14** API checks, tenant B receives 404 for tenant A's document); documented rollback (downgrade to 0007 removes column and constraint; re-upgrade reproduces the same classifications); an empty database migrates to 0008 with `FORCE ROW LEVEL SECURITY` intact. A missing stored object now yields a controlled 409 `stored_file_unavailable` instead of an unhandled 500 (found while exercising seeded rows without files).
+
+### 13.5 Regression found by the full browser run
+
+The bounded comparison cache introduced in the review commit stored results with `state.x = ...` but the cell-marks endpoint read `state.__dict__`; every marks request returned 409 and no changed cell was highlighted (4 Playwright specs failed). One shared accessor now serves both (`tests/unit/test_compare_cache.py`).
+
+### 13.6 Final regression (fresh isolated PostgreSQL `channel360_iso_pgfinal`, production build on :5180)
+
+| Suite | Result |
+|---|---|
+| Backend `pytest tests` (PostgreSQL URLs set) | **749 passed, 0 failed, 0 skipped** |
+| Playwright, all specs except the ZIP spec | **88 passed, 0 failed** |
+| Stakeholder acceptance, non-ZIP (`acceptance_run.py --skip-zip`) | **17 PASS, 0 FAIL**, ZIP stage reported OUT OF SCOPE |
+| `compare_flow` / `branch_compare_flow` | 31/31, 11/11 |
+| `xlsx_fidelity` / `xlsx_index_fidelity` | 91/91, 36/36 |
+| `docx_fidelity` / `docx_geometry` | 26/26, 9/9 |
+| `signed_flow` / `security_flow` | 82/82, 23/23 |
+| `xlsx_benchmark` | 32/32 |
+| `lineage_migration_check` / `xlsx_compare_stress` | all phases pass / 20/20 |
+
+Workbook benchmark through the API (edit near the top and far down, native save, reopen, complete comparison):
+
+| Workbook | Cells | Index ready | Window (max) | Save | Complete comparison |
+|---|---|---|---|---|---|
+| small RFQ | 604 | 0.23 s | 6 ms | 0.6 s | 0.24 s |
+| medium QCR | 312 | 0.23 s | 6 ms | 0.7 s | 0.23 s |
+| 60,000 cells | 60,830 | 1.7 s | 6 ms | 4.0 s | 1.8 s |
+| 180,000 cells | 180,830 | 4.8 s | 6 ms | 11.3 s | 5.1 s |
+
+### 13.7 Supported environments, dependencies, deployment, rollback
+
+* **Verified:** macOS (Apple silicon, Darwin 25.6) with Seatbelt, PostgreSQL 16, LibreOffice 26.x, OpenSSL 3+ (4.1 tested). **Linux Bubblewrap: NOT RUNTIME VERIFIED. Container confinement: NOT VERIFIED.** Document previews and signature validation fail closed when the self-test does not pass; do not deploy to Linux or containers as production-ready until the Bubblewrap path has been run there.
+* **Dependencies:** LibreOffice (with Carlito/Liberation/Caladea fonts, bundled with the macOS application), OpenSSL 3+, the host SQLite library for index reads, ClamAV socket for uploads.
+* **Deployment:** back up the database; apply `alembic upgrade head` (0008 must run as the owner of `document_versions` and `audit_events`, because it temporarily lifts and restores `FORCE ROW LEVEL SECURITY`); then start the new API; check `GET /health/sandbox` reports `verified_here: true`. Derived caches `.preview-cache` and `.xlsx-index` are disposable.
+* **Rollback:** stop the new API, `alembic downgrade 0007_edit_set_supersession` (drops the column and constraint; data and audit history are untouched), deploy the previous build. Re-upgrading reproduces identical classifications.
+
+### 13.8 Remaining limitations
+
+ZIP archive import is out of scope and not tested this cycle. The 180,000-cell first viewport is dominated by the one-time index build (about 5 s). Linux and container confinement are unverified. The LibreOffice Mach grant is broad. Marine PDF per-word text runs remain a known fidelity limit. Leftover isolated databases and storage directories are kept until cleanup is authorised.
