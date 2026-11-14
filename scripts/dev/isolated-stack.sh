@@ -113,8 +113,11 @@ status)
 drop)
   write_pgpass; export PGPASSFILE PGHOST PGPORT
   [ "$(psql -X -h "$PGHOST" -p "$PGPORT" -d postgres -Atc "select shobj_description(oid,'pg_database') from pg_database where datname=$("$PYTHON" "$ROOT/scripts/dev/iso_config.py" quote-literal "$NAME")")" = "channel360-isolated-dev-stack" ] || { echo "database $NAME is not marked as an isolated dev stack; refusing" >&2; exit 1; }
-  [ ! -L "$STORAGE" ] && [ -f "$STORAGE/.channel360-isolated-stack" ] &&
-    [ "$(cat "$STORAGE/.channel360-isolated-stack")" = "channel360-isolated-dev-stack" ] || { echo "storage is not marked as this isolated stack; refusing" >&2; exit 1; }
+  # a database provisioned with `db` only has no storage directory yet; an existing one must carry the ownership marker
+  if [ -e "$STORAGE" ] || [ -L "$STORAGE" ]; then
+    [ ! -L "$STORAGE" ] && [ -f "$STORAGE/.channel360-isolated-stack" ] &&
+      [ "$(cat "$STORAGE/.channel360-isolated-stack")" = "channel360-isolated-dev-stack" ] || { echo "storage is not marked as this isolated stack; refusing" >&2; exit 1; }
+  fi
   psql -X -h "$PGHOST" -p "$PGPORT" -d postgres -c "DROP DATABASE $QNAME"
   rm -rf "$STORAGE"
   rm -f "$PGPASSFILE" ;;

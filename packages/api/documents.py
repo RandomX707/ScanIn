@@ -21,7 +21,7 @@ from packages.api.db_context import api_tenant_transaction
 from packages.api.errors import APIError
 from packages.ingestion.pipeline import IngestionOrchestrator
 from packages.registry.documents import DocumentRepository, is_download_eligible
-from packages.storage.local import ImmutableLocalStorage, StoredFile
+from packages.storage.local import ImmutableLocalStorage, StorageRejected, StoredFile
 from packages.workers.parser import ParserNotVerified, PdfVerificationWorkerUnavailable, RestrictedPdfVerifier
 from packages.core.models.contracts import TypedValue
 from packages.db.worker_context import ValidatedJobContext, worker_tenant_transaction
@@ -170,7 +170,10 @@ def _source_version(request: Request, identity: AuthenticatedIdentity, document_
                 raise APIError(409, "document_not_ready", "The document is not ready for editing.")
             stored = StoredFile(identity.tenant_id, document_id, storage.root / str(version["storage_key"]),
                                 str(version["storage_key"]), int(version["size_bytes"]), str(version["sha256"]))
-            source = storage.read_original(stored)
+            try:
+                source = storage.read_original(stored)
+            except StorageRejected:       # missing, resized or tampered object: a controlled refusal, never an unhandled 500
+                raise APIError(409, "stored_file_unavailable", "The stored file for this version is unavailable or failed its integrity check.") from None
     return version, source
 
 
