@@ -13,6 +13,13 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript((token) => sessionStorage.setItem('channel360.demo.session', token), run().token);
 });
 
+// Without the private evidence this file would register ZERO tests and vanish from the report. Say so explicitly instead (SKIPPED, with the prerequisite).
+if (!fs.existsSync(file)) {
+  test('PREREQUISITE (private stakeholder corpus): Real DOCX (Track Changes setting on)', () => {
+    test.skip(true, 'private stakeholder corpus/manifest not present (.private/ and Policy Copies/ are not part of the repository); these acceptance checks did NOT run');
+  });
+}
+
 test.describe('Real DOCX (Track Changes setting on, no actual revisions)', () => {
   test.skip(!fs.existsSync(file), 'private stakeholder corpus not present');
   test('opens, edits a bounded paragraph, keeps table/images/links/setting, explains tracking', async ({ page }) => {

@@ -17,7 +17,16 @@ API = os.environ.get("CHANNEL360_API", "http://127.0.0.1:8010")
 if API.rstrip("/").endswith((":8000", ":5174")):
     raise SystemExit("REFUSED: the acceptance runner uploads the whole corpus and must run against the isolated stack, never the shared app")
 OUT = Path(os.environ.get("CHANNEL360_RESULTS_DIR") or (ROOT / ".private/inventory"))
-MANIFEST = json.load(open(ROOT / ".private/inventory/manifest.json"))
+MANIFEST_PATH = ROOT / ".private/inventory/manifest.json"
+
+
+def load_manifest():
+    """The stakeholder inventory is PRIVATE evidence (gitignored). Importing this module must not need it (the helper functions are
+    unit-tested with synthetic data); actually running the acceptance does, and then its absence is a hard failure, never a pass."""
+    if not MANIFEST_PATH.is_file():
+        raise SystemExit("PREREQUISITE MISSING: the private stakeholder manifest .private/inventory/manifest.json is required to run the "
+                         "acceptance; it is not part of the repository. The run did NOT pass.")
+    return json.load(open(MANIFEST_PATH))
 PY = sys.executable
 # The original QCR.zip / RFQ.zip must sit in "Policy Copies". If they are gone, CHANNEL360_ZIP_DIR may point at archives rebuilt with
 # scripts/corpus/rebuild_archives.py; the result is then labelled RECONSTRUCTED so it is never mistaken for the original archives.
@@ -72,7 +81,7 @@ class Client:
 
 def unique_docs():
     seen, out = set(), []
-    for o in MANIFEST["occurrences"]:
+    for o in load_manifest()["occurrences"]:
         if o["sha256"] in seen:
             continue
         seen.add(o["sha256"])

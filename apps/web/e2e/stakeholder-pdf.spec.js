@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
 const corpus = process.env.CHANNEL360_CORPUS_DIR || path.join(root, 'Policy Copies');
-const python = path.join(root, '.venv/bin/python');
+const python = (process.env.IDW_E2E_PYTHON || path.join(root, '.venv/bin/python'));
 const have = (name) => fs.existsSync(path.join(corpus, name));
 const run = () => JSON.parse(fs.readFileSync(path.join(root, '.runtime/e2e-run.json'), 'utf8'));
 const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');

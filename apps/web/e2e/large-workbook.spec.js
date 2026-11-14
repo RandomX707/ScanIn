@@ -7,10 +7,11 @@ import { fileURLToPath } from 'node:url';
 // Virtualised viewer, edit, save and COMPLETE comparison on large synthetic workbooks. Measurements go to .private/feature-results.
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
-const python = path.join(root, '.venv/bin/python');
+const python = (process.env.IDW_E2E_PYTHON || path.join(root, '.venv/bin/python'));
 const run = () => JSON.parse(fs.readFileSync(path.join(root, '.runtime/e2e-run.json'), 'utf8'));
 const sizes = (process.env.LARGE_ROWS || '2000,6000').split(',').map(Number);   // x30 columns = 60,000 and 180,000 cells
 const results = path.join(root, '.private/feature-results/large-workbook-browser.json');
+fs.mkdirSync(path.dirname(results), { recursive: true });      // a clean checkout has no .private/ directory
 test.beforeEach(async ({ page }) => { await page.addInitScript((token) => sessionStorage.setItem('channel360.demo.session', token), run().token); });
 
 for (const rows of sizes) {

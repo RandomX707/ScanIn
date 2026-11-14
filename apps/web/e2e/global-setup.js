@@ -13,7 +13,7 @@ if (['8000', '5174', '80', '443', ''].includes(apiPort)) {
 
 // Every run gets its own tenant, so test documents never appear in the demo owner's workspace.
 export default async function globalSetup() {
-  const issued = JSON.parse(execFileSync(path.join(root, '.venv/bin/python'), [path.join(root, 'scripts/dev/issue_iso_token.py')]).toString());
+  const issued = JSON.parse(execFileSync((process.env.IDW_E2E_PYTHON || path.join(root, '.venv/bin/python')), [path.join(root, 'scripts/dev/issue_iso_token.py')]).toString());
   fs.mkdirSync(path.join(root, '.runtime'), { recursive: true });
   fs.writeFileSync(path.join(root, '.runtime/e2e-run.json'), JSON.stringify({ tenant_id: issued.tenant_id, token: issued.token }));
   // Snapshot what the demo workspace holds before the suite, to prove afterwards that nothing was added.

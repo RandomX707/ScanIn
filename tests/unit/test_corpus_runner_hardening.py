@@ -53,3 +53,19 @@ def test_native_xlsx_blank_value_accepts_excel_numeric_coercion_but_text_stays_e
 
     assert runner.native_cell_value_matches("null", 12345, "12345")
     assert not runner.native_cell_value_matches("string", 12345, "12345")
+
+
+def test_missing_private_manifest_is_a_hard_failure_not_a_pass(tmp_path):
+    runner = _load("acceptance_run_prereq", "scripts/corpus/acceptance_run.py")
+    runner.MANIFEST_PATH = tmp_path / "absent-manifest.json"
+
+    with pytest.raises(SystemExit, match="PREREQUISITE MISSING"):
+        runner.load_manifest()
+
+
+def test_benchmark_without_private_workbooks_fails_loudly(tmp_path, monkeypatch):
+    benchmark = _load("xlsx_benchmark_prereq", "scripts/corpus/xlsx_benchmark.py")
+    monkeypatch.setattr(benchmark, "CORPUS", tmp_path)
+
+    with pytest.raises(SystemExit, match="PREREQUISITE MISSING"):
+        benchmark.cases()

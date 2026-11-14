@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
-const python = path.join(root, '.venv/bin/python');
+const python = (process.env.IDW_E2E_PYTHON || path.join(root, '.venv/bin/python'));
 const corpus = process.env.CHANNEL360_CORPUS_DIR || path.join(root, 'Policy Copies');
 // If the original archives are gone, CHANNEL360_ZIP_DIR may point at archives rebuilt by scripts/corpus/rebuild_archives.py (reported as reconstructed).
 const zipDir = process.env.CHANNEL360_ZIP_DIR || corpus;

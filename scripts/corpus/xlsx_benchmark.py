@@ -39,12 +39,20 @@ def rss_mb():
 def synthetic(rows):
     p = Path(tempfile.mkdtemp()) / f"synthetic-{rows * 30}.xlsx"; subprocess.run([PY, str(ROOT / "scripts/corpus/make_large_workbook.py"), str(rows), "30", str(p)], check=True, capture_output=True); return p
 
-CASES = [("small RFQ workbook", next(p for p in CORPUS.rglob("*") if p.name == "CAR RFQ.xlsx")), ("medium QCR workbook", next(p for p in CORPUS.rglob("*") if p.name == "GMC QCR Format.XLSX")),
-         ("60,000-cell synthetic", synthetic(2000)), ("180,000-cell synthetic", synthetic(6000))]
+def cases():
+    """Two private stakeholder workbooks plus two synthetic ones. Built on demand (never at import) so the helpers stay unit-testable."""
+    def corpus(name):
+        found = next((p for p in CORPUS.rglob("*") if p.name == name), None)
+        if found is None:
+            raise SystemExit(f"PREREQUISITE MISSING: private stakeholder workbook {name!r} not found under 'Policy Copies/' (not part of the repository). The benchmark did NOT pass.")
+        return found
+    return [("small RFQ workbook", corpus("CAR RFQ.xlsx")), ("medium QCR workbook", corpus("GMC QCR Format.XLSX")),
+            ("60,000-cell synthetic", synthetic(2000)), ("180,000-cell synthetic", synthetic(6000))]
+
 
 def main():
     c = Client()
-    for label, path in CASES:
+    for label, path in cases():
         m: dict = {"case": label}
         mem0 = rss_mb()
         t = time.time(); s, reg, insp = c.upload(path); m["import_inspect_s"] = round(time.time() - t, 2); d, v = reg["document_id"], reg["version_id"]
