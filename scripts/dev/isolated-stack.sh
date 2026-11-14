@@ -50,6 +50,10 @@ provision_db() {
     MARKER=$(psql -X -h "$PGHOST" -p "$PGPORT" -d postgres -Atc "select shobj_description(oid,'pg_database') from pg_database where datname=$("$PYTHON" "$ROOT/scripts/dev/iso_config.py" quote-literal "$NAME")")
     [ "$MARKER" = "channel360-isolated-dev-stack" ] || { echo "refusing existing database without isolated-stack ownership marker" >&2; exit 2; }
   fi
+  if [ "${C360_ISO_NO_MIGRATE:-0}" = 1 ]; then
+    [ -n "$EXISTS" ] || { echo "C360_ISO_NO_MIGRATE needs an existing marked isolated database (e.g. a restored backup)" >&2; exit 2; }
+    echo "adopting existing isolated database $NAME as-is (no migration, grants or tenant seeding)" >&2; return 0
+  fi
   export IDW_MIGRATION_DATABASE_URL=$(url migrator)
   .venv/bin/alembic upgrade head >/dev/null
   psql -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -d "$NAME" -U channel360_test_migrator -v migration_role=channel360_test_migrator -v application_role=channel360_test_app -v worker_role=channel360_test_worker -f packages/db/grants.sql >/dev/null
