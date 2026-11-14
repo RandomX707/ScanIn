@@ -30,7 +30,8 @@ class _BoundedChanges:
         self.total += 1
         self.counts[change["kind"]] += 1
         size = len(json.dumps(change, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8"))
-        if len(self.items) < MAX_CHANGES and self.bytes + size + 32 <= MAX_CHANGE_BYTES:
+        size += 24      # the sequential "id" member added when the list is finalised
+        if len(self.items) < MAX_CHANGES and self.bytes + size <= MAX_CHANGE_BYTES:
             self.items.append(change)
             self.bytes += size
 
