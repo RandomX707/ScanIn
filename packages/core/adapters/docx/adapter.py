@@ -30,6 +30,33 @@ PROVENANCE = {
 }
 
 
+
+def _format_signature(paragraph) -> tuple[str, dict[str, Any]]:
+    """Short fingerprint of paragraph + run formatting, and a few readable properties of the first text run."""
+    from lxml import etree
+    pieces: list[bytes] = []
+    for node in paragraph.xpath("./w:pPr", namespaces=NS):
+        pieces.append(etree.tostring(node, method="c14n"))
+    props: dict[str, Any] = {}
+    first = True
+    for run in paragraph.xpath(".//w:r[w:t]", namespaces=NS):
+        rpr = run.xpath("./w:rPr", namespaces=NS)
+        if rpr:
+            pieces.append(etree.tostring(rpr[0], method="c14n"))
+        if first:
+            first = False
+            def flag(tag: str) -> bool:
+                return bool(run.xpath(f"./w:rPr/w:{tag}[not(@w:val) or not(@w:val=\"0\" or @w:val=\"false\" or @w:val=\"none\")]", namespaces=NS))
+            props = {"bold": flag("b"), "italic": flag("i"), "underline": flag("u"),
+                     "color": (run.xpath("./w:rPr/w:color/@w:val", namespaces=NS) or [None])[0],
+                     "size": (run.xpath("./w:rPr/w:sz/@w:val", namespaces=NS) or [None])[0],
+                     "font": (run.xpath("./w:rPr/w:rFonts/@w:ascii", namespaces=NS) or [None])[0],
+                     "align": (paragraph.xpath("./w:pPr/w:jc/@w:val", namespaces=NS) or [None])[0]}
+            if props["size"] and str(props["size"]).isdigit():
+                props["size"] = int(props["size"]) / 2
+    digest = hashlib.sha256(b"\x00".join(pieces)).hexdigest()[:12]
+    return digest, {k: v for k, v in props.items() if v not in (None, False)}
+
 class DocxDocumentError(ValueError):
     def __init__(self, code: str):
         self.code = code
@@ -202,6 +229,17 @@ class DocxAdapter:
                              "paragraph_index": paragraph_index, "text": text,
                              "kind": "header" if "header" in part else "footer" if "footer" in part else
                                      "table_cell" if paragraph.xpath("ancestor::w:tc", namespaces=NS) else "paragraph"}
+                    cells = paragraph.xpath("ancestor::w:tc", namespaces=NS)
+                    if cells and part == "word/document.xml":
+                        cell = cells[0]
+                        row = cell.getparent()
+                        table = row.getparent() if row is not None else None
+                        if row is not None and table is not None:
+                            block["table"] = {
+                                "index": len(table.xpath("preceding::w:tbl", namespaces=NS)),
+                                "row": len(row.xpath("preceding-sibling::w:tr", namespaces=NS)),
+                                "col": len(cell.xpath("preceding-sibling::w:tc", namespaces=NS))}
+                    block["fmt"], block["props"] = _format_signature(paragraph)
                     style_ids = paragraph.xpath("./w:pPr/w:pStyle/@w:val", namespaces=NS)
                     outline_levels = paragraph.xpath("./w:pPr/w:outlineLvl/@w:val", namespaces=NS)
                     style_match = re.fullmatch(r"Heading([1-9])", style_ids[0]) if style_ids else None
@@ -218,7 +256,12 @@ class DocxAdapter:
             targets_by_block.setdefault(key, []).append(target.id)
         for block in blocks:
             block["target_ids"] = targets_by_block.get(block["id"], [])
-        return {"paragraph_count": len(blocks), "blocks": blocks,
+        fonts = sorted({f for part, root in roots.items()
+                        if part == "word/document.xml" or re.fullmatch(r"word/(?:header|footer)\d+\.xml", part)
+                        for f in root.xpath("//w:rFonts/@w:ascii | //w:rFonts/@w:hAnsi", namespaces=NS)})[:60]
+        media = [{"name": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+                 for name, data in sorted(parts.items()) if re.fullmatch(r"(?:word/)?media/[^/]+", name)][:200]
+        return {"paragraph_count": len(blocks), "blocks": blocks, "media": media, "fonts": fonts,
                 "document_properties": {"has_macros": any(name.lower().endswith("vbaproject.bin") for name in parts),
                                         "protected": "document_protected" in self._document_reasons(parts, roots),
                                         "tracked_changes": "tracked_changes_present" in self._document_reasons(parts, roots)},

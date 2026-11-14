@@ -96,3 +96,10 @@ def require_identity(
         )
     except (jwt.PyJWTError, PyJWKClientError, KeyError, ValueError, ValidationError, TypeError):
         raise APIError(401, "invalid_identity", "Authentication failed.") from None
+
+
+def require_owner(identity: AuthenticatedIdentity = Depends(require_identity)) -> AuthenticatedIdentity:
+    """Operations that create new document lineage (e.g. an unsigned working copy) need the OWNER role explicitly."""
+    if identity.role != "OWNER":
+        raise APIError(403, "forbidden", "Only a workspace owner can do this.")
+    return identity

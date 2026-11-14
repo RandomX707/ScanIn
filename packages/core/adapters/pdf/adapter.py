@@ -104,6 +104,17 @@ class PdfTarget:
     font_size: float | None = None
 
 
+def _widget_state(widget: Any) -> str | None:
+    """Name of a button widget's non-Off appearance state (its radio value), if it has one."""
+    try:
+        appearance = _resolve(widget.get("/AP", {}))
+        normal = _resolve(appearance.get("/N", {})) if appearance else {}
+        states = [str(key).lstrip("/") for key in normal.keys() if str(key) != "/Off"]
+    except Exception:  # noqa: BLE001 - purely presentational
+        return None
+    return states[0] if len(states) == 1 else None
+
+
 def _reader(source: bytes) -> PdfReader:
     try:
         reader = PdfReader(io.BytesIO(source), strict=True)
@@ -294,7 +305,8 @@ class PdfAdapter:
             maxlen = int(maxlen) if maxlen is not None else None
             fingerprint = _field_fingerprint(name, field_obj, widget_list)
             locator = {"field_name": name, "field_type": kind, "pages": [p for p, _ in widget_list],
-                       "widgets": [{"page": p, "rect": [float(x) for x in w.get("/Rect", [])]} for p, w in widget_list],
+                       "widgets": [{"page": p, "rect": [float(x) for x in w.get("/Rect", [])],
+                                    "state": _widget_state(w)} for p, w in widget_list],
                        "required": bool(flags & int(FieldFlag.REQUIRED)),
                        "multiline": bool(flags & (1 << 12)),
                        "font_name": font_name}

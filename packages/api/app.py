@@ -17,6 +17,15 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from packages.api.errors import APIError, APIErrorResponse
 from packages.api.documents import router as documents_router
 from packages.api.dashboard import router as dashboard_router
+from packages.api.archives import router as archives_router
+from packages.api.workspace import router as workspace_router
+from packages.api.render import router as render_router
+from packages.api.compare import router as compare_router
+from packages.api.working_copy import router as working_copy_router
+from packages.api.sheet_index import SheetIndexManager, router as sheet_index_router
+from packages.workers.xlsx_index import RestrictedXlsxIndexer
+from packages.workers.sigcheck import SignatureValidator
+from packages.workers.office_render import SandboxedOfficeRenderer
 from packages.api.logging_config import RequestLogMiddleware
 from packages.api.local_demo import router as local_demo_router
 from packages.api.settings import Settings, get_settings
@@ -24,6 +33,7 @@ from packages.db.engine import create_runtime_engine, create_worker_engine
 from packages.ingestion.pipeline import IngestionOrchestrator
 from packages.ingestion.scanner import ClamAvUnixScanner
 from packages.storage.local import ImmutableLocalStorage
+from packages.workers.pdf_edit import RestrictedPdfEditor
 from packages.workers.parser import RestrictedParser
 
 
@@ -58,6 +68,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.worker_engine = worker_engine
     app.state.document_storage = ImmutableLocalStorage(runtime_settings.storage_root)
     app.state.restricted_parser = RestrictedParser(Path(__file__).resolve().parents[2])
+    app.state.office_renderer = SandboxedOfficeRenderer()
+    app.state.signature_validator = SignatureValidator()
+    app.state.sheet_index = SheetIndexManager(RestrictedXlsxIndexer(Path(__file__).resolve().parents[2]))
+    app.state.pdf_editor = RestrictedPdfEditor(Path(__file__).resolve().parents[2])
     app.state.ingestion_pipeline = IngestionOrchestrator(
         app.state.document_storage,
         ClamAvUnixScanner(runtime_settings.clamav_socket_path),
@@ -65,6 +79,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.include_router(documents_router)
     app.include_router(dashboard_router)
+    app.include_router(workspace_router)
+    app.include_router(render_router)
+    app.include_router(compare_router)
+    app.include_router(working_copy_router)
+    app.include_router(sheet_index_router)
+    app.include_router(archives_router)
     app.include_router(local_demo_router)
     app.add_middleware(RequestLogMiddleware)
     app.add_middleware(
@@ -115,6 +135,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health/live", tags=["health"])
     def health_live() -> dict[str, str]:
         return {"status": "alive"}
+
+    @app.get("/health/sandbox", tags=["health"])
+    def health_sandbox() -> dict[str, Any]:
+        """Runtime verdict of the document-processing confinement on THIS host (never claims more than the self-test proved)."""
+        from packages.workers.sandbox import sandbox_status
+        st = sandbox_status()
+        return {"platform": st.platform, "runner": st.runner_label, "verified_here": st.verified_here, "detail": st.detail, "tools_present": st.tools,
+                "document_previews": st.verified_here and st.tools.get("soffice", False), "signature_validation": st.verified_here and st.tools.get("openssl", False)}
 
     @app.get("/health/ready", tags=["health"])
     def health_ready(request: Request) -> JSONResponse:

@@ -91,7 +91,16 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
                                   **({"requested": len(target_ids), "found": 0} if target_ids is not None else {})}
         result["targets_truncated"] = False
     elif include_targets and supported:
-        if windowed:
+        fast_selected = None
+        if target_ids is not None and not windowed and callable(getattr(source_adapter, "targets_by_id_fast", None)):
+            # Exact lookup of a few cells: build only those targets (the same per-cell logic as the full scan). Any id that is not an
+            # ordinary value cell falls through to the full scan below, so unsupported/read-only cells are reported exactly as before.
+            found = source_adapter.targets_by_id_fast(data, target_ids)
+            if all(i in found for i in target_ids):
+                fast_selected = [found[i] for i in target_ids]
+        if fast_selected is not None:
+            total = len(fast_selected)
+        elif windowed:
             total = source_adapter.target_count(data)
         else:
             # Every parser-discovered value stays viewable (and eligible for sidecar corrections) with
@@ -112,7 +121,7 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
             total = len(all_targets)
         if target_ids is not None:
             wanted = set(target_ids)
-            selected = (source_adapter.targets_by_id(data, target_ids) if windowed
+            selected = (fast_selected if fast_selected is not None else source_adapter.targets_by_id(data, target_ids) if windowed
                         else [target for target in all_targets if target.id in wanted])
             result["targets"] = [_target_dict(target) for target in selected]
             result["targets_page"] = {"mode": "lookup", "offset": 0, "limit": MAX_TARGET_LOOKUP_IDS,
@@ -132,6 +141,19 @@ def inspect_bytes(data: bytes, *, filename: str = "", max_expansion_ratio: int =
         result["details"] = _pdf_details(data, registry.pdf, include_targets=include_targets)
     elif supported and profile.adapter == "docx":
         result["details"] = registry.docx.details(data, include_targets=include_targets)
+    elif supported and profile.adapter == "xlsx" and include_targets and not target_offset:
+        from packages.core.xlsx_layout import extract as _xlsx_layout
+        try:
+            result["details"] = {"layout": _xlsx_layout(data)}
+        except Exception:  # noqa: BLE001 - layout is cosmetic; the editable grid still works without it
+            result["details"] = {"layout": None}
+    elif profile.adapter == "pptx":
+        # Read-only slide text for the document map; parsed here, inside the restricted worker.
+        from packages.core.extraction import pptx_details
+        try:
+            result["details"] = pptx_details(data)
+        except Exception:  # noqa: BLE001 - an unreadable deck is simply shown without text
+            result["details"] = {"slides": []}
     from packages.core.summaries.structural import StructuralSummaryProvider
     _apply_document_level_editability(result, profile)
     if include_targets and supported:
@@ -305,19 +327,9 @@ def _pdf_details(data: bytes, adapter, *, include_targets: bool) -> dict[str, An
             text_page = page.get_textpage()
             count = min(text_page.count_chars(), 10000)
             text = text_page.get_text_range(0, count)
-            spans: list[dict[str, Any]] = []
-            for char_index, char in enumerate(text[:2000]):
-                if char.isspace():
-                    continue
-                try:
-                    left, bottom, right, top = text_page.get_charbox(char_index)
-                except (IndexError, ValueError):
-                    continue
-                spans.append({"start": char_index, "end": char_index + 1, "text": char,
-                              "bbox": [round(left, 2), round(bottom, 2), round(right, 2), round(top, 2)]})
             pages.append({"page": page_number, "width": round(page.get_size()[0], 2),
                           "height": round(page.get_size()[1], 2), "text": text,
-                          "text_spans": spans, "scanned_or_image_only": not bool(text.strip())})
+                          "scanned_or_image_only": not bool(text.strip())})
     finally:
         document.close()
     return {"page_count": len(reader.pages), "title": str((reader.metadata or {}).get("/Title", "")),

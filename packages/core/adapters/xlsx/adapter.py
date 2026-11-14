@@ -233,6 +233,23 @@ UNSAFE_FORMULA = re.compile(r"\b(?:INDIRECT|OFFSET)\s*\(|\[[^\]]+\]|\bR\[?-?\d",
 CELL_COORD = re.compile(r"^\$?([A-Z]{1,3})\$?([1-9][0-9]*)$", re.I)
 
 
+def _merge_covered(root: etree._Element) -> set[str]:
+    """References hidden under merged ranges (every merged cell except its top-left anchor)."""
+    covered: set[str] = set()
+    for merge in root.xpath(".//m:mergeCells/m:mergeCell", namespaces=NS):
+        try:
+            c1, r1, c2, r2 = range_boundaries(merge.get("ref", ""))
+        except (ValueError, TypeError):
+            continue
+        if (r2 - r1 + 1) * (c2 - c1 + 1) > 10_000:
+            continue
+        for row in range(r1, r2 + 1):
+            for col in range(c1, c2 + 1):
+                if (row, col) != (r1, c1):
+                    covered.add(f"{get_column_letter(col)}{row}")
+    return covered
+
+
 def _column_index(text: str) -> int:
     out = 0
     for char in text.upper():
@@ -303,12 +320,31 @@ class _FormulaGraph:
     def __init__(self, refs: list[tuple[str, str, str, str]]):
         self.refs = refs
         self._direct: dict[tuple[str, str], frozenset[str]] = {}
+        # Index once instead of scanning every reference for every queried cell (that made inspection cells x formulas):
+        # single-cell references are looked up exactly; only true ranges are scanned (and they are few).
+        self._single: dict[tuple[str, int, int], set[str]] = {}
+        self._ranges: dict[str, list[tuple[int, int, int, int, str]]] = {}
+        for target_sheet, first, last, formula_id in refs:
+            a, b = CELL_COORD.match(first), CELL_COORD.match(last)
+            if not (a and b):
+                continue                                   # an unparsable reference covers nothing (as before)
+            ac, ar, bc, br = _column_index(a.group(1)), int(a.group(2)), _column_index(b.group(1)), int(b.group(2))
+            if (ac, ar) == (bc, br):
+                self._single.setdefault((target_sheet, ac, ar), set()).add(formula_id)
+            else:
+                self._ranges.setdefault(target_sheet, []).append((min(ac, bc), max(ac, bc), min(ar, br), max(ar, br), formula_id))
 
     def direct(self, sheet: str, cell: str) -> frozenset[str]:
         key = (sheet, cell.replace("$", "").upper())
         if key not in self._direct:
-            self._direct[key] = frozenset(formula_id for target_sheet, first, last, formula_id in self.refs
-                                          if target_sheet == sheet and _covers(first, last, key[1]))
+            x = CELL_COORD.match(key[1])
+            if not x:
+                self._direct[key] = frozenset()
+            else:
+                col, row = _column_index(x.group(1)), int(x.group(2))
+                found = set(self._single.get((sheet, col, row), ()))
+                found.update(fid for lc, hc, lr, hr, fid in self._ranges.get(sheet, ()) if lc <= col <= hc and lr <= row <= hr)
+                self._direct[key] = frozenset(found)
         return self._direct[key]
 
     def dependents_of(self, sheet: str, cell: str) -> set[str]:
@@ -334,10 +370,12 @@ def _formula_references(formula: str, own_sheet: str) -> tuple[list[tuple[str, s
         sheet = (m.group(1).replace("''", "'") if m.group(1) else m.group(2) or own_sheet).strip()
         refs.append((sheet, m.group(3), m.group(4) or m.group(3)))
     residue = CELL_REF.sub("", clean)
+    # IFERROR/IFNA are pure error handlers: their dependencies are exactly the references in their arguments.
     # Defined names are supported only when mapped to a range; other bare names make analysis unknown.
     residue = re.sub(r"(?:'[^']+'|[A-Za-z_][A-Za-z0-9_. ]*)!", "", residue)
-    residue = re.sub(r"\b(?:SUM|AVERAGE|MIN|MAX|COUNT|IF|AND|OR|NOT|ROUND|ABS|COUNTIF|SUMIF)\b", "", residue, flags=re.I)
+    residue = re.sub(r"\b(?:SUM|AVERAGE|MIN|MAX|COUNT|IF|IFERROR|IFNA|AND|OR|NOT|ROUND|ABS|COUNTIF|SUMIF)\b", "", residue, flags=re.I)
     residue = re.sub(r"\b(?:TRUE|FALSE)\b", "", residue, flags=re.I)
+    residue = residue.replace('""', "")        # string-literal placeholders cannot carry references
     residue = re.sub(r"[0-9.]+|[+*/^<>=(),;:%&\s-]+", "", residue)
     # Conservative: defined names, table syntax, or other identifiers are not resolved in this M0 parser.
     unknown = bool(residue)
@@ -475,30 +513,64 @@ class XlsxAdapter:
                          f"{sheet}!{c.get('r')}") for target_sheet, first, last in parsed)
         return parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula
 
-    def targets(self, source: bytes) -> list[EditTarget]:
+    def targets_by_id_fast(self, source: bytes, ids: list[str] | tuple[str, ...]) -> dict[str, EditTarget]:
+        """Targets for specific ids, built from just those cells with exactly the per-cell logic of targets().
+
+        Ids that are not ordinary value cells (unsupported/array/rich-text cells) are simply absent from the result; callers fall
+        back to the full scan for them. Never used for ordering or counting."""
+        return {t.id: t for t in self.targets(source, only=frozenset(ids))}
+
+    def lookup_targets(self, source: bytes, ids: list[str] | tuple[str, ...]) -> tuple[dict[str, EditTarget], dict[str, EditTarget]]:
+        """(targets, unsupported) for exactly these ids (planner hook). Unsupported/array/rich cells fall back to the full scan so the
+        reported reason is identical to the unbounded path."""
+        found = self.targets_by_id_fast(source, ids)
+        missing = {i for i in ids if i not in found}
+        unsupported = {t.id: t for t in self.unsupported_targets(source) if t.id in missing} if missing else {}
+        return found, unsupported
+
+    def targets(self, source: bytes, *, only: frozenset[str] | None = None) -> list[EditTarget]:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
+        source_sha = hashlib.sha256(source).hexdigest()          # once: per-cell hashing of the whole file made this quadratic
+        wanted_refs: dict[str, set[str]] = {}
+        for item in (only or ()):
+            head, _, ref = item.removeprefix("xlsx:").rpartition("!")
+            if head and ref:
+                wanted_refs.setdefault(head, set()).add(ref)
         graph = _FormulaGraph(refs)
         unlocked_styles = _unlocked_styles(parts)
         formula_cells = {f"{sheet}!{c.get('r')}" for sheet, c in formulas}
         result: list[EditTarget] = []
         for sheet, part in sheets.items():
+            if only is not None and sheet not in wanted_refs:
+                continue
             root = _xml(parts[part][1])
             sheet_protected = root.find(f"{{{MAIN}}}sheetProtection") is not None
-            for cell in root.xpath(".//m:c", namespaces=NS):
+            covered = _merge_covered(root)
+            # Per-sheet, once: most sheets have no list validation, and re-scanning the tree per cell made inspection quadratic.
+            has_list_validation = bool(root.xpath(".//m:dataValidation[@type='list']", namespaces=NS))
+            if only is not None:
+                by_ref = {c.get("r"): c for c in root.iter(f"{{{MAIN}}}c") if c.get("r") in wanted_refs[sheet]}
+                cell_iter = [by_ref[r] for r in sorted(wanted_refs[sheet]) if r in by_ref]
+            else:
+                cell_iter = root.xpath(".//m:c", namespaces=NS)
+            for cell in cell_iter:
                 value, reason = _cell_value(cell, shared, rich, dates, epoch)
+                ref = cell.get("r", "")
+                if value is None and reason == "blank_cell" and cell.find(f"{{{MAIN}}}f") is None and ref not in covered:
+                    # An empty template field (styled cell with no value): fillable, unless it is hidden under a merged range.
+                    value, reason = TypedValue("null", None), None
                 if value is None or reason:
                     continue
-                ref = cell.get("r", "")
                 style_id = int(cell.get("s", "0")) if cell.get("s", "0").isdigit() else 0
                 if sheet_protected and style_id not in unlocked_styles:
                     reason = "protected_cell_locked"
-                validation_options, validation_unsupported = self._list_validation_options(
-                    parts, sheets, shared, rich, dates, epoch, sheet, ref, root)
+                validation_options, validation_unsupported = (self._list_validation_options(
+                    parts, sheets, shared, rich, dates, epoch, sheet, ref, root) if has_list_validation else (None, False))
                 if validation_unsupported:
                     reason = reason or "unsupported_data_validation"
                 deps: set[str] = graph.dependents_of(sheet, ref) if not unknown_formula else set()
                 fp = _fingerprint(cell)
-                result.append(EditTarget(f"xlsx:{sheet}!{ref}", hashlib.sha256(source).hexdigest(), sheet, ref,
+                result.append(EditTarget(f"xlsx:{sheet}!{ref}", source_sha, sheet, ref,
                                          value, fp, cell.get("s"), reason is None, reason,
                                          None if unknown_formula else tuple(sorted(deps))))
         return result
@@ -565,7 +637,8 @@ class XlsxAdapter:
     def preflight(self, source: bytes, target: EditTarget, patch: Patch) -> None:
         if hashlib.sha256(source).hexdigest() != patch.source_version_id:
             raise XlsxError("stale_source")
-        fresh = next((item for item in self.targets(source) if item.id == patch.target_id), None)
+        fresh = self.targets_by_id_fast(source, [patch.target_id]).get(patch.target_id) \
+            or next((item for item in self.targets(source) if item.id == patch.target_id), None)
         if fresh is None:
             raise XlsxError("target_not_found")
         if not fresh.editable:
@@ -584,14 +657,30 @@ class XlsxAdapter:
 
     def unsupported_targets(self, source: bytes) -> list[EditTarget]:
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
+        source_sha = hashlib.sha256(source).hexdigest()
         result: list[EditTarget] = []
+        masters: dict[tuple[str, str], tuple[str, str]] = {}
+        for f_sheet, f_cell in formulas:
+            f_node = f_cell.find(f"{{{MAIN}}}f")
+            if f_node.get("t") == "shared" and f_node.get("si") is not None and (f_node.text or "").strip():
+                masters[(f_sheet, f_node.get("si"))] = (f_cell.get("r", ""), f_node.text or "")
+
+        def display_formula(sheet_name: str, cell_el) -> str:
+            """Formula text to SHOW. A shared-formula child stores no text of its own: show the formula derived from its master (never a bare '=')."""
+            node = cell_el.find(f"{{{MAIN}}}f")
+            text = node.text or ""
+            if node.get("t") == "shared" and not text.strip():
+                master = masters.get((sheet_name, node.get("si") or ""))
+                derived = _translate_shared_formula(master[1], master[0], cell_el.get("r", "")) if master else None
+                return derived if derived is not None else text
+            return text
         for sheet, part in sheets.items():
             root = _xml(parts[part][1])
             seen: set[str] = set()
             for cell in root.xpath(".//m:c", namespaces=NS):
                 value, reason = _cell_value(cell, shared, rich, dates, epoch)
                 if value is not None and reason in READ_ONLY_DATE_TIME_REASONS and cell.find(f"{{{MAIN}}}f") is None:
-                    result.append(EditTarget(f"xlsx:{sheet}!{cell.get('r', '')}", hashlib.sha256(source).hexdigest(), sheet,
+                    result.append(EditTarget(f"xlsx:{sheet}!{cell.get('r', '')}", source_sha, sheet,
                                              cell.get("r", ""), value, _fingerprint(cell), cell.get("s"), False, reason,
                                              None if unknown_formula else ()))
                     continue
@@ -601,8 +690,8 @@ class XlsxAdapter:
                         formula = cell.find(f"{{{MAIN}}}f")
                         if formula.get("t") in {"array", "dataTable"} or (formula.get("ref") and ":" in formula.get("ref", "")):
                             reason = "array_formula"
-                    result.append(EditTarget(f"xlsx:{sheet}!{ref}", hashlib.sha256(source).hexdigest(), sheet, ref,
-                                             (TypedValue("string", "=" + (cell.find(f"{{{MAIN}}}f").text or ""),
+                    result.append(EditTarget(f"xlsx:{sheet}!{ref}", source_sha, sheet, ref,
+                                             (TypedValue("string", "=" + display_formula(sheet, cell),
                                                           native=cell.find(f"{{{MAIN}}}f").text or "")
                                               if cell.find(f"{{{MAIN}}}f") is not None
                                               else _rich_text_value(cell, shared) if reason == "rich_text"
@@ -618,13 +707,19 @@ class XlsxAdapter:
                             for col in range(min_col, max_col + 1):
                                 ref = f"{get_column_letter(col)}{row}"
                                 if ref in seen: continue
-                                result.append(EditTarget(f"xlsx:{sheet}!{ref}", hashlib.sha256(source).hexdigest(), sheet, ref,
+                                result.append(EditTarget(f"xlsx:{sheet}!{ref}", source_sha, sheet, ref,
                                                          TypedValue("null", None), hashlib.sha256(f"array:{sheet}:{ref}".encode()).hexdigest(),
                                                          None, False, "array_formula", None if unknown_formula else ()))
                                 seen.add(ref)
                     except ValueError:
                         continue
         return result
+
+    def type_compatible(self, old: TypedValue, new: TypedValue) -> bool:
+        """Existing rule (same type, or integer<->decimal), plus: an empty template field accepts any plain value."""
+        if old.type == "null":
+            return new.type in {"string", "integer", "decimal", "boolean"}
+        return old.type == new.type or {old.type, new.type} <= {"integer", "decimal"}
 
     def validate_new_value(self, value: TypedValue) -> None:
         if value.type not in {"string", "integer", "decimal", "date", "datetime", "boolean", "null"}:
@@ -719,15 +814,22 @@ class XlsxAdapter:
             raise XlsxError("stale_source")
         parts, sheets, shared, rich, dates, epoch, formulas, refs, unknown_formula = self._data(source)
         patches_by_part: dict[str, list[Patch]] = {}
+        located = self.targets_by_id_fast(source, [p.target_id for p in plan.patches])      # only the patched cells, not the workbook
+        slow: list[EditTarget] | None = None
         for p in plan.patches:
-            t = next((x for x in self.targets(source) if x.id == p.target_id), None)
+            t = located.get(p.target_id)
+            if t is None:
+                slow = slow if slow is not None else self.targets(source)
+                t = next((x for x in slow if x.id == p.target_id), None)
+                if t is not None:
+                    located[p.target_id] = t
             if t is None: raise XlsxError("target_not_found", p.target_id)
             patches_by_part.setdefault(sheets[t.sheet], []).append(p)
         output_parts = dict(parts)
         for part, patches in patches_by_part.items():
             root = _xml(parts[part][1])
             for patch in patches:
-                target = next(t for t in self.targets(source) if t.id == patch.target_id)
+                target = located[patch.target_id]
                 cell = root.xpath(f'.//m:c[@r="{target.cell}"]', namespaces=NS)[0]
                 if _fingerprint(cell) != patch.expected_fingerprint: raise XlsxError("fingerprint_mismatch", target.id)
                 self._encode_value(cell, patch.new_value, epoch)

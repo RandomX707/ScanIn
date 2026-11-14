@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from packages.api.auth import AuthenticatedIdentity, require_identity
@@ -20,7 +21,7 @@ from packages.api.db_context import api_tenant_transaction
 from packages.api.errors import APIError
 from packages.ingestion.pipeline import IngestionOrchestrator
 from packages.registry.documents import DocumentRepository, is_download_eligible
-from packages.storage.local import ImmutableLocalStorage, StoredFile
+from packages.storage.local import ImmutableLocalStorage, StorageRejected, StoredFile
 from packages.workers.parser import ParserNotVerified, PdfVerificationWorkerUnavailable, RestrictedPdfVerifier
 from packages.core.models.contracts import TypedValue
 from packages.db.worker_context import ValidatedJobContext, worker_tenant_transaction
@@ -97,6 +98,11 @@ class PatchBatchRequest(BaseModel):
     patches: list[PatchInput] = Field(min_length=1, max_length=200)
 
 
+def _any_version(request: Request) -> bool:
+    """Single-owner save flow: edits may start from any version of the document (set only by that flow)."""
+    return bool(getattr(request.state, "edit_any_version", False))
+
+
 def _require_owner(identity: AuthenticatedIdentity) -> None:
     if identity.role != "OWNER":
         raise APIError(403, "owner_required", "An authenticated owner identity is required.")
@@ -164,7 +170,10 @@ def _source_version(request: Request, identity: AuthenticatedIdentity, document_
                 raise APIError(409, "document_not_ready", "The document is not ready for editing.")
             stored = StoredFile(identity.tenant_id, document_id, storage.root / str(version["storage_key"]),
                                 str(version["storage_key"]), int(version["size_bytes"]), str(version["sha256"]))
-            source = storage.read_original(stored)
+            try:
+                source = storage.read_original(stored)
+            except StorageRejected:       # missing, resized or tampered object: a controlled refusal, never an unhandled 500
+                raise APIError(409, "stored_file_unavailable", "The stored file for this version is unavailable or failed its integrity check.") from None
     return version, source
 
 
@@ -242,9 +251,6 @@ async def upload_document(
     """
     safe_name = _filename(filename)
     settings = request.app.state.settings
-    storage: ImmutableLocalStorage = request.app.state.document_storage
-    pipeline: IngestionOrchestrator = request.app.state.ingestion_pipeline
-    document_id, upload_id = uuid4(), uuid4()
     with tempfile.TemporaryFile(mode="w+b") as upload:
         size = 0
         async for chunk in request.stream():
@@ -255,13 +261,20 @@ async def upload_document(
         if size == 0:
             raise APIError(422, "empty_upload", "The uploaded file is empty.")
         upload.seek(0)
-        try:
-            result = pipeline.process(identity.tenant_id, document_id, upload_id, upload, filename=safe_name)
-        except Exception as error:
-            # Keep operational details and local paths out of API responses/logs.
-            if getattr(error, "reason_code", "") == "upload_too_large":
-                raise APIError(413, "upload_too_large", "The upload exceeds the configured limit.") from None
-            raise APIError(503, "ingestion_unavailable", "The file could not be safely processed.") from None
+        return ingest_stream(request, identity, safe_name, upload)
+
+
+def ingest_stream(request: Request, identity: AuthenticatedIdentity, safe_name: str, upload) -> dict[str, object]:
+    """Scan one bounded upload stream and register a clean immutable original (shared by upload and samples)."""
+    pipeline: IngestionOrchestrator = request.app.state.ingestion_pipeline
+    document_id, upload_id = uuid4(), uuid4()
+    try:
+        result = pipeline.process(identity.tenant_id, document_id, upload_id, upload, filename=safe_name)
+    except Exception as error:
+        # Keep operational details and local paths out of API responses/logs.
+        if getattr(error, "reason_code", "") == "upload_too_large":
+            raise APIError(413, "upload_too_large", "The upload exceeds the configured limit.") from None
+        raise APIError(503, "ingestion_unavailable", "The file could not be safely processed.") from None
 
     if result.outcome != "stored_private" or result.stored_file is None or result.scan is None:
         if result.outcome in {"rejected", "quarantined"}:
@@ -283,12 +296,24 @@ async def upload_document(
     except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
         raise APIError(503, "document_registration_unavailable", "The safely scanned file could not be registered.") from None
 
+    duplicate_of = None
+    try:
+        with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
+            rows = connection.execute(text("""SELECT d.id,d.filename FROM documents d
+                JOIN document_versions v ON v.tenant_id=d.tenant_id AND v.document_id=d.id AND v.kind='original'
+                WHERE d.tenant_id=:tenant AND v.sha256=:sha AND d.id<>:me AND d.ingestion_state='ready'
+                ORDER BY d.created_at LIMIT 1"""), {"tenant": identity.tenant_id, "sha": registered.source_sha256, "me": registered.document_id}).mappings().all()
+            if rows:
+                duplicate_of = {"document_id": str(rows[0]["id"]), "name": str(rows[0]["filename"])}
+    except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
+        duplicate_of = None                      # disclosure is best-effort; the upload itself already succeeded
     return {
         "document_id": str(registered.document_id),
         "version_id": str(registered.version_id),
         "filename": registered.filename,
         "sha256": registered.source_sha256,
         "size_bytes": registered.size_bytes,
+        "duplicate_of": duplicate_of,
         "state": "staged_private",
         "message": "Upload scanned and stored privately; inspection is required before viewing.",
     }
@@ -779,14 +804,15 @@ def create_edit_set_draft(document_id: str, payload: EditSetDraftRequest, reques
             if document["ingestion_state"] != "ready" or document["current_version_id"] is None:
                 raise APIError(409, "document_not_ready", "Safe inspection must finish before creating edits.")
             repo.create_edit_set(edit_set_id=edit_set_id, document_id=parsed_id,
-                base_version_id=UUID(str(document["current_version_id"])), category=str(document["document_category"]),
-                actor_id=identity.subject, reason=payload.reason)
+                base_version_id=UUID(str(getattr(request.state, "edit_base_version_id", None) or document["current_version_id"])),
+                category=str(document["document_category"]), actor_id=identity.subject, reason=payload.reason,
+                allow_non_current=_any_version(request))
     except (SQLAlchemyError, RuntimeError, PermissionError):
         raise APIError(503, "edit_set_unavailable", "The edit draft could not be created.") from None
     except ValueError as error:
         raise APIError(409, str(error), "The document version or authorization changed.") from None
     return {"edit_set_id": str(edit_set_id), "document_id": str(parsed_id),
-            "status": "draft", "base_version_id": str(document["current_version_id"]),
+            "status": "draft", "base_version_id": str(getattr(request.state, "edit_base_version_id", None) or document["current_version_id"]),
             "authorized_category": document["document_category"], "reason": payload.reason.strip()}
 
 
@@ -839,7 +865,7 @@ def add_edit_set_patches(document_id: str, edit_set_id: str, payload: PatchBatch
         if edit_set["status"] != "draft" or edit_set["created_by"] != identity.subject:
             raise APIError(409, "edit_set_not_editable", "Only the author can change an open draft.")
         base_version_id = UUID(str(edit_set["base_version_id"]))
-        if str(edit_set["current_version_id"]) != str(base_version_id):
+        if str(edit_set["current_version_id"]) != str(base_version_id) and not _any_version(request):
             raise APIError(409, "stale_base_version", "The document changed; rebase the draft before continuing.")
     version, source = _source_version(request, identity, parsed_id, base_version_id)
     try:
@@ -869,7 +895,7 @@ def add_edit_set_patches(document_id: str, edit_set_id: str, payload: PatchBatch
             current = repo.get_edit_set(parsed_edit_id)
             if current is None or current["status"] != "draft" or current["created_by"] != identity.subject:
                 raise APIError(409, "edit_set_not_editable", "The edit draft changed while targets were being resolved.")
-            if str(current["current_version_id"]) != str(base_version_id):
+            if str(current["current_version_id"]) != str(base_version_id) and not _any_version(request):
                 raise APIError(409, "stale_base_version", "The document changed while targets were being resolved.")
             repo.add_patches(parsed_edit_id, planned, actor_id=identity.subject)
     except APIError:
@@ -899,7 +925,7 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
         if edit_set["authorized_category"] != "insurer-authored" or edit_set["document_category"] != "insurer-authored":
             raise APIError(403, "document_category_not_authorized", "The document is not authorized for native correction.")
         base_version_id = UUID(str(edit_set["base_version_id"]))
-        if str(edit_set["current_version_id"]) != str(base_version_id):
+        if str(edit_set["current_version_id"]) != str(base_version_id) and not _any_version(request):
             raise APIError(409, "stale_base_version", "Rebase the draft against the current version first.")
         stored_patches = repo.list_patches(parsed_edit_id)
     if not stored_patches:
@@ -952,7 +978,7 @@ def preflight_edit_set(document_id: str, edit_set_id: str, request: Request,
         with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
             repo = DocumentRepository(connection, identity.tenant_id)
             current = repo.get_edit_set(parsed_edit_id)
-            if current is None or current["status"] != "draft" or str(current["current_version_id"]) != str(base_version_id):
+            if current is None or current["status"] != "draft" or (str(current["current_version_id"]) != str(base_version_id) and not _any_version(request)):
                 raise APIError(409, "stale_base_version", "The edit draft changed during preflight.")
             repo.freeze_edit_set(parsed_edit_id, frozen_hash=frozen.frozen_sha256,
                                  plan=plan_payload, adapter=str(report.adapter),
@@ -1093,7 +1119,7 @@ def _release_edit_set_claimed(parsed_document: UUID, parsed_edit_set: UUID, requ
                         }), "idempotent": True}
         if edit_set["status"] != "ready_for_release":
             raise APIError(409, "edit_set_not_ready_for_release", "Preflight and freeze this edit set before release.")
-        if str(edit_set["current_version_id"]) != str(edit_set["base_version_id"]):
+        if str(edit_set["current_version_id"]) != str(edit_set["base_version_id"]) and not _any_version(request):
             raise APIError(409, "stale_base_version", "The document changed after this edit set was created.")
         frozen_payload = edit_set.get("patch_plan")
         adapter_name = str(edit_set.get("adapter") or "")
@@ -1174,7 +1200,7 @@ def _release_edit_set_claimed(parsed_document: UUID, parsed_edit_set: UUID, requ
             new_version = DocumentRepository(connection, identity.tenant_id).commit_derived_release(
                 edit_set_id=parsed_edit_set, stored=stored, outcome=outcome,
                 adapter=adapter_name, adapter_version=adapter_version,
-                manifest=base_manifest, actor_id=identity.subject)
+                manifest=base_manifest, actor_id=identity.subject, allow_non_current=_any_version(request))
     except (SQLAlchemyError, RuntimeError, PermissionError, ValueError):
         # The content-addressed object remains private and is harmlessly reusable on retry.
         raise APIError(409, "release_commit_failed", "The verified candidate was not registered; retry after checking the document version.") from None

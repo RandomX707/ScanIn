@@ -1,0 +1,11 @@
+{
+  "document": "Member roster",
+  "generated": "2027-02-18",
+  "active": 26,
+  "pending": 4,
+  "plan": "Corporate Gold",
+  "controls": {
+    "retention_days": 365,
+    "audit_enabled": true
+  }
+}

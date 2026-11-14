@@ -1,0 +1,144 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Icon } from "./Shell";
+import {
+  ApiError, fetchRenderBytes, fetchVersionFile, folderName, getPreview, saveVersion, typeLabel,
+  type Chunks, type FolderVersion, type Preview, type SaveBody,
+} from "../lib/api";
+import { DocxEditor, GridEditor, PdfEditor, RichEditor, TextEditor } from "./editors";
+import { PdfTextEditor } from "./PdfTextEditor";
+import { SignatureStatus, WorkingCopyAction, WorkingCopyBanner } from "../components/SignaturePanel";
+import { PageViewer } from "../components/PageViewer";
+
+export type EditsProps = {
+  documentId: string; folderName: string; version: FolderVersion; family: FolderVersion[]; chunksText: Chunks | null;
+  setDirty: (dirty: boolean) => void; notify: (message: string, error?: boolean) => void;
+  refresh: () => Promise<void>; onSaved: (versionId: string) => void; download: () => void;
+};
+
+const DESCRIPTION: Record<string, string> = {
+  text: "Edit text below. Your original is preserved.",
+  grid: "Click a cell to change its value. Locked cells can't be edited. Your original is preserved.",
+  docx: "Edit the highlighted text directly. Dimmed text is read-only. Your original is preserved.",
+  pdf: "Fill in the form fields on the page. Your original is preserved.",
+  pdf_text: "Click text on the page to change it. Your original is preserved.",
+};
+
+export function EditsTab(props: EditsProps) {
+  const { documentId, version, notify } = props;
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [body, setBody] = useState<SaveBody | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [resetKey, setResetKey] = useState(0);
+  const [pagesOpen, setPagesOpen] = useState(false);
+  const dirty = body !== null;
+  const bodyRef = useRef<SaveBody | null>(null);
+
+  const [reload, setReload] = useState(0);
+  useEffect(() => {
+    let live = true;
+    getPreview(documentId, version.version_id).then((p) => { if (live) setPreview(p); }).catch(() => { if (live) notify("The editor could not be opened.", true); });
+    return () => { live = false; };
+  }, [documentId, version.version_id, notify, reload]);
+  // A very large workbook is indexed once before it can be edited; check again until it is ready (the viewer shows progress).
+  useEffect(() => {
+    if (preview?.virtual?.state !== "building") return;
+    const t = window.setTimeout(() => setReload((n) => n + 1), 1500);
+    return () => window.clearTimeout(t);
+  }, [preview]);
+
+  const onBody = useCallback((next: SaveBody | null) => {
+    bodyRef.current = next; setBody(next); props.setDirty(next !== null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => () => props.setDirty(false),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  []);
+
+  async function save() {
+    const current = bodyRef.current;
+    if (!current || saving) return;
+    setSaving(true);
+    try {
+      const result = await saveVersion(documentId, version.version_id, current);
+      await props.refresh();
+      const number = result.version?.number ?? props.family.length + 1;
+      props.notify(`Version v${number} saved inside ${folderName(props.folderName)}. Original preserved.${result.note ? ` ${result.note}` : ""}`);
+      props.setDirty(false);
+      props.onSaved(result.version_id);
+    } catch (error) {
+      notify(error instanceof ApiError ? error.message : "This change couldn't be saved safely. Your edits are still here.", true);
+    } finally { setSaving(false); }
+  }
+
+  function reset() {
+    if (!window.confirm("Discard changes in this working copy?")) return;
+    onBody(null); setResetKey((k) => k + 1);
+  }
+
+  const head = (
+    <>
+      <div className="section-eyebrow">03 / The transformation</div>
+      <div className="section-title"><h3>Edit this version.</h3><span className="pill orange">New folder version</span></div>
+    </>
+  );
+  if (!preview) return <>{head}<p className="stage-note">Opening the editor…</p></>;
+  const mode = preview.edit.mode;
+  const workingCopy = preview.classification === "unsigned_working_copy";
+  if (mode === "none" && preview.virtual?.state === "building") {
+    return <>{head}<div className="viewer-note" role="status">Preparing this large workbook so it can be edited quickly…</div></>;
+  }
+  if (mode === "none") {
+    return (
+      <>
+        {head}
+        {preview.signature ? <SignatureStatus signature={preview.signature} /> : null}
+        <div className="empty"><h3>{preview.edit.reason}</h3>
+          {preview.working_copy?.available ? (
+            <>
+              <p className="stage-note">The signed original stays exactly as received. You can create a separate, unsigned working copy and edit that instead.</p>
+              <WorkingCopyAction documentId={documentId} versionId={version.version_id} acknowledgement={preview.working_copy.acknowledgement} notify={notify}
+                onCreated={async (id, note) => { await props.refresh(); notify(note); props.onSaved(id); }} />
+            </>
+          ) : null}
+        </div>
+      </>
+    );
+  }
+  const kind = preview.kind ?? "";
+  const rich = mode === "text" && (kind === "md" || kind === "html") && preview.html != null;
+  return (
+    <>
+      {head}
+      {workingCopy ? <WorkingCopyBanner /> : null}
+      <div className="edit-head">
+        <div><strong><Icon name="edit" size={15} /> Working document</strong><div><span>{DESCRIPTION[mode]}</span></div></div>
+        <span id="edit-state">{dirty ? "Unsaved changes" : "No changes yet"}</span>
+      </div>
+      {rich && <RichEditor key={resetKey} preview={preview} onBody={onBody} onReset={reset} />}
+      {mode === "text" && !rich && <TextEditor key={resetKey} preview={preview} formatting={false} onBody={onBody} onReset={reset} />}
+      {mode === "grid" && <GridEditor key={resetKey} preview={preview} onBody={onBody} documentId={documentId} versionId={version.version_id} />}
+      {mode === "docx" && <DocxEditor key={resetKey} preview={preview} onBody={onBody} />}
+      {mode === "pdf_text" && <PdfTextEditor key={resetKey} documentId={documentId} versionId={version.version_id} preview={preview} notify={notify}
+        fetchBytes={async () => (await fetchVersionFile(documentId, version.version_id)).arrayBuffer()} onBody={onBody} />}
+      {mode === "pdf" && <PdfEditor key={resetKey} preview={preview} fetchBytes={async () => (await fetchVersionFile(documentId, version.version_id)).arrayBuffer()} onBody={onBody} />}
+      <div className="edit-actions">
+        <div>
+          <button className="btn dark" disabled={!dirty || saving} onClick={save}><Icon name="check" size={15} /> Save as next version</button>
+          <button className="btn outline" onClick={props.download}><Icon name="download" size={15} /> Export {typeLabel(preview.name)}</button>
+        </div>
+        <span className="stage-note">{dirty ? "Modified working copy" : "Your changes stay separate from the source"}</span>
+      </div>
+      {mode === "docx" && preview.render?.available ? (
+        <details className="compare-snapshot page-preview" data-testid="docx-version-pages" onToggle={(e) => setPagesOpen(e.currentTarget.open)}>
+          <summary>Preview the pages of this saved version</summary>
+          {pagesOpen ? <PageViewer key={version.version_id} title={`v${version.number} pages`} testId="docx-version-viewer" note={preview.render.note} fetchBytes={() => fetchRenderBytes(documentId, version.version_id)} /> : null}
+        </details>
+      ) : null}
+      <details className="compare-snapshot">
+        <summary>Compare against source text</summary>
+        <pre>{props.chunksText?.excerpt ?? ""}{props.chunksText?.excerpt_truncated ? "\n… excerpt shortened" : ""}</pre>
+      </details>
+      <p className="download-note" style={{ marginTop: 18 }}>Saving creates the next version in the same format as the original. The original file is never changed.</p>
+    </>
+  );
+}

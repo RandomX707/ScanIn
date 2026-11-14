@@ -23,6 +23,7 @@ test-results/
 !/artifacts/m0/m0_dependent_original.xlsx
 !/artifacts/m0/source-sha256.txt
 !/artifacts/ui-redesign/
+!/artifacts/manager-ui/
 /artifacts/ui-redesign/*
 !/artifacts/ui-redesign/dashboard.png
 !/artifacts/ui-redesign/library.png
@@ -69,3 +70,7 @@ test-results/
 !/artifacts/ui-redesign/summary-ai-mode.png
 !/artifacts/ui-redesign/summary-compare-mode.png
 !/artifacts/ui-redesign/summary-compare-mode-mobile.png
+
+# Stakeholder documents (public repo): never commit
+/Policy Copies/
+/.private/

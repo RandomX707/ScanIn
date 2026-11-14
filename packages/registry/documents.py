@@ -65,8 +65,8 @@ class DocumentRepository:
             {"id": file_id, "tenant": self.tenant_id, "sha256": stored.sha256,
              "size": stored.size_bytes, "mime": media_type, "key": stored.key})
         self.connection.execute(text("""INSERT INTO document_versions
-            (id,tenant_id,document_id,kind,file_id,sha256)
-            VALUES (:version,:tenant,:document,'original',:file,:sha256)"""),
+            (id,tenant_id,document_id,kind,lineage_class,file_id,sha256)
+            VALUES (:version,:tenant,:document,'original','original',:file,:sha256)"""),
             {"version": version_id, "tenant": self.tenant_id, "document": document_id,
              "file": file_id, "sha256": stored.sha256})
         append_event(connection=self.connection, actor_id=actor_id, action="document.original_registered",
@@ -95,6 +95,44 @@ class DocumentRepository:
             ORDER BY created_at DESC,id LIMIT :limit"""),
             {"tenant": self.tenant_id, "limit": limit}).mappings()
         return [dict(row) for row in rows]
+
+    def list_folders(self, *, limit: int = 200) -> list[dict[str, object]]:
+        """Ready documents with their ordered version families (single-owner folder view)."""
+        if not 1 <= limit <= 500:
+            raise ValueError("limit_out_of_range")
+        documents = self.connection.execute(text("""SELECT d.id,d.filename,d.created_at,d.current_version_id,
+            (SELECT a.payload FROM audit_events a WHERE a.tenant_id=d.tenant_id AND a.action='document.archive_provenance'
+               AND a.subject=d.id::text AND COALESCE(a.payload->>'linked','false')<>'true'
+             ORDER BY a.sequence LIMIT 1) AS provenance
+            FROM documents d WHERE d.tenant_id=:tenant AND d.ingestion_state='ready'
+            ORDER BY d.created_at DESC,d.id LIMIT :limit"""),
+            {"tenant": self.tenant_id, "limit": limit}).mappings().all()
+        if not documents:
+            return []
+        rows = self.connection.execute(text("""SELECT v.document_id,v.id AS version_id,v.parent_version_id,v.kind,v.lineage_class,
+            v.created_at,f.size_bytes,f.mime,
+            COALESCE(m.outcome, ev.outcome) AS verification_outcome
+            FROM document_versions v JOIN files f ON f.tenant_id=v.tenant_id AND f.id=v.file_id
+            LEFT JOIN LATERAL (SELECT outcome FROM verification_manifests vm
+              WHERE vm.tenant_id=v.tenant_id AND vm.edit_set_id=v.edit_set_id
+              ORDER BY vm.created_at DESC LIMIT 1) m ON v.edit_set_id IS NOT NULL
+            LEFT JOIN LATERAL (SELECT a.payload->>'outcome' AS outcome FROM audit_events a
+              WHERE a.tenant_id=v.tenant_id AND a.action='document.text_version_saved'
+                AND a.subject=v.document_id::text AND a.payload->>'version_id'=v.id::text
+              ORDER BY a.sequence DESC LIMIT 1) ev ON v.kind='derived' AND v.edit_set_id IS NULL
+            WHERE v.tenant_id=:tenant AND v.document_id = ANY(:ids)
+            ORDER BY v.created_at,v.id"""),
+            {"tenant": self.tenant_id, "ids": [row["id"] for row in documents]}).mappings().all()
+        by_document: dict[object, list[dict[str, object]]] = {}
+        for row in rows:
+            by_document.setdefault(row["document_id"], []).append(dict(row))
+        folders = []
+        for document in documents:
+            versions = [item for item in by_document.get(document["id"], []) if item["kind"] in {"original", "derived"}]
+            if versions:
+                folders.append({**dict(document), "versions": versions})
+        folders.sort(key=lambda item: item["versions"][-1]["created_at"], reverse=True)
+        return folders
 
     def dashboard_snapshot(self) -> dict[str, object]:
         metrics = self.connection.execute(text("""SELECT
@@ -125,9 +163,24 @@ class DocumentRepository:
             {"tenant": self.tenant_id, "document": document_id}).mappings().one_or_none()
         return dict(row) if row is not None else None
 
+    def find_original_by_sha(self, sha256: str) -> dict[str, object] | None:
+        """An existing ready document in this tenant whose ORIGINAL bytes have this SHA-256 (oldest first)."""
+        row = self.connection.execute(text("""SELECT d.id AS document_id,d.filename,v.id AS version_id
+            FROM documents d JOIN document_versions v ON v.tenant_id=d.tenant_id AND v.document_id=d.id
+            WHERE d.tenant_id=:tenant AND v.kind='original' AND v.sha256=:sha AND d.ingestion_state='ready'
+            ORDER BY d.created_at LIMIT 1"""), {"tenant": self.tenant_id, "sha": sha256}).mappings().one_or_none()
+        return dict(row) if row is not None else None
+
+    def record_archive_provenance(self, *, document_id: UUID, actor_id: str, payload: dict[str, object]) -> None:
+        append_event(connection=self.connection, actor_id=actor_id, action="document.archive_provenance",
+                     subject=str(document_id), payload=payload)
+
+    def record_archive_import(self, *, actor_id: str, subject: str, payload: dict[str, object]) -> None:
+        append_event(connection=self.connection, actor_id=actor_id, action="archive.imported", subject=subject, payload=payload)
+
     def get_version(self, document_id: UUID, version_id: UUID) -> dict[str, object] | None:
         row = self.connection.execute(text("""SELECT d.id AS document_id,d.tenant_id,d.filename,
-            d.ingestion_state,v.id AS version_id,v.parent_version_id,v.kind,v.sha256,
+            d.ingestion_state,v.id AS version_id,v.parent_version_id,v.kind,v.lineage_class,v.sha256,
             f.size_bytes,f.storage_key,f.mime,f.file_role
             FROM documents AS d JOIN document_versions AS v
               ON v.tenant_id=d.tenant_id AND v.document_id=d.id
@@ -137,7 +190,7 @@ class DocumentRepository:
         return dict(row) if row is not None else None
 
     def list_versions(self, document_id: UUID) -> list[dict[str, object]]:
-        rows = self.connection.execute(text("""SELECT v.id AS version_id,v.parent_version_id,v.kind,
+        rows = self.connection.execute(text("""SELECT v.id AS version_id,v.parent_version_id,v.kind,v.lineage_class,
             v.sha256,v.created_at,f.size_bytes,f.mime,d.current_version_id=(v.id) AS is_current
             ,e.id AS edit_set_id,e.status AS edit_set_status,m.outcome AS verification_outcome,
             m.adapter AS verification_adapter,m.manifest AS verification_manifest
@@ -163,6 +216,13 @@ class DocumentRepository:
             items.append(item)
         return items
 
+    def working_copy_version_ids(self) -> set[str]:
+        """Versions the audit trail records as created by the unsigned-working-copy action (descendants inherit the class)."""
+        rows = self.connection.execute(text("""SELECT payload->>'version_id' FROM audit_events
+            WHERE tenant_id=:tenant AND action='document.text_version_saved' AND payload->>'unsigned_working_copy'='true'"""),
+            {"tenant": self.tenant_id})
+        return {str(r[0]) for r in rows if r[0]}
+
     def set_document_category(self, document_id: UUID, *, category: str, actor_id: str) -> None:
         result = self.connection.execute(text("""UPDATE documents SET document_category=:category
             WHERE tenant_id=:tenant AND id=:document AND NOT EXISTS
@@ -173,13 +233,67 @@ class DocumentRepository:
         append_event(connection=self.connection, actor_id=actor_id, action="document.category_classified",
                      subject=str(document_id), payload={"category": category})
 
+    def authorize_owner_upload(self, document_id: UUID, *, actor_id: str) -> None:
+        """Single-owner mode: the owner's own upload is authorised for document corrections.
+
+        File-level safety (signed, encrypted, protected, macro and tracked-change files) is enforced by the
+        adapters and verifiers, not by this category.
+        """
+        changed = self.connection.execute(text("""UPDATE documents SET document_category='insurer-authored'
+            WHERE tenant_id=:tenant AND id=:document AND document_category<>'insurer-authored' RETURNING id"""),
+            {"tenant": self.tenant_id, "document": document_id}).scalar_one_or_none()
+        if changed is not None:
+            append_event(connection=self.connection, actor_id=actor_id, action="document.owner_upload_authorized",
+                         subject=str(document_id), payload={"mode": "single_owner"})
+
+    def commit_text_version(self, *, document_id: UUID, base_version_id: UUID, stored: StoredFile,
+                            media_type: str, actor_id: str, details: dict[str, object]) -> UUID:
+        """Locks the document row, so concurrent saves are serialised; any existing version may be the parent."""
+        """Attach a same-format text version (no native adapter path) with a parent link and SHA-256."""
+        if stored.tenant_id != self.tenant_id or stored.document_id != document_id:
+            raise PermissionError("stored file does not match the document")
+        current = self.connection.execute(text("""SELECT current_version_id FROM documents
+            WHERE tenant_id=:tenant AND id=:document AND ingestion_state='ready' FOR UPDATE"""),
+            {"tenant": self.tenant_id, "document": document_id}).scalar_one_or_none()
+        parent_exists = self.connection.execute(text("""SELECT 1 FROM document_versions
+            WHERE tenant_id=:tenant AND document_id=:document AND id=:version"""),
+            {"tenant": self.tenant_id, "document": document_id, "version": base_version_id}).scalar_one_or_none()
+        if current is None or parent_exists is None:
+            raise ValueError("stale_base_version")
+        parent_lineage = self.connection.execute(text("""SELECT lineage_class FROM document_versions
+            WHERE tenant_id=:tenant AND document_id=:document AND id=:version"""),
+            {"tenant": self.tenant_id, "document": document_id, "version": base_version_id}).scalar_one()
+        lineage_class = ("unsigned_working_copy" if details.get("unsigned_working_copy") is True or parent_lineage == "unsigned_working_copy"
+                         else "unknown" if parent_lineage == "unknown" else "standard")
+        file_id, version_id = uuid4(), uuid4()
+        self.connection.execute(text("""INSERT INTO files
+            (id,tenant_id,sha256,size_bytes,mime,storage_key,file_role)
+            VALUES (:id,:tenant,:sha256,:size,:mime,:key,'derived')"""),
+            {"id": file_id, "tenant": self.tenant_id, "sha256": stored.sha256,
+             "size": stored.size_bytes, "mime": media_type, "key": stored.key})
+        self.connection.execute(text("""INSERT INTO document_versions
+            (id,tenant_id,document_id,parent_version_id,file_id,kind,lineage_class,sha256,created_at)
+            VALUES (:id,:tenant,:document,:parent,:file,'derived',:lineage,:sha256,clock_timestamp())"""),
+            {"id": version_id, "tenant": self.tenant_id, "document": document_id,
+             "parent": base_version_id, "file": file_id, "lineage": lineage_class, "sha256": stored.sha256})
+        self.connection.execute(text("""UPDATE documents SET current_version_id=:version
+            WHERE tenant_id=:tenant AND id=:document"""),
+            {"version": version_id, "tenant": self.tenant_id, "document": document_id})
+        append_event(connection=self.connection, actor_id=actor_id, action="document.text_version_saved",
+                     subject=str(document_id), payload={"version_id": str(version_id), "parent_version_id": str(base_version_id),
+                                                         "output_sha256": stored.sha256, **details})
+        return version_id
+
     def create_edit_set(self, *, edit_set_id: UUID, document_id: UUID, base_version_id: UUID,
-                        category: str, actor_id: str, reason: str) -> None:
-        result = self.connection.execute(text("""INSERT INTO edit_sets
+                        category: str, actor_id: str, reason: str, allow_non_current: bool = False) -> None:
+        # Single-owner mode may start from any version of the document; otherwise only the current one.
+        version_rule = ("EXISTS (SELECT 1 FROM document_versions WHERE tenant_id=:tenant AND document_id=:document AND id=:version)"
+                        if allow_non_current else "current_version_id=:version")
+        result = self.connection.execute(text(f"""INSERT INTO edit_sets
             (id,tenant_id,document_id,base_version_id,authorized_category,created_by,reason)
             SELECT :id,:tenant,:document,:version,:category,:actor,:reason
             WHERE EXISTS (SELECT 1 FROM documents WHERE tenant_id=:tenant AND id=:document
-                          AND current_version_id=:version AND ingestion_state='ready'
+                          AND {version_rule} AND ingestion_state='ready'
                           AND document_category=:category)
             RETURNING id"""), {"id": edit_set_id, "tenant": self.tenant_id, "document": document_id,
                 "version": base_version_id, "category": category, "actor": actor_id, "reason": reason.strip()})
@@ -308,7 +422,8 @@ class DocumentRepository:
 
     def commit_derived_release(self, *, edit_set_id: UUID, stored: StoredFile,
                                outcome: str, adapter: str, adapter_version: str,
-                               manifest: dict[str, object], actor_id: str) -> UUID:
+                               manifest: dict[str, object], actor_id: str,
+                               allow_non_current: bool = False) -> UUID:
         """Atomically attach a verifier report and derived version to an owner-authorized plan."""
         download_eligible = is_download_eligible(outcome, adapter, manifest)
         if outcome not in {"INCOMPLETE"} and not download_eligible:
@@ -327,11 +442,14 @@ class DocumentRepository:
             return released_version_id
         if status != "ready_for_release":
             raise ValueError("edit_set_not_ready_for_release")
-        if base_version_id != current_version_id:
+        if base_version_id != current_version_id and not allow_non_current:
             raise ValueError("stale_base_version")
         if stored.document_id != document_id:
             raise PermissionError("stored file document does not match edit set")
 
+        base_lineage = self.connection.execute(text("SELECT lineage_class FROM document_versions WHERE tenant_id=:tenant AND id=:version"),
+                                               {"tenant": self.tenant_id, "version": base_version_id}).scalar_one()
+        lineage_class = "unsigned_working_copy" if base_lineage == "unsigned_working_copy" else "unknown" if base_lineage == "unknown" else "standard"
         file_id, version_id = uuid4(), uuid4()
         self.connection.execute(text("""INSERT INTO files
             (id,tenant_id,sha256,size_bytes,mime,storage_key,file_role)
@@ -340,20 +458,21 @@ class DocumentRepository:
              "size": stored.size_bytes, "mime": manifest.get("media_type", "application/octet-stream"),
              "key": stored.key})
         self.connection.execute(text("""INSERT INTO document_versions
-            (id,tenant_id,document_id,parent_version_id,file_id,kind,sha256,edit_set_id)
-            VALUES (:id,:tenant,:document,:parent,:file,'derived',:sha256,:edit_set)"""),
+            (id,tenant_id,document_id,parent_version_id,file_id,kind,lineage_class,sha256,edit_set_id,created_at)
+            VALUES (:id,:tenant,:document,:parent,:file,'derived',:lineage,:sha256,:edit_set,clock_timestamp())"""),
             {"id": version_id, "tenant": self.tenant_id, "document": document_id,
-             "parent": base_version_id, "file": file_id, "sha256": stored.sha256, "edit_set": edit_set_id})
+             "parent": base_version_id, "file": file_id, "lineage": lineage_class, "sha256": stored.sha256, "edit_set": edit_set_id})
         self.connection.execute(text("""INSERT INTO verification_manifests
             (tenant_id,edit_set_id,source_sha256,output_sha256,outcome,adapter,adapter_version,manifest)
             VALUES (:tenant,:edit,:source,:output,:outcome,:adapter,:version,CAST(:manifest AS jsonb))"""),
             {"tenant": self.tenant_id, "edit": edit_set_id, "source": str(manifest["source_sha256"]),
              "output": stored.sha256, "outcome": outcome, "adapter": adapter, "version": adapter_version,
              "manifest": json.dumps(manifest, sort_keys=True, separators=(",", ":"))})
+        # The row is locked above, so concurrent saves on one document are serialised: each becomes the latest in turn.
         updated = self.connection.execute(text("""UPDATE documents SET current_version_id=:version
-            WHERE tenant_id=:tenant AND id=:document AND current_version_id=:base RETURNING id"""),
+            WHERE tenant_id=:tenant AND id=:document AND (current_version_id=:base OR :any_version) RETURNING id"""),
             {"version": version_id, "tenant": self.tenant_id, "document": document_id,
-             "base": base_version_id}).scalar_one_or_none()
+             "base": base_version_id, "any_version": allow_non_current}).scalar_one_or_none()
         if updated is None:
             raise ValueError("stale_base_version")
         self.connection.execute(text("""UPDATE edit_sets SET status='released',released_version_id=:version,updated_at=now()
