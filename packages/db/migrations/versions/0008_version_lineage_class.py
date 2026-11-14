@@ -9,6 +9,10 @@ _TABLES = ("document_versions", "audit_events")
 
 
 def upgrade() -> None:
+    # ACCESS EXCLUSIVE locks are taken on document_versions and audit_events for the whole transaction. If a long application transaction
+    # holds either table, waiting forever would queue every new request behind this migration, so fail fast (the transaction rolls back
+    # completely, FORCE ROW LEVEL SECURITY included) and let the operator retry in a quiet window.
+    op.execute("SET LOCAL lock_timeout = '30s'")
     op.execute("ALTER TABLE document_versions ADD COLUMN lineage_class text NOT NULL DEFAULT 'unknown'")
     op.execute("""ALTER TABLE document_versions ADD CONSTRAINT document_versions_lineage_class_check
         CHECK (lineage_class IN ('original','standard','unsigned_working_copy','unknown'))""")

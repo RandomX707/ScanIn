@@ -17,3 +17,7 @@ def test_backfill_cannot_silently_do_nothing():
 
 def test_unknown_is_a_root_property_not_a_sibling_snapshot_read():
     assert "unknown_roots" in SOURCE and "unknown_descendants" in SOURCE and "v.edit_set_id IS NULL" in SOURCE
+
+
+def test_migration_fails_fast_instead_of_queueing_behind_long_transactions():
+    assert "SET LOCAL lock_timeout" in SOURCE and SOURCE.index("SET LOCAL lock_timeout") < SOURCE.index("NO FORCE ROW LEVEL SECURITY")

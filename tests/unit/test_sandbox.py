@@ -227,3 +227,25 @@ def test_libreoffice_renders_a_real_document_under_live_seatbelt(tmp_path):
     document = docx.Document(); document.add_paragraph("sandbox render canary"); path = tmp_path / "canary.docx"; document.save(path)
     pdf = SandboxedOfficeRenderer().render_pdf(path.read_bytes(), ".docx")
     assert pdf.startswith(b"%PDF-") and len(pdf) > 500
+
+
+def test_qpdf_check_runs_inside_the_verified_confinement(tmp_path):
+    tool = sb.resolve_tool("qpdf")
+    if tool is None or not sb.sandbox_status(refresh=True).verified_here:
+        pytest.skip("qpdf or verified confinement unavailable")
+    import io
+    from pypdf import PdfWriter
+    writer = PdfWriter(); writer.add_blank_page(100, 100); buffer = io.BytesIO(); writer.write(buffer)
+    scratch = Path(tempfile.mkdtemp(prefix="c360-qpdf-", dir="/private/tmp" if sys.platform == "darwin" else None)).resolve()
+    try:
+        (scratch / "c.pdf").write_bytes(buffer.getvalue())
+        assert runner.run(tool, ["--check", str(scratch / "c.pdf")], sb.SandboxPolicy(scratch=scratch, timeout_seconds=15, cpu_seconds=30)).returncode == 0
+        outside = Path.home() / ".channel360-qpdf-canary"
+        outside.write_bytes(b"x")
+        try:       # the confined tool cannot read a file outside its scratch (qpdf reports an error, so a non-zero exit)
+            assert runner.run(tool, ["--check", str(outside)], sb.SandboxPolicy(scratch=scratch, timeout_seconds=15, cpu_seconds=30)).returncode != 0
+        finally:
+            outside.unlink(missing_ok=True)
+    finally:
+        import shutil
+        shutil.rmtree(scratch, ignore_errors=True)

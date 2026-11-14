@@ -111,6 +111,14 @@ def resolve_tool(name: str) -> Tool | None:
                     seatbelt_write_regex=(rf"^/private/var/tmp/OSL_PIPE_{os.getuid()}_SingleOfficeIPC_[0-9a-f]+$",),   # LibreOffice's single-instance IPC pipe: fixed name, not a directory grant
                     seatbelt_unix_sockets=True, seatbelt_mach_lookup=True,
                     seatbelt_read_paths=tuple(p for p in ("/Library/Fonts",) if Path(p).exists()))
+    if name == "qpdf":
+        found = _first_file([os.environ.get("IDW_QPDF_PATH"), shutil.which("qpdf"), "/opt/homebrew/bin/qpdf", "/usr/local/bin/qpdf", "/usr/bin/qpdf"])
+        if not found:
+            return None
+        real = Path(found).resolve()
+        brew = Path("/opt/homebrew")
+        roots = [str(p) for p in (brew / "Cellar", brew / "opt", brew / "lib") if p.is_dir()] if str(real).startswith(str(brew)) else [str(real.parents[1])]
+        return Tool("qpdf", str(real), tuple(roots))
     if name == "openssl":
         for candidate in (os.environ.get("IDW_OPENSSL_PATH"), "/opt/homebrew/bin/openssl", "/usr/local/bin/openssl", shutil.which("openssl"), "/usr/bin/openssl"):
             if candidate and Path(candidate).is_file() and _openssl_ok(candidate):

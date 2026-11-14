@@ -86,3 +86,17 @@ def test_refuses_unsupported_type_and_garbage():
         renderer.render_pdf(b"x", ".exe")
     with pytest.raises(OfficeRenderRefused):
         renderer.render_pdf(b"not really a document", ".docx")
+
+
+def test_legacy_docx_render_entry_point_uses_the_single_verified_confinement():
+    """`render_docx_pdf` (visual layout verification) must work under the same confinement as the preview renderer."""
+    from packages.workers import sandbox as sb
+    from packages.workers.office import OfficeRenderError, render_docx_pdf
+    if sb.resolve_tool("soffice") is None or not sb.sandbox_status(refresh=True).verified_here:
+        with pytest.raises(OfficeRenderError):                       # fail closed, never unconfined
+            render_docx_pdf(b"PK\x03\x04 not a document")
+        pytest.skip("no verified confinement on this host")
+    docx = pytest.importorskip("docx")
+    import io
+    document = docx.Document(); document.add_paragraph("visual verification canary"); buffer = io.BytesIO(); document.save(buffer)
+    assert render_docx_pdf(buffer.getvalue()).startswith(b"%PDF-")
