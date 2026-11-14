@@ -294,7 +294,7 @@ class SeatbeltRunner(Runner):
             if tool.seatbelt_unix_sockets:
                 extra_rules.append("(allow network* (local unix-socket) (remote unix-socket))")
             if tool.seatbelt_mach_lookup:
-                extra_rules.append("(allow mach*)")
+                extra_rules.append("(allow mach-lookup)")
         reads.extend(f'(literal "{p}")' for p in ("/etc", "/var", "/tmp") if Path(p).is_symlink())      # the firmlinks themselves (not their targets)
         link_literals = [f'(literal "{str(l).replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34))}")' for l in links]
         reads.extend(link_literals)
