@@ -74,6 +74,10 @@ class Tool:
     name: str
     path: str
     read_roots: tuple[str, ...] = ()                  # installation directories the tool needs to read (bind-mounted read-only on Linux)
+    seatbelt_write_regex: tuple[str, ...] = ()        # macOS only: exact-pattern files outside the scratch directory the tool must create (never a directory grant)
+    seatbelt_unix_sockets: bool = False               # macOS only: local (AF_UNIX) sockets; IP networking stays denied
+    seatbelt_mach_lookup: bool = False                # macOS only: GUI-framework tools (LibreOffice) need Mach service lookups to start at all
+    seatbelt_read_paths: tuple[str, ...] = ()         # macOS only: additional read-only system locations
 
 
 # ---------------------------------------------------------------------------------------------------------------- tool registry
@@ -98,9 +102,15 @@ def resolve_tool(name: str) -> Tool | None:
                              "/usr/lib/libreoffice/program/soffice", "/opt/libreoffice/program/soffice"])
         if not found:
             return None
-        roots = [str(Path(found).parents[1])] if "/program/" in found or ".app/" in found else [str(Path(found).parent)]
+        if ".app/" in found:
+            roots = [found.split(".app/")[0] + ".app"]            # the whole application bundle: the loader resolves the bundle root, not only Contents
+        else:
+            roots = [str(Path(found).parents[1])] if "/program/" in found else [str(Path(found).parent)]
         roots += [p for p in ("/usr/lib/libreoffice", "/usr/share/libreoffice", "/opt/libreoffice") if Path(p).is_dir()]
-        return Tool("soffice", found, tuple(dict.fromkeys(roots)))
+        return Tool("soffice", found, tuple(dict.fromkeys(roots)),
+                    seatbelt_write_regex=(rf"^/private/var/tmp/OSL_PIPE_{os.getuid()}_SingleOfficeIPC_[0-9a-f]+$",),   # LibreOffice's single-instance IPC pipe: fixed name, not a directory grant
+                    seatbelt_unix_sockets=True, seatbelt_mach_lookup=True,
+                    seatbelt_read_paths=tuple(p for p in ("/Library/Fonts",) if Path(p).exists()))
     if name == "openssl":
         for candidate in (os.environ.get("IDW_OPENSSL_PATH"), "/opt/homebrew/bin/openssl", "/usr/local/bin/openssl", shutil.which("openssl"), "/usr/bin/openssl"):
             if candidate and Path(candidate).is_file() and _openssl_ok(candidate):
@@ -239,25 +249,60 @@ class SeatbeltRunner(Runner):
         return (True, None) if Path(SANDBOX_EXEC).is_file() else (False, "sandbox_exec_missing")
 
     @staticmethod
-    def profile(policy: SandboxPolicy) -> str:
+    def _chain(path: str | Path) -> list[Path]:
+        """Every hop of a symlink chain (each hop's own path, then its target), so an interpreter reached through
+        venv/Homebrew-style links can be read, traversed and executed without granting the directories around it."""
+        hops: list[Path] = []
+        pending = [Path(os.path.abspath(path))]
+        while pending and len(hops) < 64:
+            current = pending.pop()
+            if current in hops:
+                continue
+            hops.append(current)
+            for index in range(1, len(current.parts) + 1):             # the file itself and every directory component on the way
+                prefix = Path(*current.parts[:index])
+                if prefix.is_symlink():
+                    pending.append(Path(os.path.abspath(Path(os.path.realpath(prefix.parent)) / os.readlink(prefix))))
+                    for form in (prefix, Path(os.path.realpath(prefix.parent)) / prefix.name):      # the link as spelled and where it really lives
+                        if form not in hops:
+                            hops.append(form)
+        return hops
+
+    @staticmethod
+    def profile(policy: SandboxPolicy, links: Sequence[Path] = (), tool: Tool | None = None) -> str:
         q = lambda p: str(Path(p).resolve()).replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
         reads = [f'(subpath "{q(policy.scratch)}")'] + [f'(literal "{q(p)}")' if Path(p).is_file() else f'(subpath "{q(p)}")' for p in policy.read_paths]
         system_roots = tuple(p for p in ("/System/Library", "/usr", "/Library/Frameworks") if Path(p).exists())
         reads.extend(f'(subpath "{q(p)}")' for p in system_roots)
         exec_roots = list(system_roots)
         exec_roots.extend(str(Path(p).resolve()) for p in policy.read_paths if Path(p).is_dir())
+        if tool is not None:
+            reads.extend(f'(subpath "{q(p)}")' for p in tool.seatbelt_read_paths)
+        extra_rules: list[str] = []
+        if tool is not None:
+            if tool.seatbelt_write_regex:
+                extra_rules.append('(allow file-write* (literal "/private/var/tmp"))')       # the directory entry only (not its children); the files are the patterns below
+            extra_rules.extend(f'(allow file-write* (regex #"{r}"))' for r in tool.seatbelt_write_regex)
+            if tool.seatbelt_unix_sockets:
+                extra_rules.append("(allow network* (local unix-socket) (remote unix-socket))")
+            if tool.seatbelt_mach_lookup:
+                extra_rules.append("(allow mach*)")
+        reads.extend(f'(literal "{p}")' for p in ("/etc", "/var", "/tmp") if Path(p).is_symlink())      # the firmlinks themselves (not their targets)
+        link_literals = [f'(literal "{str(l).replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34))}")' for l in links]
+        reads.extend(link_literals)
         return "\n".join((
             "(version 1)", "(deny default)", "(allow process*)", "(allow sysctl-read)",
             "(deny network*)",
             "(deny file-write*)",
             f'(allow file-write* (subpath "{q(policy.scratch)}") (literal "/dev/null"))',
-            f"(allow file-read* {' '.join(reads)} (literal \"/dev/null\") (literal \"/dev/urandom\"))",
-            "(allow file-read-metadata " + " ".join(f'(path-ancestors "{q(p)}")' for p in (policy.scratch, *policy.read_paths)) + ")",
-            "(allow process-exec " + " ".join(f'(subpath "{q(p)}")' for p in exec_roots) + ")"))
+            *extra_rules,
+            f"(allow file-read* {' '.join(reads)} (literal \"/dev/null\") (literal \"/dev/urandom\") (literal \"/\"))",
+            "(allow file-read-metadata " + " ".join(f'(path-ancestors "{q(p)}")' for p in (policy.scratch, *policy.read_paths)) + " " + " ".join(f'(path-ancestors "{l}")' for l in links) + ")",
+            "(allow process-exec " + " ".join(f'(subpath "{q(p)}")' for p in exec_roots) + " " + " ".join(link_literals) + ")"))
 
     def command(self, tool: Tool, args: Sequence[str], policy: SandboxPolicy) -> list[str]:
         extra = SandboxPolicy(scratch=policy.scratch, read_paths=(*policy.read_paths, *(Path(p) for p in tool.read_roots), Path(tool.path)))
-        return [SANDBOX_EXEC, "-p", self.profile(extra), tool.path, *args]
+        return [SANDBOX_EXEC, "-p", self.profile(extra, self._chain(tool.path), tool), tool.path, *args]
 
 
 class BubblewrapRunner(Runner):

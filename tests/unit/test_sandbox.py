@@ -105,7 +105,7 @@ attempt('credential_read', lambda: open({str(credential)!r}).read())
 attempt('storage_list', lambda: os.listdir({str(storage_root)!r}))
 attempt('project_read', lambda: open({str(Path(__file__).resolve().parents[2] / 'pyproject.toml')!r}).read())
 attempt('network', lambda: socket.create_connection(('127.0.0.1', {port}), timeout=1))
-child_code = f"print('child-started');\ntry: open({str(secret_b)!r}).read(); print('child-leaked')\nexcept Exception: print('child-denied')"
+child_code = f"print('child-started');\\ntry: open({str(secret_b)!r}).read(); print('child-leaked')\\nexcept Exception: print('child-denied')"
 child = subprocess.run([sys.executable, '-I', '-c', child_code], capture_output=True, text=True)
 checks['child_denied'] = child.returncode == 0 and 'child-started' in child.stdout and 'child-denied' in child.stdout and 'child-leaked' not in child.stdout
 print(json.dumps(checks, sort_keys=True))
@@ -113,7 +113,7 @@ print(json.dumps(checks, sort_keys=True))
         (scratch / "own.txt").write_text("job-a-own")
         os.chmod(scratch / "own.txt", 0o600)
         tool = sb.Tool("python-canary", sys.executable, (str(Path(sys.executable).resolve().parents[1]), sys.prefix, sys.base_prefix))
-        result = runner.run(tool, ["-I", "-c", script], sb.SandboxPolicy(scratch=scratch, read_paths=(Path(sys.prefix), Path(sys.base_prefix)), timeout_seconds=30, cpu_seconds=30), capture_stdout=True)
+        result = runner.run(tool, ["-I", "-c", script], sb.SandboxPolicy(scratch=scratch, read_paths=(Path(sys.prefix), Path(sys.base_prefix)), timeout_seconds=30, cpu_seconds=30), capture_stdout=True, capture_stderr=True)
         checks = __import__("json").loads(result.stdout)
         assert checks == {"child_denied": True, "credential_read": False, "external_tmp_read": False, "external_tmp_write": False,
                           "job_b_read": False, "job_b_write": False, "network": False, "own_read": True, "own_write": True,
@@ -202,3 +202,28 @@ def test_cancel_event_stops_a_running_job():
     with pytest.raises(sb.SandboxFailed) as e:
         runner.run(PY, ["-I", "-c", "import time; time.sleep(60)"], sb.SandboxPolicy(scratch=scratch(), read_paths=READ, timeout_seconds=60), cancel=cancel)
     assert e.value.reason_code == "sandbox_cancelled"
+
+
+def test_soffice_profile_has_no_shared_temp_grants_and_denies_ip_network():
+    tool = sb.resolve_tool("soffice")
+    if tool is None or sys.platform != "darwin":
+        pytest.skip("LibreOffice/macOS not present")
+    scratch = Path(tempfile.mkdtemp(prefix="c360-prof-", dir="/private/tmp")).resolve()
+    try:
+        profile = sb.SeatbeltRunner().command(tool, [], sb.SandboxPolicy(scratch=scratch))[2]
+    finally:
+        scratch.rmdir()
+    assert "(deny default)" in profile and "(allow default)" not in profile
+    assert '(subpath "/private/var/tmp")' not in profile and '(subpath "/private/var/folders")' not in profile and '(subpath "/private/tmp")' not in profile
+    assert "file-write*" in profile and "/private/var/folders" not in profile
+    assert "OSL_PIPE_" in profile and "(deny network*)" in profile and "unix-socket" in profile and "(allow network* (remote ip)" not in profile
+
+
+def test_libreoffice_renders_a_real_document_under_live_seatbelt(tmp_path):
+    from packages.workers.office_render import SandboxedOfficeRenderer
+    if sys.platform != "darwin" or sb.resolve_tool("soffice") is None or not sb.self_test(sb.make_runner())[0]:
+        pytest.skip("requires macOS Seatbelt and LibreOffice (reported NOT VERIFIED otherwise)")
+    docx = pytest.importorskip("docx")
+    document = docx.Document(); document.add_paragraph("sandbox render canary"); path = tmp_path / "canary.docx"; document.save(path)
+    pdf = SandboxedOfficeRenderer().render_pdf(path.read_bytes(), ".docx")
+    assert pdf.startswith(b"%PDF-") and len(pdf) > 500

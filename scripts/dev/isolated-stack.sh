@@ -8,6 +8,7 @@
 #   isolated-stack.sh status
 #   isolated-stack.sh drop    drop THIS isolated database and storage (refuses any other name)
 set -eu
+ACTION=${1:-}      # captured before any `set --` below replaces the positional parameters
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT"
 NAME=${C360_ISO_DB:-channel360_iso_dev}
@@ -18,9 +19,11 @@ PYTHON="$ROOT/.venv/bin/python"
 # Validate every interpolated or path-bearing value before mkdir, credentials writes, SQL, or service activity.
 NAME=$("$PYTHON" "$ROOT/scripts/dev/iso_config.py" database "$NAME") || { echo "refusing invalid isolated database name" >&2; exit 2; }
 TENANT=$("$PYTHON" "$ROOT/scripts/dev/iso_config.py" tenant "$TENANT") || { echo "refusing invalid tenant UUID" >&2; exit 2; }
-set -- $("$PYTHON" "$ROOT/scripts/dev/iso_config.py" ports "$API_PORT" "$WEB_PORT") || { echo "refusing invalid isolated ports" >&2; exit 2; }
+PORTS=$("$PYTHON" "$ROOT/scripts/dev/iso_config.py" ports "$API_PORT" "$WEB_PORT") || { echo "refusing invalid isolated ports" >&2; exit 2; }
+set -- $PORTS
 API_PORT=$1; WEB_PORT=$2
-set -- $("$PYTHON" "$ROOT/scripts/dev/iso_config.py" pg-target "$PGHOST" "$PGPORT") || { echo "refusing non-loopback PostgreSQL target or invalid port" >&2; exit 2; }
+PGTARGET=$("$PYTHON" "$ROOT/scripts/dev/iso_config.py" pg-target "$PGHOST" "$PGPORT") || { echo "refusing non-loopback PostgreSQL target or invalid port" >&2; exit 2; }
+set -- $PGTARGET
 PGHOST=$1; PGPORT=$2
 QNAME=$("$PYTHON" "$ROOT/scripts/dev/iso_config.py" quote-identifier "$NAME")
 QTENANT=$("$PYTHON" "$ROOT/scripts/dev/iso_config.py" quote-literal "$TENANT")
@@ -28,7 +31,7 @@ STATE="$ROOT/.runtime/iso-stack"
 [ ! -L "$ROOT/.runtime" ] || { echo "refusing symlinked runtime root" >&2; exit 2; }
 [ ! -L "$STATE" ] || { echo "refusing symlinked isolated-stack state directory" >&2; exit 2; }
 mkdir -p "$STATE"; chmod 700 "$STATE"
-STORAGE="$STATE/storage"
+if [ "$NAME" = channel360_iso_dev ]; then STORAGE="$STATE/storage"; else STORAGE="$STATE/storage.$NAME"; fi   # one storage root per isolated database
 SRC_PGPASS=${C360_PGPASSFILE:-$HOME/.channel360-pgpass}
 if [ "$NAME" = channel360_iso_dev ]; then PGPASSFILE="$STATE/pgpass"; else PGPASSFILE="$STATE/pgpass.$NAME"; fi   # never clobber another isolated database's credentials file
 write_pgpass() {  # same role passwords, database field rewritten to the isolated name
@@ -54,7 +57,7 @@ provision_db() {
   psql -X -v ON_ERROR_STOP=1 -q -h "$PGHOST" -p "$PGPORT" -d "$NAME" -U channel360_test_migrator -c "begin; select set_config('app.tenant_id',$QTENANT,true); insert into tenants(id,name) values ($QTENANT,'Isolated Dev') on conflict do nothing; commit;" >/dev/null
 }
 
-case "${1:-}" in
+case "$ACTION" in
 db)
   [ -r "$SRC_PGPASS" ] || { echo "missing $SRC_PGPASS" >&2; exit 1; }
   write_pgpass; export PGPASSFILE PGHOST PGPORT
