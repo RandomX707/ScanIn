@@ -71,10 +71,14 @@ def test_external_resource_is_never_fetched():
 
 
 def test_converter_cannot_read_home_or_repository_files(tmp_path):
-    """The Seatbelt profile denies reads under /Users except the scratch directory."""
+    """Deny-default Seatbelt profile: nothing under /Users (home, repository, credentials) is readable except what the tool needs,
+    writes are confined to the scratch directory, shared temp directories are not granted and IP networking is denied."""
     profile = seatbelt_profile(Path("/private/tmp/x"))
-    assert '(deny file-read* (subpath "/Users"))' in profile and "(deny network-outbound (remote ip))" in profile
-    assert "(deny file-write*)" in profile
+    assert "(deny default)" in profile and "(allow default)" not in profile
+    assert '(subpath "/Users")' not in profile and '(subpath "/private/tmp")' not in profile
+    assert "(deny file-write*)" in profile and "(deny network*)" in profile
+    assert '(subpath "/private/var/folders")' not in profile and '(subpath "/private/var/tmp")' not in profile
+    assert '(allow file-write* (subpath "/private/tmp/x")' in profile
 
 
 def test_refuses_unsupported_type_and_garbage():
