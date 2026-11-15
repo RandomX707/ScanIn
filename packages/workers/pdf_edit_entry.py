@@ -258,6 +258,13 @@ def verify(source: bytes, out: bytes, plans: list[dict], before_runs: dict[int, 
             if ((a_img[r0:r1, c0:c1] - b_img[r0:r1, c0:c1]) > PIXEL_THRESHOLD).any():          # NEW ink on the border strip (removing old ink is fine)
                 bad += 1
         add("border_pixels_untouched", bad == 0, f"Edit on page {page + 1}: table borders beside the edit render identically." if not bad else f"Edit on page {page + 1}: {bad} border line(s) next to the edit changed.")
+    # 3d. two edited texts on the same line must not overlap each other (the per-edit check above skips other edits' own text)
+    for i, p in enumerate(plans):
+        for q in plans[i + 1:]:
+            if p["page"] == q["page"] and abs(p["y"] - q["y"]) < max(p["size"], q["size"]) * 0.7:
+                clash = p["ext"][0] < q["ext"][1] + 1.0 and q["ext"][0] < p["ext"][1] + 1.0
+                add("edited_texts_do_not_overlap", not clash, f"Page {p['page'] + 1}: two edited texts on one line keep clear of each other." if not clash
+                    else f"Page {p['page'] + 1}: two edited texts on one line would touch.")
     # 4. pixels: change confined to edited boxes; untouched pages identical
     for page in range(n_src):
         if page in pages:

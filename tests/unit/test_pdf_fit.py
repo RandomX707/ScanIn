@@ -190,3 +190,39 @@ def test_two_fitted_edits_on_one_page_do_not_disturb_each_other():
     assert report["outcome"] == "VERIFIED", [x for x in report["checks"] if x["status"] != "pass"]
     texts = {r.text.replace(" ", "") for r in PdfTextEngine(applied["out"]).runs(0)}
     assert {NEW, "39,00,00,000,9", "Unchangedcell"} <= texts
+
+
+def _clip_pdf(path_ops: str, form: bool = False) -> bytes:
+    """Page with a clip written as raw operators around the value (reportlab cannot draw an m/l/h clip)."""
+    buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=(595, 842)); c.setFont("Helvetica", 12)
+    c._code.append("q " + path_ops + " W n")
+    c.drawString(80, 715, OLD)
+    c._code.append("Q")
+    c.showPage(); c.save()
+    return buf.getvalue()
+
+
+def test_a_rectangular_clip_drawn_as_a_polygon_is_measured_not_refused():
+    eng, run = _run(_clip_pdf("75 700 m 140 700 l 140 740 l 75 740 l h"))
+    assert run.clip == pytest.approx((75.0, 700.0, 140.0, 740.0))
+    rep = eng.fit_report(run.id, NEW)
+    assert not rep["fits"] and all(80.0 + o["new_width"] + o["shift"] <= 140.0 + 0.5 for o in rep["options"])
+
+
+def test_a_non_rectangular_clip_still_blocks_growth():
+    eng, run = _run(_clip_pdf("75 700 m 200 700 l 200 740 l 120 760 l h"))
+    assert run.clip == "unknown"
+    assert eng.fit_report(run.id, NEW)["refusal"]["code"] == "clipped_text"
+
+
+def test_two_edits_that_would_touch_are_flagged_by_verification():
+    plans = [{"page": 0, "y": 715.0, "size": 12.0, "ext": [80.0, 160.0]}, {"page": 0, "y": 715.5, "size": 12.0, "ext": [159.5, 220.0]}]
+    clash = plans[0]["ext"][0] < plans[1]["ext"][1] + 1.0 and plans[1]["ext"][0] < plans[0]["ext"][1] + 1.0
+    assert clash                                              # the geometry rule used by the worker; end-to-end below
+    src = _table(right=400.0)
+    eng, a = _run(src)
+    out = worker.verify(src, src, [{"id": "x", "page": 0, "old": OLD, "new": OLD, "bbox": list(a.bbox), "x0": a.x0, "orig_x0": a.x0, "orig_x1": a.x1,
+                                    "ext": [a.x0, a.x1], "y": a.y, "new_width": a.x1 - a.x0, "size": 12.0, "cells": []},
+                                   {"id": "y", "page": 0, "old": OLD, "new": OLD, "bbox": list(a.bbox), "x0": a.x0, "orig_x0": a.x0, "orig_x1": a.x1,
+                                    "ext": [a.x1 - 0.5, a.x1 + 30], "y": a.y, "new_width": 30, "size": 12.0, "cells": []}], {0: eng.runs(0)})
+    assert any(c["check"] == "edited_texts_do_not_overlap" and c["status"] == "fail" for c in out["checks"])

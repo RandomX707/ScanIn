@@ -394,7 +394,7 @@ class PdfTextEngine:
         self._runs[page] = out
         return out
 
-    def _walk(self, page: int, obj, resources, ctm0, path, out: list[Run], depth: int):
+    def _walk(self, page: int, obj, resources, ctm0, path, out: list[Run], depth: int, clip0: Any = None):
         key = (page, path)
         cont = _Container(obj, resources, ctm0, path, self.reader, page)
         self._containers[key] = cont
@@ -414,7 +414,7 @@ class PdfTextEngine:
         cont.opcount = {}
         cont.actual = {}
         mc_stack: list[int | None] = []
-        clip: Any = None
+        clip: Any = clip0
         subpaths: list[dict] = []
         pending_clip: Any = None
         vl, hl = self._vlines.setdefault(page, []), self._hlines.setdefault(page, [])
@@ -532,11 +532,13 @@ class PdfTextEngine:
                         clip, pending_clip = _merge_clip(clip, pending_clip), None
                     subpaths = []
                 elif o in ("W", "W*"):
-                    if len(subpaths) == 1 and subpaths[0]["rect"]:
+                    pending_clip = "unknown"
+                    if len(subpaths) == 1 and not subpaths[0]["curved"] and len(subpaths[0]["pts"]) >= 4:
                         px = [q[0] for q in subpaths[0]["pts"]]; py = [q[1] for q in subpaths[0]["pts"]]
-                        pending_clip = (min(px), min(py), max(px), max(py))
-                    else:
-                        pending_clip = "unknown"
+                        x_lo, x_hi, y_lo, y_hi = min(px), max(px), min(py), max(py)
+                        # a rectangle (drawn with `re` or as an axis-aligned m/l/h path): every vertex sits on a corner of its bounding box
+                        if all((abs(a - x_lo) < 1e-3 or abs(a - x_hi) < 1e-3) and (abs(b - y_lo) < 1e-3 or abs(b - y_hi) < 1e-3) for a, b in zip(px, py)):
+                            pending_clip = (x_lo, y_lo, x_hi, y_hi)
                 elif o == "n":
                     if pending_clip is not None:
                         clip, pending_clip = _merge_clip(clip, pending_clip), None
@@ -599,7 +601,7 @@ class PdfTextEngine:
                             m = tuple(_num(x) for x in xo.get("/Matrix", [1, 0, 0, 1, 0, 0]))
                             r2 = xo.get("/Resources")
                             r2 = r2.get_object() if r2 is not None else resources
-                            self._walk(page, xo, r2, mul(m, ctm), path + (f"@{idx}",), out, depth + 1)
+                            self._walk(page, xo, r2, mul(m, ctm), path + (f"@{idx}",), out, depth + 1, clip)
             except (IndexError, ValueError, TypeError, KeyError):
                 flush()
                 continue

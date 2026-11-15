@@ -44,7 +44,10 @@ export async function readPageText(bytes: ArrayBuffer): Promise<PageText[]> {
   const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)) }).promise;
   const out: PageText[] = [];
   for (let n = 1; n <= doc.numPages; n++) {
-    const content = await (await doc.getPage(n)).getTextContent();
+    const page = await doc.getPage(n);
+    // Positions are only claimed for an upright page whose box starts at the origin; anything else stays unverified (list only).
+    if (page.rotate !== 0 || page.view[0] !== 0 || page.view[1] !== 0) { out.push({ page: n, items: [] }); continue; }
+    const content = await page.getTextContent();
     const items: TextItem[] = [];
     for (const raw of content.items) {
       const it = raw as { str?: string; transform?: number[]; width?: number; height?: number };
