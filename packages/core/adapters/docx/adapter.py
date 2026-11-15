@@ -341,6 +341,58 @@ class DocxAdapter:
                     archive.writestr(name, parts[name], compress_type=zipfile.ZIP_DEFLATED)
         return output.getvalue()
 
+    def draft(self, source: bytes, edits: list[tuple[str, str, str]]) -> bytes:
+        """In-memory candidate for a PREVIEW (never a saved version): replace the text of verified single-run targets.
+
+        Every edit is checked against freshly computed targets (id, editable, fingerprint) exactly like a save; the candidate is then re-read and
+        must differ from the source ONLY at the edited targets. Provenance is not written (a draft is not a release)."""
+        if not edits:
+            raise DocxDocumentError("no_change_has_no_candidate")
+        if len({e[0] for e in edits}) != len(edits):
+            raise DocxDocumentError("duplicate_target")
+        ordered, parts = _parts(source)
+        roots = {name: _parse(data) for name, data in parts.items()
+                 if name.endswith((".xml", ".rels")) or name == "[Content_Types].xml"}
+        fresh = {t.id: t for t in self.targets(source, roots=roots)}
+        touched: set[str] = set()
+        expected: dict[str, str] = {}
+        for target_id, fingerprint, new_text in edits:
+            target = fresh.get(target_id)
+            if target is None:
+                raise DocxDocumentError("target_not_found")
+            if not target.editable:
+                raise DocxDocumentError(target.reason or "not_editable")
+            if target.fingerprint != fingerprint:
+                raise DocxDocumentError("fingerprint_mismatch")
+            if not isinstance(new_text, str) or len(new_text) > 20000 or any(ord(c) < 32 for c in new_text):
+                raise DocxDocumentError("docx_text_requires_string")
+            node = _node_at(roots[target.part], target.native_locator or {})
+            node.text = new_text
+            if new_text[:1].isspace() or new_text[-1:].isspace():
+                node.set(f"{{{XML}}}space", "preserve")
+            else:
+                node.attrib.pop(f"{{{XML}}}space", None)
+            touched.add(target.part)
+            expected[target_id] = new_text
+        for part in touched:
+            parts[part] = etree.tostring(roots[part], xml_declaration=True, encoding="UTF-8", standalone=True)
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            archive.comment = b""
+            for info, _ in ordered:
+                archive.writestr(info, parts[info.filename])
+        candidate = output.getvalue()
+        after = {t.id: t for t in self.targets(candidate)}
+        if set(after) != set(fresh):
+            raise DocxDocumentError("candidate_structure_changed")
+        for identifier, target in fresh.items():
+            if identifier.endswith(":multi_run"):
+                continue                                  # read-only whole-paragraph view of runs that are checked individually
+            want = expected.get(identifier, target.value.value)
+            if after[identifier].value.value != want:
+                raise DocxDocumentError("candidate_verification_failed")
+        return candidate
+
 
 def _node_at(root: etree._Element, locator: dict[str, Any]) -> etree._Element:
     paragraphs = root.xpath(".//w:p", namespaces=NS)

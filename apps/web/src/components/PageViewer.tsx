@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 type Doc = import("pdfjs-dist").PDFDocumentProxy;
 
-export type Highlight = { id: string; page: number; bbox: [number, number, number, number]; kind: "add" | "del" | "mod"; label?: string };
+export type Highlight = { id: string; page: number; bbox: [number, number, number, number]; kind: "add" | "del" | "mod" | "edit"; label?: string };
 export type PageViewerProps = {
   /** Resolves the PDF bytes to display (a native PDF, or a preview-only rendering of an Office document). */
   fetchBytes: () => Promise<ArrayBuffer>;
@@ -16,12 +16,14 @@ export type PageViewerProps = {
   /** Show only these pages (comparison 'changed content only'); page numbers keep their real values. */
   onlyPages?: number[] | null;
   heading?: string;
+  /** When set, highlights are clickable and report their id (the DOCX editor selects a target this way). */
+  onSelectHighlight?: (id: string) => void;
 };
 
 const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 
 /** Shared paginated viewer: zoom, fit width, actual size, page navigation, full-screen. Used by Original and Compare. */
-export function PageViewer({ fetchBytes, title, highlights = [], activeHighlight, initialPage, note, onPages, testId, onlyPages, heading }: PageViewerProps) {
+export function PageViewer({ fetchBytes, title, highlights = [], activeHighlight, initialPage, note, onPages, testId, onlyPages, heading, onSelectHighlight }: PageViewerProps) {
   const [doc, setDoc] = useState<Doc | null>(null);
   const [pages, setPages] = useState<{ page: number; width: number; height: number }[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -118,13 +120,13 @@ export function PageViewer({ fetchBytes, title, highlights = [], activeHighlight
       {note ? <div className="viewer-note">{note}</div> : null}
       <div className="viewer-scroll" ref={scroller} tabIndex={0} aria-label={title}>
         {error ? <p className="stage-note">{error}</p> : !doc ? <p className="stage-note">Opening the page preview…</p>
-          : pages.filter((p) => !onlyPages || onlyPages.includes(p.page)).map((p) => <ViewerPage key={p.page} doc={doc} size={p} scale={scale} highlights={highlights.filter((h) => h.page === p.page)} active={activeHighlight} />)}
+          : pages.filter((p) => !onlyPages || onlyPages.includes(p.page)).map((p) => <ViewerPage key={p.page} doc={doc} size={p} scale={scale} highlights={highlights.filter((h) => h.page === p.page)} active={activeHighlight} onSelect={onSelectHighlight} />)}
       </div>
     </div>
   );
 }
 
-function ViewerPage({ doc, size, scale, highlights, active }: { doc: Doc; size: { page: number; width: number; height: number }; scale: number; highlights: Highlight[]; active?: string | null }) {
+function ViewerPage({ doc, size, scale, highlights, active, onSelect }: { doc: Doc; size: { page: number; width: number; height: number }; scale: number; highlights: Highlight[]; active?: string | null; onSelect?: (id: string) => void }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(size.page <= 2);
@@ -154,7 +156,8 @@ function ViewerPage({ doc, size, scale, highlights, active }: { doc: Doc; size: 
       <canvas ref={canvas} style={{ width: w, height: h }} />
       {highlights.map((hl) => {
         const [x0, y0, x1, y1] = hl.bbox;
-        return <div key={hl.id} data-hl={hl.id} className={`hl hl-${hl.kind} ${active === hl.id ? "active" : ""}`} title={hl.label}
+        return <div key={hl.id} data-hl={hl.id} className={`hl hl-${hl.kind} ${active === hl.id ? "active" : ""} ${onSelect ? "clickable" : ""}`} title={hl.label}
+          onClick={onSelect ? () => onSelect(hl.id) : undefined}
           style={{ left: `${(x0 / size.width) * 100}%`, top: `${((size.height - y1) / size.height) * 100}%`, width: `${((x1 - x0) / size.width) * 100}%`, height: `${((y1 - y0) / size.height) * 100}%` }} />;
       })}
       <span className="viewer-page-no">{size.page}</span>

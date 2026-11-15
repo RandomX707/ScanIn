@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "./Shell";
 import {
-  ApiError, fetchRenderBytes, fetchVersionFile, folderName, getPreview, saveVersion, typeLabel,
+  ApiError, fetchVersionFile, folderName, getPreview, saveVersion, typeLabel,
   type Chunks, type FolderVersion, type Preview, type SaveBody,
 } from "../lib/api";
 import { DocxEditor, GridEditor, PdfEditor, RichEditor, TextEditor } from "./editors";
+import { DocxPageEditor } from "./DocxPageEditor";
 import { PdfTextEditor } from "./PdfTextEditor";
 import { SignatureStatus, WorkingCopyAction, WorkingCopyBanner } from "../components/SignaturePanel";
-import { PageViewer } from "../components/PageViewer";
 
 export type EditsProps = {
   documentId: string; folderName: string; version: FolderVersion; family: FolderVersion[]; chunksText: Chunks | null;
@@ -18,7 +18,7 @@ export type EditsProps = {
 const DESCRIPTION: Record<string, string> = {
   text: "Edit text below. Your original is preserved.",
   grid: "Click a cell to change its value. Locked cells can't be edited. Your original is preserved.",
-  docx: "Edit the highlighted text directly. Dimmed text is read-only. Your original is preserved.",
+  docx: "Pick text on the real pages, change it, and preview the result before saving. Your original is preserved.",
   pdf: "Fill in the form fields on the page. Your original is preserved.",
   pdf_text: "Click text on the page to change it. Your original is preserved.",
 };
@@ -29,7 +29,6 @@ export function EditsTab(props: EditsProps) {
   const [body, setBody] = useState<SaveBody | null>(null);
   const [saving, setSaving] = useState(false);
   const [resetKey, setResetKey] = useState(0);
-  const [pagesOpen, setPagesOpen] = useState(false);
   const dirty = body !== null;
   const bodyRef = useRef<SaveBody | null>(null);
 
@@ -117,7 +116,9 @@ export function EditsTab(props: EditsProps) {
       {rich && <RichEditor key={resetKey} preview={preview} onBody={onBody} onReset={reset} />}
       {mode === "text" && !rich && <TextEditor key={resetKey} preview={preview} formatting={false} onBody={onBody} onReset={reset} />}
       {mode === "grid" && <GridEditor key={resetKey} preview={preview} onBody={onBody} documentId={documentId} versionId={version.version_id} />}
-      {mode === "docx" && <DocxEditor key={resetKey} preview={preview} onBody={onBody} />}
+      {mode === "docx" && (preview.render?.available
+        ? <DocxPageEditor key={resetKey} documentId={documentId} versionId={version.version_id} preview={preview} onBody={onBody} notify={notify} />
+        : <DocxEditor key={resetKey} preview={preview} onBody={onBody} />)}
       {mode === "pdf_text" && <PdfTextEditor key={resetKey} documentId={documentId} versionId={version.version_id} preview={preview} notify={notify}
         fetchBytes={async () => (await fetchVersionFile(documentId, version.version_id)).arrayBuffer()} onBody={onBody} />}
       {mode === "pdf" && <PdfEditor key={resetKey} preview={preview} fetchBytes={async () => (await fetchVersionFile(documentId, version.version_id)).arrayBuffer()} onBody={onBody} />}
@@ -128,12 +129,6 @@ export function EditsTab(props: EditsProps) {
         </div>
         <span className="stage-note">{dirty ? "Modified working copy" : "Your changes stay separate from the source"}</span>
       </div>
-      {mode === "docx" && preview.render?.available ? (
-        <details className="compare-snapshot page-preview" data-testid="docx-version-pages" onToggle={(e) => setPagesOpen(e.currentTarget.open)}>
-          <summary>Preview the pages of this saved version</summary>
-          {pagesOpen ? <PageViewer key={version.version_id} title={`v${version.number} pages`} testId="docx-version-viewer" note={preview.render.note} fetchBytes={() => fetchRenderBytes(documentId, version.version_id)} /> : null}
-        </details>
-      ) : null}
       <details className="compare-snapshot">
         <summary>Compare against source text</summary>
         <pre>{props.chunksText?.excerpt ?? ""}{props.chunksText?.excerpt_truncated ? "\n… excerpt shortened" : ""}</pre>

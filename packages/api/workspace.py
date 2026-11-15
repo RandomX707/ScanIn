@@ -660,7 +660,7 @@ def version_preview(document_id: str, version_id: str, request: Request, virtual
                                "heading": block.get("heading_level"), "table": block.get("table"),
                                "target_id": single["id"] if editable and single else None,
                                "fp": single["fingerprint"] if editable and single else None,
-                               "e": editable, "r": reason})
+                               "e": editable, "r": reason, "props": block.get("props") or {}})
             level = str(report.capability.get("level"))
             reasons = list(report.capability.get("reasons") or [])
             renderer = request.app.state.office_renderer

@@ -9,12 +9,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
+from pydantic import BaseModel, ConfigDict, Field
 
 from packages.api.auth import AuthenticatedIdentity, require_identity
 from packages.api.db_context import api_tenant_transaction
 from packages.api.documents import _source_version
 from packages.api.errors import APIError
 from packages.registry.documents import DocumentRepository
+from packages.core.adapters.docx.adapter import DocxAdapter, DocxDocumentError
+from packages.api.save_flow import SaveChange
 from packages.workers.office_render import OfficeRenderRefused, OfficeRenderUnavailable, SUPPORTED
 
 router = APIRouter(prefix="/api", tags=["render"])
@@ -134,3 +137,61 @@ def render_fonts(document_id: str, version_id: str, request: Request, identity: 
     report = request.app.state.restricted_parser.inspect(request.app.state.document_storage.root / str(version["storage_key"]), filename=name)
     declared = list((report.details or {}).get("fonts", []))
     return font_report(declared, pdf)
+
+
+class DocxDraftRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    changes: list[SaveChange] = Field(min_length=1, max_length=200)
+
+
+_DRAFT_PLAIN = {
+    "fingerprint_mismatch": "This text changed since the editor was opened. Reopen the editor and try again.",
+    "target_not_found": "One of the selected texts no longer exists in this version.",
+    "multi_run_span": "This paragraph mixes several text styles, so it is read-only here.",
+    "docx_text_requires_string": "The replacement must be plain text without control characters.",
+    "candidate_structure_changed": "The change would alter the document structure, so it was not applied.",
+    "candidate_verification_failed": "The change could not be verified against the document, so it was not applied.",
+    "duplicate_target": "The same text was selected twice.",
+}
+
+
+@router.post("/documents/{document_id}/versions/{version_id}/docx-edit/preview")
+def docx_edit_preview(document_id: str, version_id: str, payload: DocxDraftRequest, request: Request,
+                      identity: AuthenticatedIdentity = Depends(require_identity)) -> Response:
+    """Render the DOCX exactly as it would be after the proposed edits (a draft: nothing is stored, no version is created)."""
+    try:
+        parsed_document, parsed_version = UUID(document_id), UUID(version_id)
+    except ValueError:
+        raise APIError(404, "not_found", "The requested version was not found.") from None
+    version, source = _source_version(request, identity, parsed_document, parsed_version)
+    if hashlib.sha256(source).hexdigest() != str(version["sha256"]):
+        raise APIError(409, "integrity_mismatch", "The stored file did not match its recorded fingerprint.")
+    with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
+        repo = DocumentRepository(connection, identity.tenant_id)
+        original = repo.get_original(parsed_document)
+        repo.authorize_owner_upload(parsed_document, actor_id=identity.subject)
+    if original is None or PurePosixPath(str(original["filename"])).suffix.lower() != ".docx":
+        raise APIError(415, "render_type_unsupported", "A draft preview is available for Word documents only.")
+    if any(not isinstance(c.value, str) for c in payload.changes):
+        raise APIError(422, "docx_text_requires_string", _DRAFT_PLAIN["docx_text_requires_string"])
+    try:
+        candidate = DocxAdapter().draft(source, [(c.target_id, c.fingerprint, str(c.value)) for c in payload.changes])
+    except DocxDocumentError as error:
+        raise APIError(409 if error.code == "fingerprint_mismatch" else 422, "draft_rejected",
+                       _DRAFT_PLAIN.get(error.code, "This text is read-only and can't be changed here."), details=[{"reason": error.code}]) from None
+    renderer = request.app.state.office_renderer
+    if not _slots.acquire(timeout=30):
+        raise APIError(503, "render_busy", "The page preview is busy. Try again in a moment.")
+    try:
+        pdf = renderer.render_pdf(candidate, ".docx")
+    except OfficeRenderUnavailable:
+        raise APIError(503, "render_unavailable", "The page preview is unavailable right now.") from None
+    except OfficeRenderRefused as refused:
+        raise APIError(422, "render_failed", "The edited document couldn't be rendered as pages.", details=[{"reason": refused.reason_code}]) from None
+    finally:
+        _slots.release()
+    headers = {"X-Render-Engine": "libreoffice-sandboxed", "X-Preview-Kind": "draft", "X-Preview-Edits": str(len(payload.changes)), "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+               "Content-Disposition": 'inline; filename="draft-preview.pdf"',
+               "Access-Control-Expose-Headers": "X-Preview-Kind, X-Preview-Edits"}
+    return Response(content=pdf, media_type="application/pdf", headers=headers)
+

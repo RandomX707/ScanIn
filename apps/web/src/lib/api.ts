@@ -138,7 +138,7 @@ export type SheetImage = { src: string; from: { col: number; row: number; dx: nu
 export type SheetLayout = { default_col?: number; default_row?: number; merges: [number, number, number, number][]; cols: Record<string, number>; rows: Record<string, number>; cells: Record<string, number>; images: SheetImage[];
   freeze?: { rows: number; cols: number } | null; zoom?: number; hidden?: boolean; protected?: boolean };
 export type Sheet = { name: string; rows: Cell[][]; truncated: boolean; layout?: SheetLayout };
-export type DocxBlock = { id: string; kind: string; text: string; heading: number | null; table: { index: number; row: number; col: number } | null; target_id: string | null; fp: string | null; e: boolean; r: string | null };
+export type DocxBlock = { id: string; kind: string; text: string; heading: number | null; table: { index: number; row: number; col: number } | null; target_id: string | null; fp: string | null; e: boolean; r: string | null; props?: { bold?: boolean; italic?: boolean; underline?: boolean; color?: string; size?: number; font?: string; align?: string } };
 export type PdfField = { id: string; name: string; type: string; value: unknown; options: string[]; max_length: number | null; fp: string; e: boolean; r: string | null; widgets: { page: number; rect: number[]; state?: string | null }[] };
 export type SignatureInfo = { status: string; validated: boolean; state?: string; label?: string; detail?: string; trust_policy_configured?: boolean;
   docmdp?: { permission: number; meaning: string } | null; limits?: string[];
@@ -237,3 +237,15 @@ export const cancelSheetIndex = (documentId: string, versionId: string) => json<
 
 export type FontReport = { declared: string[]; rendered: string[]; substituted: { declared: string; replaced_with: string | null; exact: boolean }[] };
 export const getRenderFonts = (documentId: string, versionId: string) => json<FontReport>(`/api/documents/${documentId}/versions/${versionId}/render/fonts`);
+
+/** Draft preview of a DOCX with the proposed edits applied (rendered in the sandbox; nothing is stored). */
+export async function fetchDocxDraft(documentId: string, versionId: string, changes: { target_id: string; fingerprint: string; value: string }[]): Promise<ArrayBuffer> {
+  const response = await request(`/api/documents/${documentId}/versions/${versionId}/docx-edit/preview`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ changes }) });
+  if (!response.ok) {
+    let body: { code?: string; message?: string } = {};
+    try { body = await response.json(); } catch { /* generic */ }
+    throw new ApiError(response.status, body.code ?? "draft_unavailable", body.message ?? "The preview of your changes could not be produced.");
+  }
+  return response.arrayBuffer();
+}

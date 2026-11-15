@@ -99,6 +99,21 @@ def main() -> int:
         check("saved DOCX reopens with the edit and the table intact", bool(reopened) and any("Amended." in p.text for p in reopened.paragraphs) and len(reopened.tables) == 1)
     check("original DOCX byte-identical", hashlib.sha256(c.file(dd, dv)[1]).hexdigest() == dsha)
 
+    # ---- DOCX draft preview: the PROPOSED edit rendered in the sandbox, nothing stored
+    if blocks:
+        import json as _json
+        before = len(c.json(f"/api/documents/{dd}/history")["versions"])
+        body = _json.dumps({"changes": [{"target_id": blocks[0]["target_id"], "fingerprint": blocks[0]["fp"], "value": "The quoted annual premium is DRAFTED."}]}).encode()
+        s, draft_pdf, hdr = c.call("POST", f"/api/documents/{dd}/versions/{dv}/docx-edit/preview", body, {"Content-Type": "application/json"}, raw=True)
+        check("DOCX draft preview renders the proposed edit as pages", s == 200 and draft_pdf[:5] == b"%PDF-" and hdr.get("x-preview-kind") == "draft", str(s))
+        check("draft preview stored nothing and left the original untouched",
+              len(c.json(f"/api/documents/{dd}/history")["versions"]) == before and hashlib.sha256(c.file(dd, dv)[1]).hexdigest() == dsha)
+        bad = _json.dumps({"changes": [{"target_id": blocks[0]["target_id"], "fingerprint": "0" * 64, "value": "x"}]}).encode()
+        s, b, _ = c.call("POST", f"/api/documents/{dd}/versions/{dv}/docx-edit/preview", bad, {"Content-Type": "application/json"})
+        check("draft with a stale fingerprint is refused (409)", s == 409, str(s))
+        s, _, _ = Client().call("POST", f"/api/documents/{dd}/versions/{dv}/docx-edit/preview", body, {"Content-Type": "application/json"})
+        check("another tenant cannot draft against this document (404)", s == 404, str(s))
+
     # ---- XLSX native save, formulas preserved
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Data"; ws["A1"] = "Label"; ws["B1"] = "Amount"; ws["A2"] = "Alpha"; ws["B2"] = 10; ws["A3"] = "Beta"; ws["B3"] = 20; ws["B4"] = "=SUM(B2:B3)"
     buffer = io.BytesIO(); wb.save(buffer); xb = buffer.getvalue(); xsha = hashlib.sha256(xb).hexdigest()
