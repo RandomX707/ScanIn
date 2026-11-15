@@ -24,7 +24,7 @@ Edits tab  ──►  PageViewer (same LibreOffice pages as Original, GET …/re
   on a page only if its text occurs exactly once in the rendered text *and* exactly one block has that text. Repeated labels, identical cells,
   repeating header/footer text and text split across pages stay **unlocated** and are reached from the list (marked `list`). Nothing is guessed.
   On the Health Quote document 33 of 40 editable texts on the sampled view are verified; the rest use the list.
-* **Draft preview** (`packages/api/render.py: docx_edit_preview`, `DocxAdapter.draft`): requires the owner-edit permission, applies the edits to
+* **Draft preview** (`packages/api/render.py: docx_edit_preview`, `DocxAdapter.draft`): authenticated, tenant-scoped and strictly read-only; applies the edits to
   a copy in memory after re-validating every id, editable flag and fingerprint against freshly computed targets, re-reads the candidate and
   asserts that it differs from the source only at the edited targets, renders it in the same sandboxed renderer (shared 2-slot semaphore,
   timeout and size limits), returns the PDF with `Cache-Control: no-store`. No file, version, edit set or audit row is created. Stale
@@ -150,7 +150,7 @@ are covered by synthetic unit tests with verification, not by real-document runs
 
 | Suite | PASS | FAIL | SKIP/BLOCKED |
 |---|---|---|---|
-| Backend `pytest tests` (PostgreSQL env set) | 777 | 0 | 0 |
+| Backend `pytest tests` (PostgreSQL env set) | 778 | 0 | 0 |
 | Playwright, production build, all specs except ZIP | 94 | 0 | ZIP spec excluded (out of scope); includes the 4 new acceptance tests |
 | Non-ZIP stakeholder acceptance (`acceptance_run --skip-zip`) | 17 | 0 | ZIP stage reported OUT OF SCOPE |
 | `compare_flow` / `branch_compare_flow` | 31 / 11 | 0 | |
@@ -159,13 +159,13 @@ are covered by synthetic unit tests with verification, not by real-document runs
 | `docx_fidelity` / `docx_geometry` | 26 / 9 | 0 | |
 | `signed_flow` / `security_flow` (signed PDFs, tenant isolation, downloads) | 82 / 23 | 0 | |
 | `pdf_api_flow` / `docx_api_flow` / `office_api_flow` | exit 0 | | |
-| `release_smoke.py` (isolated stack) | 32 | 0 | |
+| `release_smoke.py` (isolated stack) | 33 | 0 | |
 | Sandbox runtime (`check-sandbox.py`, `tests/unit/test_sandbox.py`) | READY / passes | 0 | Linux Bubblewrap and containers NOT RUNTIME VERIFIED |
 
-**Test inventory.** Baseline 751 (development branch) vs 777 now. `main` @ `af02ec5` collects 698 in a clean checkout: the 751 included 57 parametrisations over
+**Test inventory.** Baseline 751 (development branch) vs 778 now. `main` @ `af02ec5` collects 698 in a clean checkout: the 751 included 57 parametrisations over
 private CSV fixture packs that exist only under the development worktree's `artifacts/` (`test_csv_compact_parser`, `test_csv_summary_one_pass`,
 `test_csv_verifier_compact`: 19 each), minus 2 `test_corpus_runner_hardening` cases and 2 `test_dependency_manifest` cases that the development branch does not contain.
-This branch adds 22 tests (5 DOCX draft, 17 PDF fitting). Linking those fixture packs into the worktree (untracked) gives 698 + 57 + 22 = 777, so no test was
+This branch adds 23 tests (5 DOCX draft, 18 PDF fitting). Linking those fixture packs into the worktree (untracked) gives 698 + 57 + 23 = 778, so no test was
 dropped or excluded. Two earlier observations are explained, not re-run away: a first pytest run showed 32 skips because the PostgreSQL environment variables were
 not exported in that shell (skips are reported `NOT_VERIFIED`; with them set: 0 skips), and `pdf_api_flow`/`docx_api_flow` first failed with `IndexError` because
 I called them without their required file argument (harness misuse, not a product failure).
@@ -181,17 +181,12 @@ Fixed during this review (each with a test or an acceptance run that showed it):
 | R3 | The collision check ignored other edited texts, so two edits on one line could touch undetected | new `edited_texts_do_not_overlap` verification check (engine ordering already prevented it; this is defence in depth) |
 | R4 | The page locator assumed an upright page with origin (0,0), so a rotated/offset rendering could place a highlight wrongly | positions are claimed only for upright, origin-aligned pages; otherwise list only |
 
-Reviewed and found sound: target id + fingerprint validation is recomputed from the stored source for every draft; draft authorisation = tenant RLS + owner-edit permission, 409 stale, 404 other tenant; the
+Reviewed and found sound: target id + fingerprint validation is recomputed from the stored source for every draft; draft authorisation = bearer token + tenant RLS (the only role is OWNER), 409 stale, 404 other tenant (see section F for the correction); the
 draft candidate is re-read and must differ from the source only at the edited targets; the renderer copies input into a private scratch directory removed in `finally`
 (8 concurrent drafts: all 200, 0 leftover scratch directories, no version created); the sandbox and its self-test are the existing ones; draft and save are the same text replacement and
 the render of the saved file is pixel-identical to the draft; original files are never written; a refused PDF save raises before anything is staged; comparison of draft-derived versions is the existing comparer.
 
-Open findings, not fixed (documented limitations, no correctness defect found):
-
-* O1. Drafts share the existing 2-slot render semaphore and are not rate-limited or audited per request; heavy draft traffic can delay page previews (`render_busy` after 30 s). The DOCX is parsed in process by the same adapter code the save path already uses.
-* O2. `/pdf-edit/preview` and `/pdf-edit/fit` do not require the owner-edit permission (preview never did); the DOCX draft does. Not weaker than before, but inconsistent.
-* O3. Alignment inference (left/right/centre) is a geometric heuristic; it can never cause a collision (geometry and output are verified) but can place text differently from what a user expects in unusual cells.
-* O4. Fitting works on one text line; filled cell backgrounds, dashed or curved borders and rotated text are not treated; a value directly beside another text object is refused.
+Open findings are listed in section F (O1 and O2 of the first review were examined again and corrected or reclassified there).
 
 ## E. Push and deployment readiness
 
@@ -200,3 +195,27 @@ were fixed and re-verified; the open findings (O1-O4) are limitations, not defec
 
 Deployment: no migration, dependency or configuration change; backend and frontend must be deployed together (the editor calls `/docx-edit/preview` and `/pdf-edit/fit`). Before deploying, rerun
 `scripts/dev/release_smoke.py` against the release configuration. Rollback: redeploy `af02ec5`; versions created by this code are ordinary DOCX/PDF files. Not verified: Linux Bubblewrap, containers, ZIP.
+
+## F. Residual-risk review before the pull request
+
+**A. Number presentation (Fire policy sum-insured amounts).** Each amount is a whole-number object followed by a separate `.00` object that touches its right edge (0.01 pt). A longer
+replacement therefore *reads* as `<new>.00` on the page and in extracted text (verified: the saved page extracts `…678.00` contiguously). That is a faithful, non-reformatted result, but a user who types
+their own decimals would get a doubled decimal part. Confirmed gap, now handled: the engine reports an adjacent separate object (`adj`, in the run listing) and the PDF editor shows a
+non-blocking note stating the complete displayed value ("This will read “…678.00”: “.00” is a separate object and is not changed. Check the whole value, including any decimals."). Totals and other
+amounts are never recalculated.
+
+**B. Render pool.** Measured before the change: with 60 queued drafts an uncached page preview took ~26 s (limit 30 s, then `render_busy`) because drafts and previews shared the same 2 slots. Not indefinite
+starvation (the queue drains), but one client could degrade page previews. Fixed: drafts use their own single slot (they can no longer occupy the preview slots), wait at most 10 s (`503 render_busy`),
+and a tenant may have at most 2 drafts in flight (`429 draft_rate_limited`). Measured after: preview 0.9–1.7 s during the same 60-draft flood; excess drafts get 429. At most 3 LibreOffice processes run at once.
+
+**C. Authorization.** Findings:
+
+* **Confirmed defect (fixed): the DOCX draft was not read-only.** It called `authorize_owner_upload`, which is not an authorization check: it *writes* (sets the document category to `insurer-authored`) and
+  appends a `document.owner_upload_authorized` audit event. A first draft therefore changed the document row and audit log, contradicting "a draft stores nothing" and the earlier statement that it
+  enforced an owner-edit permission. Measured: category `unknown → insurer-authored`, audit events 6 → 7. Fix: the draft no longer calls it; measured after: category and audit count unchanged; regression
+  check added to `release_smoke.py`. (The earlier "no version created" evidence stands; the audit/category side effect was not checked then.)
+* **Access model (confirmed, intentional single-owner design):** `OWNER` is the only role in the system. Measured for PDF fit, PDF preview, PDF save, DOCX draft and DOCX save: no token → 401, another
+  tenant → 404, owner → 200. Differences between the flows are not authorization differences: the native DOCX save (existing code) sets the document category as part of the edit-set authorization and audits it,
+  the ordinary-PDF text save does not, and the preview/fit/draft endpoints do neither.
+* Potential improvements (not defects): introduce non-owner roles with explicit edit permission if the product ever leaves the single-owner model; rate-limit PDF preview/fit as drafts now are; audit drafts
+  if a trail of previews is wanted.

@@ -95,7 +95,8 @@ def list_runs(source: bytes, page: int) -> dict:
         ok, why = engine.run_status(r)
         if ok and _is_working_copy_notice(r.text):
             ok, why = False, "This notice marks the file as an unsigned working copy and can't be edited."
-        runs.append({**r.public(), "e": ok, "r": why})
+        adj = engine.adjacent_right(r)
+        runs.append({**r.public(), "e": ok, "r": why, **({"adj": adj[:12]} if adj else {})})
     return {"page": page, "width": float(pg.mediabox.width), "height": float(pg.mediabox.height), "runs": runs}
 
 

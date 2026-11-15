@@ -159,7 +159,7 @@ export const getPreview = (documentId: string, versionId: string, virtual = forc
 export type FitStrategy = "size" | "scale" | "spacing" | "expand";
 export type FitOption = { strategy: FitStrategy; label: string; detail: string; factor: number; new_width: number; shift: number };
 export type PdfTextEdit = { id: string; old: string; new: string; fit?: FitStrategy };
-export type PdfRun = { id: string; page: number; text: string; bbox: [number, number, number, number]; font: string; size: number; e: boolean; r: string | null };
+export type PdfRun = { id: string; page: number; text: string; bbox: [number, number, number, number]; font: string; size: number; e: boolean; r: string | null; adj?: string };
 export type PdfPageText = { page: number; width: number; height: number; runs: PdfRun[] };
 export const getPdfText = (documentId: string, versionId: string, page: number) =>
   json<PdfPageText>(`/api/documents/${documentId}/versions/${versionId}/pdf-text?page=${page}`);

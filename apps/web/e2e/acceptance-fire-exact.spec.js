@@ -25,7 +25,7 @@ test('exact replacement on the Fire policy: fit, preview, save, reopen, compare'
   const [, d, v] = (await pr).url().match(/documents\/([^/]+)\/versions\/([^/]+)\/preview/);
   const original = fs.readFileSync(file); const sha = crypto.createHash('sha256').update(original).digest('hex');
   const runs = (await (await fetch(`${API}/api/documents/${d}/versions/${v}/pdf-text?page=2`, { headers: H() })).json()).runs;
-  const target = runs.find((r) => r.text === '24,00,00,000');
+  const target = runs.find((r) => r.e && /^\d{1,2}(,\d\d)+,\d{3}$/.test(r.text.trim()));   // the first thousand-separated sum-insured amount on page 2
   expect(target).toBeTruthy();
   const fit = await (await fetch(`${API}/api/documents/${d}/versions/${v}/pdf-edit/fit`, { method: 'POST', headers: { ...H(), 'Content-Type': 'application/json' }, body: JSON.stringify({ pdf_edits: [{ id: target.id, old: target.text, new: NEW }] }) })).json();
   fs.writeFileSync(path.join(out, 'fire-exact-fit-response.json'), JSON.stringify(fit, null, 1));
@@ -36,6 +36,7 @@ test('exact replacement on the Fire policy: fit, preview, save, reopen, compare'
   const input = page.locator(`input[data-run="${target.id}"]`); await input.fill(NEW); await input.press('Enter');
   await expect(page.getByTestId('amount-warning')).toBeVisible({ timeout: 90_000 });
   await expect(page.getByTestId('fit-panel')).toHaveCount(0);
+  await expect(page.getByTestId('adjacent-text-note')).toContainText(`${NEW}.00`);   // the complete displayed value is stated, including the separate .00 object
   await page.getByRole('button', { name: 'Save as next version' }).click();
   await expect(page.locator('.toast, [role="status"]').filter({ hasText: /Version v2 saved/ }).first()).toBeVisible({ timeout: 180_000 });
   const hist = await (await fetch(`${API}/api/documents/${d}/history`, { headers: H() })).json();

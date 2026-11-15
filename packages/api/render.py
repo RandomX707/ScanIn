@@ -22,6 +22,12 @@ from packages.workers.office_render import OfficeRenderRefused, OfficeRenderUnav
 
 router = APIRouter(prefix="/api", tags=["render"])
 _slots = BoundedSemaphore(2)
+# Draft previews get their OWN single slot (so they can never occupy the slots page previews use) and a per-tenant in-flight cap.
+_draft_slots = BoundedSemaphore(1)
+_DRAFT_QUEUE_SECONDS = 10
+_DRAFT_PER_TENANT = 2
+_draft_inflight: dict[str, int] = {}
+_draft_lock = Lock()
 _flight_lock = Lock()
 _flight: dict[str, Lock] = {}
 
@@ -166,10 +172,10 @@ def docx_edit_preview(document_id: str, version_id: str, payload: DocxDraftReque
     version, source = _source_version(request, identity, parsed_document, parsed_version)
     if hashlib.sha256(source).hexdigest() != str(version["sha256"]):
         raise APIError(409, "integrity_mismatch", "The stored file did not match its recorded fingerprint.")
+    # Read-only on purpose: a draft must leave no trace. (authorize_owner_upload would flip the document category and append an audit event;
+    # that belongs to the save path only.)
     with request.app.state.engine.connect() as connection, api_tenant_transaction(connection, identity):
-        repo = DocumentRepository(connection, identity.tenant_id)
-        original = repo.get_original(parsed_document)
-        repo.authorize_owner_upload(parsed_document, actor_id=identity.subject)
+        original = DocumentRepository(connection, identity.tenant_id).get_original(parsed_document)
     if original is None or PurePosixPath(str(original["filename"])).suffix.lower() != ".docx":
         raise APIError(415, "render_type_unsupported", "A draft preview is available for Word documents only.")
     if any(not isinstance(c.value, str) for c in payload.changes):
@@ -180,16 +186,25 @@ def docx_edit_preview(document_id: str, version_id: str, payload: DocxDraftReque
         raise APIError(409 if error.code == "fingerprint_mismatch" else 422, "draft_rejected",
                        _DRAFT_PLAIN.get(error.code, "This text is read-only and can't be changed here."), details=[{"reason": error.code}]) from None
     renderer = request.app.state.office_renderer
-    if not _slots.acquire(timeout=30):
-        raise APIError(503, "render_busy", "The page preview is busy. Try again in a moment.")
+    tenant_key = str(identity.tenant_id)
+    with _draft_lock:
+        if _draft_inflight.get(tenant_key, 0) >= _DRAFT_PER_TENANT:
+            raise APIError(429, "draft_rate_limited", "Too many previews are being prepared. Wait for one to finish and try again.")
+        _draft_inflight[tenant_key] = _draft_inflight.get(tenant_key, 0) + 1
     try:
-        pdf = renderer.render_pdf(candidate, ".docx")
-    except OfficeRenderUnavailable:
-        raise APIError(503, "render_unavailable", "The page preview is unavailable right now.") from None
-    except OfficeRenderRefused as refused:
-        raise APIError(422, "render_failed", "The edited document couldn't be rendered as pages.", details=[{"reason": refused.reason_code}]) from None
+        if not _draft_slots.acquire(timeout=_DRAFT_QUEUE_SECONDS):
+            raise APIError(503, "render_busy", "Previews of changes are busy. Try again in a moment.")
+        try:
+            pdf = renderer.render_pdf(candidate, ".docx")
+        except OfficeRenderUnavailable:
+            raise APIError(503, "render_unavailable", "The page preview is unavailable right now.") from None
+        except OfficeRenderRefused as refused:
+            raise APIError(422, "render_failed", "The edited document couldn't be rendered as pages.", details=[{"reason": refused.reason_code}]) from None
+        finally:
+            _draft_slots.release()
     finally:
-        _slots.release()
+        with _draft_lock:
+            _draft_inflight[tenant_key] = max(0, _draft_inflight.get(tenant_key, 1) - 1)
     headers = {"X-Render-Engine": "libreoffice-sandboxed", "X-Preview-Kind": "draft", "X-Preview-Edits": str(len(payload.changes)), "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
                "Content-Disposition": 'inline; filename="draft-preview.pdf"',
                "Access-Control-Expose-Headers": "X-Preview-Kind, X-Preview-Edits"}

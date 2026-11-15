@@ -179,17 +179,17 @@ def test_two_fitted_edits_on_one_page_do_not_disturb_each_other():
     buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=(595, 842)); c.setLineWidth(0.8); c.setFont("Helvetica", 12)
     for x in (75, 165, 255):
         c.line(x, 700, x, 740)
-    c.drawString(80, 715, OLD); c.drawString(170, 715, "39,00,00,000"); c.drawString(260, 715, "Unchanged cell"); c.showPage(); c.save()
+    c.drawString(80, 715, OLD); c.drawString(170, 715, "11,11,11,111"); c.drawString(260, 715, "Unchanged cell"); c.showPage(); c.save()
     src = buf.getvalue()
     eng = PdfTextEngine(src)
-    a = next(r for r in eng.runs(0) if r.text == OLD); b = next(r for r in eng.runs(0) if r.text == "39,00,00,000")
+    a = next(r for r in eng.runs(0) if r.text == OLD); b = next(r for r in eng.runs(0) if r.text == "11,11,11,111")
     edits = [{"id": a.id, "old": OLD, "new": NEW, "fit": "scale"}, {"id": b.id, "old": b.text, "new": b.text + ",9", "fit": "size"}]
     applied = worker.apply_edits(src, edits)
     assert "error" not in applied, applied
     report = worker.verify(src, applied["out"], applied["plans"], applied["before_runs"])
     assert report["outcome"] == "VERIFIED", [x for x in report["checks"] if x["status"] != "pass"]
     texts = {r.text.replace(" ", "") for r in PdfTextEngine(applied["out"]).runs(0)}
-    assert {NEW, "39,00,00,000,9", "Unchangedcell"} <= texts
+    assert {NEW, "11,11,11,111,9", "Unchangedcell"} <= texts
 
 
 def _clip_pdf(path_ops: str, form: bool = False) -> bytes:
@@ -226,3 +226,13 @@ def test_two_edits_that_would_touch_are_flagged_by_verification():
                                    {"id": "y", "page": 0, "old": OLD, "new": OLD, "bbox": list(a.bbox), "x0": a.x0, "orig_x0": a.x0, "orig_x1": a.x1,
                                     "ext": [a.x1 - 0.5, a.x1 + 30], "y": a.y, "new_width": 30, "size": 12.0, "cells": []}], {0: eng.runs(0)})
     assert any(c["check"] == "edited_texts_do_not_overlap" and c["status"] == "fail" for c in out["checks"])
+
+
+def test_separate_object_touching_the_value_is_reported_for_the_display_notice():
+    buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=(595, 842)); c.setFont("Helvetica", 12)
+    c.drawString(80, 715, OLD)
+    c.drawString(80 + c.stringWidth(OLD, "Helvetica", 12), 715, ".00")
+    c.drawString(300, 715, "far away"); c.showPage(); c.save()
+    src = buf.getvalue(); eng, run = _run(src)
+    assert eng.adjacent_right(run) == ".00"
+    assert worker.list_runs(src, 1)["runs"][0].get("adj") in (".00", None) and any(r.get("adj") == ".00" for r in worker.list_runs(src, 1)["runs"])

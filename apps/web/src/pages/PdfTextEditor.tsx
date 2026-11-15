@@ -16,6 +16,7 @@ export function PdfTextEditor({ documentId, versionId, preview, fetchBytes, onBo
   const [edits, setEdits] = useState<Record<string, PdfTextEdit>>({});
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [adjacent, setAdjacent] = useState<Record<string, string>>({});
   const [proposal, setProposal] = useState<{ run: PdfRun; value: string; message: string; options: FitOption[]; choice: string } | null>(null);
   const original = useRef<ArrayBuffer | null>(null);
   const seq = useRef(0);
@@ -71,6 +72,7 @@ export function PdfTextEditor({ documentId, versionId, preview, fetchBytes, onBo
   const change = useCallback(async (run: PdfRun, value: string) => {
     const current = edits[run.id]?.new ?? run.text;
     if (value === current) return;
+    if (run.adj) setAdjacent((a) => ({ ...a, [run.id]: run.adj! }));
     const next = { ...edits };
     if (value === run.text) delete next[run.id]; else next[run.id] = { id: run.id, old: run.text, new: value };
     await apply(next, run.id, run);
@@ -113,6 +115,9 @@ export function PdfTextEditor({ documentId, versionId, preview, fetchBytes, onBo
             <button className="btn outline small" onClick={() => revertRun(e.id)}>Revert to original value</button> </span>)}
         </div>
       ) : null}
+      {Object.values(edits).filter((e) => adjacent[e.id]).map((e) => (
+        <div key={e.id} className="dpe-warn" role="note" data-testid="adjacent-text-note">This will read “{e.new}{adjacent[e.id]}” on the page: “{adjacent[e.id]}” beside it is a separate text object and is not changed. Check the whole value, including any decimals.</div>
+      ))}
       {numeric ? <div className="dpe-warn" role="note" data-testid="amount-warning">You changed an amount. Totals and other figures that depend on it are not recalculated here — please review them before saving.</div> : null}
       {doc && lib ? pages.map((page) => (
         <TextPage key={page.page} doc={doc} documentId={documentId} versionId={versionId} page={page}

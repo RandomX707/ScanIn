@@ -704,6 +704,11 @@ class PdfTextEngine:
         return {"left": min(left, run.x0), "right": max(right, run.x1), "cell": lb is not None and rb is not None, "lb": lb, "rb": rb,
                 "crossed": crossed, "clip_unknown": clip_unknown}
 
+    def adjacent_right(self, run: Run) -> str:
+        """Text of separate objects that touch the run's right edge on the same line (for example the `.00` after a whole-rupee amount)."""
+        parts = sorted((o for o in self.runs(run.page) if o.id != run.id and abs(o.y - run.y) < 1.0 and -0.5 <= o.x0 - run.x1 <= 1.0), key=lambda o: o.x0)
+        return "".join(o.text for o in parts).strip()
+
     def free_right(self, run: Run) -> float:
         """Space (pt) available to the right of the run before the next text object, table border or the page margin."""
         return max(self.bounds(run)["right"] - run.x1, 0.0)

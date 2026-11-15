@@ -103,9 +103,11 @@ def main() -> int:
     if blocks:
         import json as _json
         before = len(c.json(f"/api/documents/{dd}/history")["versions"])
+        audit_before = len(c.json(f"/api/documents/{dd}/audit")["items"])
         body = _json.dumps({"changes": [{"target_id": blocks[0]["target_id"], "fingerprint": blocks[0]["fp"], "value": "The quoted annual premium is DRAFTED."}]}).encode()
         s, draft_pdf, hdr = c.call("POST", f"/api/documents/{dd}/versions/{dv}/docx-edit/preview", body, {"Content-Type": "application/json"}, raw=True)
         check("DOCX draft preview renders the proposed edit as pages", s == 200 and draft_pdf[:5] == b"%PDF-" and hdr.get("x-preview-kind") == "draft", str(s))
+        check("draft preview wrote no audit event", len(c.json(f"/api/documents/{dd}/audit")["items"]) == audit_before)
         check("draft preview stored nothing and left the original untouched",
               len(c.json(f"/api/documents/{dd}/history")["versions"]) == before and hashlib.sha256(c.file(dd, dv)[1]).hexdigest() == dsha)
         bad = _json.dumps({"changes": [{"target_id": blocks[0]["target_id"], "fingerprint": "0" * 64, "value": "x"}]}).encode()
