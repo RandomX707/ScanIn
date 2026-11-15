@@ -13,7 +13,7 @@ export type Chunk = { id: string; title: string; summary: string; words: number;
 export type Chunks = { sections: Chunk[]; word_count: number; text_available: boolean; excerpt?: string; excerpt_truncated?: boolean };
 
 export class ApiError extends Error {
-  constructor(public status: number, public code: string, message: string) { super(message); }
+  constructor(public status: number, public code: string, message: string, public details: Record<string, unknown>[] = []) { super(message); }
 }
 
 let token = (() => { try { return sessionStorage.getItem(SESSION_KEY) ?? ""; } catch { return ""; } })();
@@ -156,7 +156,9 @@ export type Preview = {
 const forceVirtual = () => { try { return sessionStorage.getItem("channel360.virtual") === "1"; } catch { return false; } };
 export const getPreview = (documentId: string, versionId: string, virtual = forceVirtual()) => json<Preview>(`/api/documents/${documentId}/versions/${versionId}/preview${virtual ? "?virtual=true" : ""}`);
 
-export type PdfTextEdit = { id: string; old: string; new: string };
+export type FitStrategy = "size" | "scale" | "spacing" | "expand";
+export type FitOption = { strategy: FitStrategy; label: string; detail: string; factor: number; new_width: number; shift: number };
+export type PdfTextEdit = { id: string; old: string; new: string; fit?: FitStrategy };
 export type PdfRun = { id: string; page: number; text: string; bbox: [number, number, number, number]; font: string; size: number; e: boolean; r: string | null };
 export type PdfPageText = { page: number; width: number; height: number; runs: PdfRun[] };
 export const getPdfText = (documentId: string, versionId: string, page: number) =>
@@ -165,9 +167,9 @@ export async function previewPdfEdits(documentId: string, versionId: string, edi
   const response = await request(`/api/documents/${documentId}/versions/${versionId}/pdf-edit/preview`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pdf_edits: edits }) });
   if (!response.ok) {
-    let body: { code?: string; message?: string } = {};
+    let body: { code?: string; message?: string; details?: Record<string, unknown>[] } = {};
     try { body = await response.json(); } catch { /* generic */ }
-    throw new ApiError(response.status, body.code ?? "error", body.message ?? "That change couldn't be applied safely.");
+    throw new ApiError(response.status, body.code ?? "error", body.message ?? "That change couldn't be applied safely.", body.details ?? []);
   }
   return { bytes: await response.arrayBuffer(), substituted: Number(response.headers.get("X-Preview-Substituted") ?? 0) };
 }

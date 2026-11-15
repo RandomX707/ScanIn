@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { appendToDocxText, openDocxEditor } from './docx-edit-helpers.js';
 
 // Real stakeholder files (private, gitignored). Skipped, never faked, when absent.
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -116,11 +117,7 @@ test.describe('Version comparison', () => {
   test('DOCX: paragraph and table edits show word-level before/after and both page renderings', async ({ page }) => {
     await upload(page, docx);
     await page.locator('.tab', { hasText: 'Edits' }).click();
-    const editable = page.locator('.docx-editor [data-target]');
-    await expect(editable.first()).toBeVisible({ timeout: 30_000 });
-    await editable.nth(3).click();
-    await page.keyboard.press('End');
-    await page.keyboard.type(' revised');
+    await appendToDocxText(page, 3, ' revised');
     await saveNext(page, 2);
     await page.getByRole('button', { name: /Compare with v1/ }).click();
     await expect(page.getByTestId('change-summary')).toContainText('1 modified');

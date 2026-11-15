@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { appendToDocxText, openDocxEditor } from './docx-edit-helpers.js';
 
 // History -> open a version -> Compare -> choose the other version -> understand -> jump to each change -> back to the workspace,
 // on BRANCHING histories of real stakeholder files (private corpus; skipped, never faked, when absent).
@@ -26,12 +27,11 @@ test.describe('Comparing branching histories in the browser', () => {
   test('DOCX: v1 -> v2 and v1 -> v3 (a branch): compare v2 with v3, jump to each change, return to the workspace', async ({ page }) => {
     await upload(page, docx);
     await page.locator('.tab', { hasText: 'Edits' }).click();
-    const editable = page.locator('.docx-editor [data-target]'); await expect(editable.first()).toBeVisible({ timeout: 30_000 });
-    await typeAtEnd(page, editable.nth(3), ' alpha'); await saveNext(page, 2);                       // v2 from v1
+    await appendToDocxText(page, 3, ' alpha'); await saveNext(page, 2);                       // v2 from v1
     await page.locator('.version-pill', { hasText: 'v1' }).click();                                    // open the ORIGINAL again
     await expect(page.locator('.file-meta')).toContainText('Version 1 of 2');
-    await page.locator('.tab', { hasText: 'Edits' }).click(); await expect(editable.first()).toBeVisible({ timeout: 30_000 });
-    await typeAtEnd(page, editable.nth(8), ' beta'); await saveNext(page, 3);                         // v3 from v1 (not from v2)
+    await page.locator('.tab', { hasText: 'Edits' }).click();
+    await appendToDocxText(page, 8, ' beta'); await saveNext(page, 3);                         // v3 from v1 (not from v2)
     await page.getByRole('button', { name: /All versions/ }).click();
     await expect(page.locator('.version-item').nth(2)).toContainText('Derived from v1');
     await page.locator('.version-item').nth(2).getByLabel('Compare v3 with another version').selectOption({ label: 'v2' });

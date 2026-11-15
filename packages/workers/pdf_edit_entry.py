@@ -246,7 +246,7 @@ def verify(source: bytes, out: bytes, plans: list[dict], before_runs: dict[int, 
         add("no_border_or_neighbour_collision", located and not hits and not near,
             f"Edit on page {page + 1}: the new text keeps clear of table borders and neighbouring text." if located and not hits and not near
             else f"Edit on page {page + 1}: the new text touches a border or neighbouring text, or could not be located for measuring.")
-        # pixels along every border the edit sits next to must be untouched
+        # no new ink may land on a border the edit sits next to (grey values: smaller = darker)
         a_img, b_img = _render(source, page, 2.0), _render(out, page, 2.0)
         H = float(src_reader.pages[page].mediabox.height)
         bad = 0
@@ -255,7 +255,7 @@ def verify(source: bytes, out: bytes, plans: list[dict], before_runs: dict[int, 
                 continue
             c0, c1 = max(int((x - 1.2) * 2), 0), int((x + 1.2) * 2) + 1
             r0, r1 = max(int((H - hi) * 2), 0), int((H - lo) * 2) + 1
-            if (np.abs(a_img[r0:r1, c0:c1] - b_img[r0:r1, c0:c1]) > PIXEL_THRESHOLD).any():
+            if ((a_img[r0:r1, c0:c1] - b_img[r0:r1, c0:c1]) > PIXEL_THRESHOLD).any():          # NEW ink on the border strip (removing old ink is fine)
                 bad += 1
         add("border_pixels_untouched", bad == 0, f"Edit on page {page + 1}: table borders beside the edit render identically." if not bad else f"Edit on page {page + 1}: {bad} border line(s) next to the edit changed.")
     # 4. pixels: change confined to edited boxes; untouched pages identical

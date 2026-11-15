@@ -173,3 +173,20 @@ def test_fit_is_unavailable_for_an_unknown_strategy_and_never_mutates_the_source
         eng.replace(run.id, NEW, fit="bogus")
     assert e.value.code == "fit_unknown"
     assert hashlib.sha256(src).hexdigest() == before
+
+
+def test_two_fitted_edits_on_one_page_do_not_disturb_each_other():
+    buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=(595, 842)); c.setLineWidth(0.8); c.setFont("Helvetica", 12)
+    for x in (75, 165, 255):
+        c.line(x, 700, x, 740)
+    c.drawString(80, 715, OLD); c.drawString(170, 715, "39,00,00,000"); c.drawString(260, 715, "Unchanged cell"); c.showPage(); c.save()
+    src = buf.getvalue()
+    eng = PdfTextEngine(src)
+    a = next(r for r in eng.runs(0) if r.text == OLD); b = next(r for r in eng.runs(0) if r.text == "39,00,00,000")
+    edits = [{"id": a.id, "old": OLD, "new": NEW, "fit": "scale"}, {"id": b.id, "old": b.text, "new": b.text + ",9", "fit": "size"}]
+    applied = worker.apply_edits(src, edits)
+    assert "error" not in applied, applied
+    report = worker.verify(src, applied["out"], applied["plans"], applied["before_runs"])
+    assert report["outcome"] == "VERIFIED", [x for x in report["checks"] if x["status"] != "pass"]
+    texts = {r.text.replace(" ", "") for r in PdfTextEngine(applied["out"]).runs(0)}
+    assert {NEW, "39,00,00,000,9", "Unchangedcell"} <= texts

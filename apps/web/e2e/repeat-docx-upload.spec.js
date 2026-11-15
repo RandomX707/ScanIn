@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { appendToDocxText } from './docx-edit-helpers.js';
 
 // Repeatability harness for the manager-ui DOCX scenario (upload -> open -> Edits -> save). Run with --repeat-each=N.
 // Every /api request is timed; the slowest ones are written next to the private results so a stall is attributable.
@@ -31,8 +32,7 @@ test('DOCX upload -> workspace appears promptly -> edit saves', async ({ page },
     await expect(page.locator('.file-main h2')).toHaveText(name, { timeout: 60_000 });
     const shown = Date.now() - t0;
     await page.locator('.tab', { hasText: 'Edits' }).click();
-    const target = page.locator('[data-target]').first();
-    await target.click(); await page.keyboard.press('End'); await page.keyboard.type(' (revised)');
+    await appendToDocxText(page, 0, ' (revised)');
     await page.getByRole('button', { name: 'Save as next version' }).click();
     await expect(page.locator('.toast')).toContainText('saved inside', { timeout: 120_000 });
     fs.appendFileSync(path.join(out, 'runs.jsonl'), JSON.stringify({ ok: true, shown_ms: shown, total_ms: Date.now() - t0, slowest: calls.sort((a, b) => b.ms - a.ms).slice(0, 4) }) + '\n');
