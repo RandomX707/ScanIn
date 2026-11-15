@@ -18,8 +18,8 @@ class PdfEditUnavailable(RuntimeError):
 
 
 class PdfEditRefused(Exception):
-    def __init__(self, code: str, message: str, edit_id: str | None = None):
-        self.code, self.message, self.edit_id = code, message, edit_id
+    def __init__(self, code: str, message: str, edit_id: str | None = None, options: list[dict[str, Any]] | None = None):
+        self.code, self.message, self.edit_id, self.options = code, message, edit_id, options or []
         super().__init__(code)
 
 
@@ -62,6 +62,14 @@ class RestrictedPdfEditor:
             raise PdfEditUnavailable(str(data["error"]))
         return data
 
+    def fit(self, source_path: Path, edits: list[dict[str, Any]], *, timeout_seconds: int = 90) -> dict[str, Any]:
+        """Fitting options for proposed edits (geometry only; nothing is written)."""
+        data, _, tmp = self._run({"mode": "fit", "edits": edits}, source_path, timeout_seconds=timeout_seconds)
+        tmp.cleanup()
+        if data.get("error"):
+            raise PdfEditRefused(str(data["error"]), str(data.get("message") or ""))
+        return data
+
     def outline(self, source_path: Path, *, timeout_seconds: int = 120) -> dict[str, Any]:
         data, _, tmp = self._run({"mode": "outline"}, source_path, timeout_seconds=timeout_seconds)
         tmp.cleanup()
@@ -84,7 +92,7 @@ class RestrictedPdfEditor:
             if data.get("error"):
                 if data["error"] in {"pdf_edit_worker_failed", "edit_count_invalid", "duplicate_target", "page_out_of_range"}:
                     raise PdfEditUnavailable(str(data["error"]))
-                raise PdfEditRefused(str(data["error"]), str(data.get("message") or ""), data.get("edit_id"))
+                raise PdfEditRefused(str(data["error"]), str(data.get("message") or ""), data.get("edit_id"), data.get("options"))
             return out_path.read_bytes(), data
         finally:
             tmp.cleanup()
