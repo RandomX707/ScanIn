@@ -29,6 +29,10 @@ IDENT = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 SPACE_GAP_EM = 0.18        # gap larger than this (in em) between glyphs is treated as a word space
 RUN_BREAK_EM = 1.2         # gap larger than this starts a new run (separate table cell / column)
 BASELINE_TOL = 0.6
+FIT_MIN_FACTOR = 0.85      # never shrink or condense below 85% of the original
+FIT_MAX_SPACING_EM = 0.04  # never tighten letter spacing by more than 0.04 em per character
+NEIGHBOUR_GAP = 2.0        # clear space kept between an edited value and the next text object
+FIT_STRATEGIES = ("size", "scale", "spacing", "expand")
 
 
 def mul(a, b):
@@ -48,8 +52,8 @@ def _num(x) -> float:
 class EditRefused(Exception):
     """The requested edit cannot be done safely.  `code` is stable, `message` is user-facing."""
 
-    def __init__(self, code: str, message: str):
-        self.code, self.message = code, message
+    def __init__(self, code: str, message: str, extra: dict[str, Any] | None = None):
+        self.code, self.message, self.extra = code, message, extra or {}
         super().__init__(code)
 
 
@@ -327,6 +331,10 @@ class Run:
     xem: float = 0.0          # user-space units per em horizontally (includes Tz and the CTM)
     tc_user: float = 0.0      # extra advance per glyph from Tc (user units)
     td_indices: list[int] = field(repr=False, default_factory=list)
+    tc_raw: float = 0.0       # Tc / Tz in effect for the run (restored after a fitted edit)
+    th_raw: float = 1.0
+    rot: float = 0.0          # |sin| of the text direction: anything above ~0 is rotated / transformed
+    clip: Any = None          # None, a (x0, y0, x1, y1) box, or "unknown" when a non-rectangular clip is active
 
     def public(self) -> dict[str, Any]:
         return {"id": self.id, "page": self.page + 1, "text": self.text, "bbox": [round(v, 2) for v in self.bbox],
@@ -353,6 +361,8 @@ class PdfTextEngine:
         self._runs: dict[int, list[Run]] = {}
         self._owned: set[int] = set()
         self._counter = 0
+        self._vlines: dict[int, list[tuple[float, float, float]]] = {}   # page -> (x, y0, y1) table borders / rules
+        self._hlines: dict[int, list[tuple[float, float, float]]] = {}   # page -> (y, x0, x1)
 
     @property
     def page_count(self) -> int:
@@ -379,11 +389,12 @@ class PdfTextEngine:
         pg = self.writer.pages[page]
         res = _page_resources(pg)
         out: list[Run] = []
+        self._vlines[page], self._hlines[page] = [], []
         self._walk(page, pg, res, IDENT, (), out, depth=0)
         self._runs[page] = out
         return out
 
-    def _walk(self, page: int, obj, resources, ctm0, path, out: list[Run], depth: int):
+    def _walk(self, page: int, obj, resources, ctm0, path, out: list[Run], depth: int, clip0: Any = None):
         key = (page, path)
         cont = _Container(obj, resources, ctm0, path, self.reader, page)
         self._containers[key] = cont
@@ -403,6 +414,39 @@ class PdfTextEngine:
         cont.opcount = {}
         cont.actual = {}
         mc_stack: list[int | None] = []
+        clip: Any = clip0
+        subpaths: list[dict] = []
+        pending_clip: Any = None
+        vl, hl = self._vlines.setdefault(page, []), self._hlines.setdefault(page, [])
+
+        def add_segment(a, b):
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            if abs(dx) < 0.5 and abs(dy) > 0.5:
+                vl.append((a[0], min(a[1], b[1]), max(a[1], b[1])))
+            elif abs(dy) < 0.5 and abs(dx) > 0.5:
+                hl.append((a[1], min(a[0], b[0]), max(a[0], b[0])))
+
+        def paint(stroke: bool, fill: bool):
+            for sp in subpaths:
+                if sp["curved"] or len(sp["pts"]) < 2:
+                    continue
+                xs, ys = [q[0] for q in sp["pts"]], [q[1] for q in sp["pts"]]
+                if sp["rect"]:
+                    x0_, x1_, y0_, y1_ = min(xs), max(xs), min(ys), max(ys)
+                    w_, h_ = x1_ - x0_, y1_ - y0_
+                    if abs(sp["pts"][0][0] - sp["pts"][1][0]) > 1e-6 and abs(sp["pts"][0][1] - sp["pts"][1][1]) > 1e-6:
+                        continue                                  # rotated rectangle: not a table rule
+                    if fill and min(w_, h_) <= 2.0 and max(w_, h_) > 2.0:      # a rule drawn as a thin filled rectangle
+                        if h_ >= w_:
+                            vl.append(((x0_ + x1_) / 2, y0_, y1_))
+                        else:
+                            hl.append(((y0_ + y1_) / 2, x0_, x1_))
+                    elif stroke and max(w_, h_) > 2.0:
+                        add_segment((x0_, y0_), (x0_, y1_)); add_segment((x1_, y0_), (x1_, y1_))
+                        add_segment((x0_, y0_), (x1_, y0_)); add_segment((x0_, y1_), (x1_, y1_))
+                elif stroke:
+                    for a, b in zip(sp["pts"], sp["pts"][1:]):
+                        add_segment(a, b)
 
         def flush():
             nonlocal cur, cur_meta, glyph_ops, td_ops
@@ -432,7 +476,9 @@ class PdfTextEngine:
                             or cur_meta["font"] is not font or cur_meta["container_op"] != "ok"):
                         flush()
                 if not cur:
-                    cur_meta = {"font": font, "container_op": "ok", "size": em, "tf": (font_name, fs),
+                    cur_meta = {"font": font, "container_op": "ok", "size": em, "tf": (font_name, fs), "tc_raw": tc, "th_raw": th,
+                            "rot": abs(trm[1]) / (math.hypot(trm[0], trm[1]) or 1.0) if trm[0] > 0 else 1.0,
+                            "clip": clip,
                             "xem": math.hypot(trm[0], trm[1]), "tc_user": (tc * math.hypot(trm[0], trm[1]) / fs) if fs else 0.0}
                 cur.append(g)
                 cont.opcount[op_index] = cont.opcount.get(op_index, 0) + 1
@@ -458,12 +504,45 @@ class PdfTextEngine:
                     if mc_stack:
                         mc_stack.pop()
                 elif o == "q":
-                    stack.append((ctm, font, fs, tc, tw, rise, th, tl, font_name))
+                    stack.append((ctm, font, fs, tc, tw, rise, th, tl, font_name, clip))
                 elif o == "Q":
                     if stack:
-                        ctm, font, fs, tc, tw, rise, th, tl, font_name = stack.pop()
+                        ctm, font, fs, tc, tw, rise, th, tl, font_name, clip = stack.pop()
                 elif o == "cm":
                     ctm = mul(tuple(_num(x) for x in operands), ctm)
+                elif o == "m":
+                    subpaths.append({"pts": [apply(ctm, _num(operands[0]), _num(operands[1]))], "rect": False, "curved": False})
+                elif o == "l":
+                    if subpaths:
+                        subpaths[-1]["pts"].append(apply(ctm, _num(operands[0]), _num(operands[1])))
+                elif o in ("c", "v", "y"):
+                    if subpaths:
+                        subpaths[-1]["curved"] = True
+                        subpaths[-1]["pts"].append(apply(ctm, _num(operands[-2]), _num(operands[-1])))
+                elif o == "re":
+                    rx, ry, rw, rh = (_num(v) for v in operands[:4])
+                    c4 = [apply(ctm, rx, ry), apply(ctm, rx + rw, ry), apply(ctm, rx + rw, ry + rh), apply(ctm, rx, ry + rh)]
+                    subpaths.append({"pts": c4 + [c4[0]], "rect": True, "curved": False})
+                elif o == "h":
+                    if subpaths and subpaths[-1]["pts"]:
+                        subpaths[-1]["pts"].append(subpaths[-1]["pts"][0])
+                elif o in ("S", "s", "f", "F", "f*", "B", "B*", "b", "b*"):
+                    paint(o in ("S", "s", "B", "B*", "b", "b*"), o in ("f", "F", "f*", "B", "B*", "b", "b*"))
+                    if pending_clip is not None:
+                        clip, pending_clip = _merge_clip(clip, pending_clip), None
+                    subpaths = []
+                elif o in ("W", "W*"):
+                    pending_clip = "unknown"
+                    if len(subpaths) == 1 and not subpaths[0]["curved"] and len(subpaths[0]["pts"]) >= 4:
+                        px = [q[0] for q in subpaths[0]["pts"]]; py = [q[1] for q in subpaths[0]["pts"]]
+                        x_lo, x_hi, y_lo, y_hi = min(px), max(px), min(py), max(py)
+                        # a rectangle (drawn with `re` or as an axis-aligned m/l/h path): every vertex sits on a corner of its bounding box
+                        if all((abs(a - x_lo) < 1e-3 or abs(a - x_hi) < 1e-3) and (abs(b - y_lo) < 1e-3 or abs(b - y_hi) < 1e-3) for a, b in zip(px, py)):
+                            pending_clip = (x_lo, y_lo, x_hi, y_hi)
+                elif o == "n":
+                    if pending_clip is not None:
+                        clip, pending_clip = _merge_clip(clip, pending_clip), None
+                    subpaths = []
                 elif o == "BT":
                     flush()
                     tm = tlm = IDENT
@@ -522,7 +601,7 @@ class PdfTextEngine:
                             m = tuple(_num(x) for x in xo.get("/Matrix", [1, 0, 0, 1, 0, 0]))
                             r2 = xo.get("/Resources")
                             r2 = r2.get_object() if r2 is not None else resources
-                            self._walk(page, xo, r2, mul(m, ctm), path + (f"@{idx}",), out, depth + 1)
+                            self._walk(page, xo, r2, mul(m, ctm), path + (f"@{idx}",), out, depth + 1, clip)
             except (IndexError, ValueError, TypeError, KeyError):
                 flush()
                 continue
@@ -544,7 +623,8 @@ class PdfTextEngine:
         rid = f"p{page + 1}:{'/'.join(path) or 'page'}:{i0}-{i1}"
         tds = [i for i in td_ops if i0 < i <= i1] if td_ops else []
         return Run(id=rid, page=page, container=path, text="".join(text), bbox=bbox, x0=x0, x1=x1, y=y, size=em, font_key=font.key,
-                   font_name=font.base, i0=i0, i1=i1, glyphs=glyphs, tj_start=i0, td_indices=tds, tf=meta.get("tf", ("", 0.0)), xem=meta.get("xem", em), tc_user=meta.get("tc_user", 0.0))
+                   font_name=font.base, i0=i0, i1=i1, glyphs=glyphs, tj_start=i0, td_indices=tds, tf=meta.get("tf", ("", 0.0)), xem=meta.get("xem", em), tc_user=meta.get("tc_user", 0.0),
+                   tc_raw=meta.get("tc_raw", 0.0), th_raw=meta.get("th_raw", 1.0), rot=meta.get("rot", 0.0), clip=meta.get("clip"))
 
     def find(self, run_id: str) -> Run:
         m = re.match(r"p(\d+):", run_id)
@@ -586,18 +666,121 @@ class PdfTextEngine:
         return x1 > l + 0.5 and x0 < r - 0.5 and y1 > b + 0.5 and y0 < t - 0.5
 
     # -- fit analysis
-    def free_right(self, run: Run) -> float:
-        """Space (pt) available to the right of the run before the next text object or the page margin."""
-        pg = self.writer.pages[run.page]
-        pw = float(pg.mediabox.width)
-        limit = pw - 18.0
+    def bounds(self, run: Run) -> dict[str, Any]:
+        """Horizontal room around a run: neighbouring text, table borders / rules, clipping and the page margin.
+
+        `cell` is True only when a border was found on BOTH sides (a reliably detected table cell); otherwise the limits come from
+        neighbouring text and the page margin alone (the pre-existing rule)."""
+        left_box, _b, right_box, _t = self.page_box(run.page)
+        left, right = min(left_box + 18.0, run.x0), max(right_box - 18.0, run.x1)
         for other in self.runs(run.page):
             if other.id == run.id:
                 continue
             ox0, oy0, ox1, oy1 = other.bbox
-            if oy1 > run.bbox[1] and oy0 < run.bbox[3] and ox0 >= run.x1 - 0.5:
-                limit = min(limit, ox0 - 1.0)
-        return max(limit - run.x1, 0.0)
+            if oy1 > run.bbox[1] and oy0 < run.bbox[3]:
+                if ox0 >= run.x1 - 0.5:
+                    right = min(right, ox0 - NEIGHBOUR_GAP)
+                elif ox1 <= run.x0 + 0.5:
+                    left = max(left, ox1 + NEIGHBOUR_GAP)
+        lo, hi = run.y - 0.1 * run.size, run.y + 0.7 * run.size
+        lb = rb = None
+        crossed = False
+        for x, ylo, yhi in self._vlines.get(run.page, []):
+            if yhi < lo or ylo > hi:
+                continue
+            if x >= run.x1 - 0.5:
+                rb = x if rb is None else min(rb, x)
+            elif x <= run.x0 + 0.5:
+                lb = x if lb is None else max(lb, x)
+            else:
+                crossed = True
+        if rb is not None:
+            right = min(right, rb - 1.5)
+        if lb is not None:
+            left = max(left, lb + 1.5)
+        clip_unknown = run.clip == "unknown"
+        if isinstance(run.clip, tuple):
+            right, left = min(right, run.clip[2] - 0.5), max(left, run.clip[0] + 0.5)
+        return {"left": min(left, run.x0), "right": max(right, run.x1), "cell": lb is not None and rb is not None, "lb": lb, "rb": rb,
+                "crossed": crossed, "clip_unknown": clip_unknown}
+
+    def adjacent_right(self, run: Run) -> str:
+        """Text of separate objects that touch the run's right edge on the same line (for example the `.00` after a whole-rupee amount)."""
+        parts = sorted((o for o in self.runs(run.page) if o.id != run.id and abs(o.y - run.y) < 1.0 and -0.5 <= o.x0 - run.x1 <= 1.0), key=lambda o: o.x0)
+        return "".join(o.text for o in parts).strip()
+
+    def free_right(self, run: Run) -> float:
+        """Space (pt) available to the right of the run before the next text object, table border or the page margin."""
+        return max(self.bounds(run)["right"] - run.x1, 0.0)
+
+    def plan_fit(self, run: Run, new_w: float, n_chars: int) -> dict[str, Any]:
+        """Which strategies place `new_w` pt of text without touching neighbours, borders or the clip.  Pure geometry; changes nothing.
+
+        Order of preference (least visually disruptive first): A natural placement (original size, alignment kept), B limited size
+        reduction, C limited horizontal scaling, D limited letter-spacing, E use the free space of the same cell on both sides."""
+        old_w = run.x1 - run.x0
+        b = self.bounds(run)
+        grows = new_w > old_w + 0.01
+        if not grows:
+            return {"natural": True, "shift": 0.0, "options": [], "old_w": old_w, "bounds": b, "anchor": "left"}
+        if run.rot > 0.02 or run.rot != run.rot:
+            return {"natural": False, "options": [], "old_w": old_w, "bounds": b, "anchor": "left", "blocked": ("rotated_text", "This text is rotated or transformed, so it can't be made longer safely.")}
+        if b["crossed"]:
+            return {"natural": False, "options": [], "old_w": old_w, "bounds": b, "anchor": "left", "blocked": ("border_inside_text", "A table line crosses this text, so it can't be made longer safely.")}
+        if b["clip_unknown"]:
+            return {"natural": False, "options": [], "old_w": old_w, "bounds": b, "anchor": "left", "blocked": ("clipped_text", "This text sits inside a clipping region that can't be measured, so it can't be made longer safely.")}
+        anchor = "left"
+        if b["cell"]:
+            ml, mr = run.x0 - b["lb"], b["rb"] - run.x1
+            if abs(ml - mr) < 1.5:
+                anchor = "center"
+            elif mr < ml and mr <= 0.35 * (b["rb"] - b["lb"]):
+                anchor = "right"
+        left, right = b["left"], b["right"]
+
+        def avail_for() -> float:
+            if anchor == "left":
+                return right - run.x0
+            if anchor == "right":
+                return run.x1 - left
+            half = min(run.x0 - left, right - run.x1)
+            return old_w + 2 * max(half, 0.0)
+
+        def shift_for(width: float) -> float:
+            grow = width - old_w
+            return 0.0 if anchor == "left" else (-grow if anchor == "right" else -grow / 2.0)
+
+        avail = avail_for()
+        if new_w <= avail + 0.01:
+            return {"natural": True, "shift": shift_for(new_w), "options": [], "old_w": old_w, "bounds": b, "anchor": anchor, "avail": avail}
+        n = max(n_chars, 1)
+        glyph_w = max(new_w - n * run.tc_user, 1e-6)
+        options: list[dict[str, Any]] = []
+        fs = run.tf[1] or 1.0
+        s_need = math.floor(((avail - n * run.tc_user) / glyph_w) * 200) / 200
+        if FIT_MIN_FACTOR <= s_need < 1.0:
+            w2 = glyph_w * s_need + n * run.tc_user
+            options.append({"strategy": "size", "factor": s_need, "new_width": w2, "shift": shift_for(w2), "size_after": round(run.size * s_need, 2),
+                            "label": f"Reduce the text size by {round((1 - s_need) * 100)}%", "detail": f"{run.size:.1f} pt → {run.size * s_need:.1f} pt"})
+        c_need = math.floor((avail / new_w) * 200) / 200
+        if FIT_MIN_FACTOR <= c_need < 1.0:
+            w2 = new_w * c_need
+            options.append({"strategy": "scale", "factor": c_need, "new_width": w2, "shift": shift_for(w2),
+                            "label": f"Condense the text horizontally to {round(c_need * 100)}%", "detail": f"Characters keep their height; width {round(c_need * 100)}% of normal"})
+        d = (new_w - avail) / max(n - 1, 1)
+        if 0 < d <= FIT_MAX_SPACING_EM * run.size and run.xem > 0:
+            w2 = new_w - (n - 1) * d
+            options.append({"strategy": "spacing", "factor": d, "new_width": w2, "shift": shift_for(w2),
+                            "label": f"Tighten the letter spacing by {d / run.size:.2f} em", "detail": "Same size and shape; characters sit slightly closer"})
+        full = right - left
+        if b["cell"] and new_w <= full + 0.01 and anchor != "center":
+            cx = (run.x0 + run.x1) / 2.0
+            start = min(max(cx - new_w / 2.0, left), right - new_w)
+            options.append({"strategy": "expand", "factor": start - run.x0, "new_width": new_w, "shift": start - run.x0,
+                            "label": "Use the free space of the same cell", "detail": "Same size; the text is centred on its old position within the cell"})
+        order = {"size": 0, "scale": 1, "spacing": 2, "expand": 3}
+        options.sort(key=lambda o: order[o["strategy"]])
+        return {"natural": False, "options": options, "old_w": old_w, "bounds": b, "anchor": anchor, "avail": avail}
 
     def measure(self, run: Run, text: str) -> tuple[float, bytes | None, list[str]]:
         font = self._font_for(run)
@@ -623,7 +806,8 @@ class PdfTextEngine:
         return fi
 
     # -- the edit
-    def replace(self, run_id: str, new_text: str, *, expect_old: str | None = None, allow_grow: bool = False) -> dict[str, Any]:
+    def _prepare(self, run_id: str, new_text: str, expect_old: str | None):
+        """Common checks for an edit and for a fit report: (run, font, width of the new text, substitute font or None)."""
         run = self.find(run_id)
         if expect_old is not None and expect_old != run.text:
             raise EditRefused("stale_target", "This text changed since it was selected.")
@@ -646,11 +830,49 @@ class PdfTextEngine:
                                   f"The original font doesn't include {', '.join(repr(c) for c in unencodable)} and no safe substitute "
                                   "has it. Use other characters or keep the original wording.")
             new_w = sum(_std_width(substitute, c) / 1000.0 * run.xem + run.tc_user for c in new_text)
+        return run, font, new_w, substitute
+
+    def fit_report(self, run_id: str, new_text: str, *, expect_old: str | None = None) -> dict[str, Any]:
+        """What would happen if `new_text` replaced the run: fits as-is, which fitting options exist, or why not.  Changes nothing."""
+        run, _font, new_w, _sub = self._prepare(run_id, new_text, expect_old)
+        plan = self.plan_fit(run, new_w, len(new_text))
+        out: dict[str, Any] = {"id": run_id, "old_width": round(plan["old_w"], 2), "new_width": round(new_w, 2), "fits": bool(plan["natural"]),
+                               "options": [{**o, "new_width": round(o["new_width"], 2), "shift": round(o["shift"], 2), "factor": round(o["factor"], 4)} for o in plan["options"]],
+                               "refusal": None, "cell_detected": bool(plan["bounds"]["cell"]), "anchor": plan["anchor"]}
+        if "blocked" in plan:
+            out["refusal"] = {"code": plan["blocked"][0], "message": plan["blocked"][1]}
+        elif not plan["natural"] and not plan["options"]:
+            out["refusal"] = {"code": "overflow", "message": f"The new text is {new_w - plan['old_w']:.1f} pt wider than the original and no safe fitting option "
+                                                            "(a small size, width or spacing change, or the free space in its cell) makes it fit. Shorten it."}
+        return out
+
+    def replace(self, run_id: str, new_text: str, *, expect_old: str | None = None, allow_grow: bool = False, fit: str | None = None) -> dict[str, Any]:
+        run, font, new_w, substitute = self._prepare(run_id, new_text, expect_old)
         old_w = run.x1 - run.x0
-        avail = old_w + self.free_right(run)
-        if new_w > avail + 0.01 and not allow_grow:
-            raise EditRefused("overflow", f"The new text is {new_w - old_w:.1f} pt wider than the original and would run into "
-                                          f"neighbouring content (room for {avail - old_w:.1f} pt). Shorten it.")
+        plan = self.plan_fit(run, new_w, len(new_text))
+        choice: dict[str, Any] | None = None
+        shift = 0.0
+        if allow_grow:
+            pass
+        elif plan["natural"]:
+            shift = plan.get("shift", 0.0)
+        else:
+            if "blocked" in plan:
+                raise EditRefused(plan["blocked"][0], plan["blocked"][1], {"options": []})
+            avail = plan["avail"]
+            if fit is not None:
+                if fit not in FIT_STRATEGIES:
+                    raise EditRefused("fit_unknown", "That fitting option isn't available.")
+                choice = next((o for o in plan["options"] if o["strategy"] == fit), None)
+                if choice is None:
+                    raise EditRefused("fit_unavailable", "That fitting option no longer fits this text. Choose another option or shorten the text.",
+                                      {"options": [{k: v for k, v in o.items()} for o in plan["options"]]})
+                shift, new_w = choice["shift"], choice["new_width"]
+            else:
+                raise EditRefused("overflow", f"The new text is {new_w - old_w:.1f} pt wider than the original and would run into "
+                                              f"neighbouring content or the cell border (room for {avail - old_w:.1f} pt). "
+                                              + ("Choose a fitting option or shorten it." if plan["options"] else "Shorten it."),
+                                  {"options": [{k: v for k, v in o.items()} for o in plan["options"]]})
         self._privatise(run)
         run = self.find(run_id)
         cont = self._containers[(run.page, run.container)]
@@ -688,6 +910,10 @@ class PdfTextEngine:
             pieces.append(buf)
         if substitute:
             pieces = [new_text.encode("cp1252")]
+        if shift:
+            # Move the pen with a TJ adjustment (not Td): it works whatever the text matrix was, and ends where the text now ends.
+            hf = choice["factor"] if choice and choice["strategy"] in ("size", "scale") else 1.0
+            pieces.insert(0, shift / (run.xem * hf) * 1000.0)
         arr = ArrayObject()
         for p in pieces:
             arr.append(ByteStringObject(p) if isinstance(p, bytes) else FloatObject(-p))
@@ -696,10 +922,22 @@ class PdfTextEngine:
         keep_between = [ops[i] for i in range(run.i0, run.i1 + 1)
                         if (i not in run.td_indices) and _opname(ops[i][1]) not in ("Tj", "TJ")]
         new_block = [show_op] + keep_between
-        if substitute:
-            sub_key = self._ensure_font(cont, substitute)
-            new_block = [([NameObject(sub_key), FloatObject(run.tf[1])], b"Tf")] + new_block \
-                + [([NameObject(run.tf[0]), FloatObject(run.tf[1])], b"Tf")]
+        strat = choice["strategy"] if choice else None
+        size_factor = choice["factor"] if strat == "size" else 1.0
+        pre: list = []
+        post: list = []
+        if substitute or strat == "size":
+            font_key = self._ensure_font(cont, substitute) if substitute else run.tf[0]
+            pre.append(([NameObject(font_key), FloatObject(run.tf[1] * size_factor)], b"Tf"))
+            post.append(([NameObject(run.tf[0]), FloatObject(run.tf[1])], b"Tf"))
+        if strat == "scale":
+            pre.append(([FloatObject(run.th_raw * 100.0 * choice["factor"])], b"Tz"))
+            post.append(([FloatObject(run.th_raw * 100.0)], b"Tz"))
+        if strat == "spacing":
+            tc_new = run.tc_raw - choice["factor"] * (run.tf[1] / run.xem)
+            pre.append(([FloatObject(tc_new)], b"Tc"))
+            post.append(([FloatObject(run.tc_raw)], b"Tc"))
+        new_block = pre + new_block + post
         if sx or sy:
             new_block.append(([FloatObject(sx), FloatObject(sy)], b"Td"))
         ops[run.i0:run.i1 + 1] = new_block
@@ -708,13 +946,23 @@ class PdfTextEngine:
         cells, pos = [], 0.0
         for ch in new_text:
             if substitute:
-                w = _std_width(substitute, ch) / 1000.0 * run.xem + run.tc_user
+                gw = _std_width(substitute, ch) / 1000.0 * run.xem
             else:
                 code = font.code_for(ch)
-                w = ((font.width(code) / 1000.0 * run.xem) if code is not None else 0.25 * run.xem) + run.tc_user
+                gw = (font.width(code) / 1000.0 * run.xem) if code is not None else 0.25 * run.xem
+            if strat == "size":
+                w = gw * size_factor + run.tc_user
+            elif strat == "scale":
+                w = (gw + run.tc_user) * choice["factor"]
+            elif strat == "spacing":
+                w = gw + run.tc_user - choice["factor"]
+            else:
+                w = gw + run.tc_user
             cells.append((pos, pos + w)); pos += w
+        new_x0 = run.x0 + shift
         return {"id": run_id, "old": run.text, "new": new_text, "old_width": old_w, "new_width": new_w,
-                "room": avail, "font": run.font_name, "size": run.size, "substitute_font": substitute, "cells": cells}
+                "room": plan.get("avail", old_w + self.free_right(run)), "font": run.font_name, "size": run.size, "substitute_font": substitute, "cells": cells,
+                "strategy": strat, "size_factor": size_factor, "new_x0": new_x0, "extent": [min(run.x0, new_x0), max(run.x1, new_x0 + new_w)]}
 
     # -- copy-on-write so an edit never leaks into other pages / other uses of a shared form
     def _own(self, obj) -> int:
@@ -810,6 +1058,14 @@ class PdfTextEngine:
         buf = io.BytesIO()
         self.writer.write(buf)
         return buf.getvalue()
+
+
+def _merge_clip(current: Any, new: Any) -> Any:
+    if current == "unknown" or new == "unknown":
+        return "unknown"
+    if current is None:
+        return new
+    return (max(current[0], new[0]), max(current[1], new[1]), min(current[2], new[2]), min(current[3], new[3]))
 
 
 def _winansi(ch: str) -> bool:

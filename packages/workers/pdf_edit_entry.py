@@ -95,8 +95,23 @@ def list_runs(source: bytes, page: int) -> dict:
         ok, why = engine.run_status(r)
         if ok and _is_working_copy_notice(r.text):
             ok, why = False, "This notice marks the file as an unsigned working copy and can't be edited."
-        runs.append({**r.public(), "e": ok, "r": why})
+        adj = engine.adjacent_right(r)
+        runs.append({**r.public(), "e": ok, "r": why, **({"adj": adj[:12]} if adj else {})})
     return {"page": page, "width": float(pg.mediabox.width), "height": float(pg.mediabox.height), "runs": runs}
+
+
+def fit_options(source: bytes, edits: list[dict]) -> dict:
+    """For each proposed edit: does it fit as-is, which safe fitting strategies exist, or why not (nothing is changed)."""
+    if not edits or len(edits) > MAX_EDITS:
+        return {"error": "edit_count_invalid"}
+    engine = PdfTextEngine(source)
+    out = []
+    for e in edits:
+        try:
+            out.append(engine.fit_report(e["id"], e["new"], expect_old=e["old"]))
+        except EditRefused as err:
+            out.append({"id": e["id"], "fits": False, "options": [], "refusal": {"code": err.code, "message": err.message}})
+    return {"fits": out}
 
 
 def _render(data: bytes, index: int, scale: float) -> np.ndarray:
@@ -128,11 +143,12 @@ def apply_edits(source: bytes, edits: list[dict]) -> dict:
         run = engine.find(rid)
         before_runs.setdefault(run.page, [r for r in engine.runs(run.page)])
         try:
-            res = engine.replace(rid, e["new"], expect_old=e["old"])
+            res = engine.replace(rid, e["new"], expect_old=e["old"], fit=e.get("fit"))
         except EditRefused as err:
-            return {"error": err.code, "message": err.message, "edit_id": rid}
+            return {"error": err.code, "message": err.message, "edit_id": rid, "options": err.extra.get("options", [])}
         plans.append({"id": rid, "page": run.page, "old": e["old"], "new": e["new"], "bbox": list(run.bbox),
-                      "x0": run.x0, "y": run.y, "new_width": res["new_width"], "size": run.size, "font": run.font_name,
+                      "x0": res["new_x0"], "orig_x0": run.x0, "orig_x1": run.x1, "ext": res["extent"], "y": run.y, "new_width": res["new_width"],
+                      "size": run.size * res["size_factor"], "font": run.font_name, "strategy": res["strategy"],
                       "substitute_font": res.get("substitute_font"), "cells": res["cells"]})
     out = engine.save()
     return {"out": out, "plans": plans, "before_runs": before_runs, "page_count": engine.page_count}
@@ -187,7 +203,7 @@ def verify(source: bytes, out: bytes, plans: list[dict], before_runs: dict[int, 
     for page in pages:
         edited = {pl["id"] for pl in plans if pl["page"] == page}
         keep = {(round(r.x0, 1), round(r.y, 1), r.text) for r in before_runs[page] if r.id not in edited
-                and not any(abs(r.y - pl["y"]) < 1 and r.x0 < pl["x0"] + pl["new_width"] + 1 and r.x1 > pl["x0"] - 1 for pl in plans if pl["page"] == page)}
+                and not any(abs(r.y - pl["y"]) < 1 and r.x0 < pl["ext"][1] + 1 and r.x1 > pl["ext"][0] - 1 for pl in plans if pl["page"] == page)}
         now = {(round(r.x0, 1), round(r.y, 1), r.text) for r in new_engine.runs(page)}
         lost = keep - now
         add("unedited_text_preserved", not lost, f"Page {page + 1}: {len(keep) - len(lost)} of {len(keep)} other text runs are identical.")
@@ -214,6 +230,42 @@ def verify(source: bytes, out: bytes, plans: list[dict], before_runs: dict[int, 
                 blank.append(ch)
         add("new_glyphs_rendered", len(blank) <= 0, f"Edit on page {page + 1}: every new character is visible on the page." if not blank
             else f"Edit on page {page + 1}: {len(blank)} new character(s) did not draw.")
+    # 3c. the new text must not touch a table border, rule or neighbouring text (independent re-measure of the OUTPUT)
+    for p in plans:
+        page = p["page"]
+        grew = p["ext"][1] > p["orig_x1"] + 0.01 or p["ext"][0] < p["orig_x0"] - 0.01
+        x0n, x1n = p["x0"], p["x0"] + p["new_width"]
+        mine = [r for r in new_engine.runs(page) if abs(r.y - p["y"]) < 1.0 and r.x0 >= p["ext"][0] - 1 and r.x1 <= p["ext"][1] + 1 and _norm(r.text) == _norm(p["new"])]
+        if mine:
+            x0n, x1n = mine[0].x0, mine[0].x1
+        lo, hi = p["y"] - 0.1 * p["size"], p["y"] + 0.7 * p["size"]
+        hits = [x for x, ylo, yhi in new_engine._vlines.get(page, []) if yhi >= lo and ylo <= hi and x0n - 0.2 < x < x1n + 0.2]
+        near = [r for r in new_engine.runs(page) if (not mine or r.id != mine[0].id) and r.bbox[2] > x0n + 0.5 and r.bbox[0] < x1n - 0.5
+                and r.bbox[3] > p["y"] - 0.1 * p["size"] and r.bbox[1] < p["y"] + 0.7 * p["size"] and _norm(r.text) != _norm(p["new"])
+                and not any(abs(r.y - q["y"]) < 1 and q["ext"][0] - 1 <= r.x0 and r.x1 <= q["ext"][1] + 1 for q in plans if q["page"] == page)]
+        located = bool(mine) or not grew
+        add("no_border_or_neighbour_collision", located and not hits and not near,
+            f"Edit on page {page + 1}: the new text keeps clear of table borders and neighbouring text." if located and not hits and not near
+            else f"Edit on page {page + 1}: the new text touches a border or neighbouring text, or could not be located for measuring.")
+        # no new ink may land on a border the edit sits next to (grey values: smaller = darker)
+        a_img, b_img = _render(source, page, 2.0), _render(out, page, 2.0)
+        H = float(src_reader.pages[page].mediabox.height)
+        bad = 0
+        for x, ylo, yhi in new_engine._vlines.get(page, []):
+            if yhi < lo or ylo > hi or not (min(x0n, p["orig_x0"]) - 4 <= x <= max(x1n, p["orig_x1"]) + 4):
+                continue
+            c0, c1 = max(int((x - 1.2) * 2), 0), int((x + 1.2) * 2) + 1
+            r0, r1 = max(int((H - hi) * 2), 0), int((H - lo) * 2) + 1
+            if ((a_img[r0:r1, c0:c1] - b_img[r0:r1, c0:c1]) > PIXEL_THRESHOLD).any():          # NEW ink on the border strip (removing old ink is fine)
+                bad += 1
+        add("border_pixels_untouched", bad == 0, f"Edit on page {page + 1}: table borders beside the edit render identically." if not bad else f"Edit on page {page + 1}: {bad} border line(s) next to the edit changed.")
+    # 3d. two edited texts on the same line must not overlap each other (the per-edit check above skips other edits' own text)
+    for i, p in enumerate(plans):
+        for q in plans[i + 1:]:
+            if p["page"] == q["page"] and abs(p["y"] - q["y"]) < max(p["size"], q["size"]) * 0.7:
+                clash = p["ext"][0] < q["ext"][1] + 1.0 and q["ext"][0] < p["ext"][1] + 1.0
+                add("edited_texts_do_not_overlap", not clash, f"Page {p['page'] + 1}: two edited texts on one line keep clear of each other." if not clash
+                    else f"Page {p['page'] + 1}: two edited texts on one line would touch.")
     # 4. pixels: change confined to edited boxes; untouched pages identical
     for page in range(n_src):
         if page in pages:
@@ -225,7 +277,7 @@ def verify(source: bytes, out: bytes, plans: list[dict], before_runs: dict[int, 
                 if pl["page"] != page:
                     continue
                 x0, y0, x1, y1 = pl["bbox"]
-                x1 = max(x1, pl["x0"] + pl["new_width"])
+                x0, x1 = min(x0, pl["ext"][0]), max(x1, pl["ext"][1])
                 allowed[max(int((H - y1 - PAD_PT) * 2), 0):int((H - y0 + PAD_PT) * 2) + 1,
                         max(int((x0 - PAD_PT) * 2), 0):int((x1 + PAD_PT) * 2) + 1] = True
             stray = int((diff & ~allowed).sum())
@@ -250,6 +302,8 @@ def main() -> int:
             result = list_runs(source, int(job["page"]))
         elif job["mode"] == "outline":
             result = outline(source)
+        elif job["mode"] == "fit":
+            result = fit_options(source, job["edits"])
         elif job["mode"] == "working_copy":
             data, report = pdf_working_copy.build(source, name=str(job["name"]), source_sha256=hashlib.sha256(source).hexdigest(), source_state=str(job["state"]))
             with open(job["out"], "wb") as handle:

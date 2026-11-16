@@ -11,7 +11,7 @@ import json
 import re
 from decimal import Decimal, InvalidOperation
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import Request
@@ -93,8 +93,14 @@ PLAIN = {
     "not_visible": "This text is outside the visible page, so it can't be edited.",
     "marked_content_unsupported": "This text is wrapped in tagged content that can't be updated safely.",
     "unknown_target": "That text could not be found.",
+    "fit_unknown": "That fitting option isn't available.",
+    "fit_unavailable": "That fitting option no longer fits this text. Choose another option or shorten the text.",
+    "rotated_text": "This text is rotated or transformed, so it can't be made longer safely.",
+    "border_inside_text": "A table line crosses this text, so it can't be made longer safely.",
+    "clipped_text": "This text sits inside a clipping region that can't be measured, so it can't be made longer safely.",
     "pdf_verification_failed": "The edited PDF didn't pass the safety checks, so nothing was saved. Your edits are still here.",
 }
+FIT_CODES = frozenset({"overflow", "fit_unavailable", "rotated_text", "border_inside_text", "clipped_text"})
 GENERIC = "This change couldn't be saved safely. Your edits are still here."
 
 
@@ -121,6 +127,7 @@ class PdfTextEdit(BaseModel):
     id: str = Field(min_length=3, max_length=300, pattern=r"^p\d+:[^\s]+:\d+-\d+$")
     old: str = Field(max_length=2000)
     new: str = Field(max_length=2000)
+    fit: Literal["size", "scale", "spacing", "expand"] | None = None    # chosen safe fitting strategy (see /pdf-edit/fit)
 
 
 class SaveRequest(BaseModel):
@@ -132,8 +139,8 @@ class SaveRequest(BaseModel):
 
 
 class SaveRejected(APIError):
-    def __init__(self, code: str, message: str | None = None, status: int = 422):
-        super().__init__(status, code, message or plain(code))
+    def __init__(self, code: str, message: str | None = None, status: int = 422, details: list[dict[str, Any]] | None = None):
+        super().__init__(status, code, message or plain(code), details=details)
 
 
 def _coerce(old_type: str, raw: Any) -> dict[str, Any]:
@@ -438,6 +445,8 @@ def pdf_edit_candidate(request: Request, identity: AuthenticatedIdentity, docume
     try:
         data, report = request.app.state.pdf_editor.edit(path, [e.model_dump() for e in edits])
     except PdfEditRefused as refused:
+        if refused.code in FIT_CODES:        # the engine's own wording explains the measured shortfall; the options let the user choose a safe fit
+            raise SaveRejected(refused.code, refused.message or plain(refused.code), details=[{"edit_id": refused.edit_id, "options": refused.options}]) from None
         raise SaveRejected(refused.code, plain(refused.code)) from None
     except PdfEditUnavailable:
         raise APIError(503, "pdf_edit_unavailable", "PDF editing is unavailable right now. Try again in a moment.") from None
