@@ -13,7 +13,7 @@ export type Chunk = { id: string; title: string; summary: string; words: number;
 export type Chunks = { sections: Chunk[]; word_count: number; text_available: boolean; excerpt?: string; excerpt_truncated?: boolean };
 
 export class ApiError extends Error {
-  constructor(public status: number, public code: string, message: string) { super(message); }
+  constructor(public status: number, public code: string, message: string, public details: Record<string, unknown>[] = []) { super(message); }
 }
 
 let token = (() => { try { return sessionStorage.getItem(SESSION_KEY) ?? ""; } catch { return ""; } })();
@@ -138,7 +138,7 @@ export type SheetImage = { src: string; from: { col: number; row: number; dx: nu
 export type SheetLayout = { default_col?: number; default_row?: number; merges: [number, number, number, number][]; cols: Record<string, number>; rows: Record<string, number>; cells: Record<string, number>; images: SheetImage[];
   freeze?: { rows: number; cols: number } | null; zoom?: number; hidden?: boolean; protected?: boolean };
 export type Sheet = { name: string; rows: Cell[][]; truncated: boolean; layout?: SheetLayout };
-export type DocxBlock = { id: string; kind: string; text: string; heading: number | null; table: { index: number; row: number; col: number } | null; target_id: string | null; fp: string | null; e: boolean; r: string | null };
+export type DocxBlock = { id: string; kind: string; text: string; heading: number | null; table: { index: number; row: number; col: number } | null; target_id: string | null; fp: string | null; e: boolean; r: string | null; props?: { bold?: boolean; italic?: boolean; underline?: boolean; color?: string; size?: number; font?: string; align?: string } };
 export type PdfField = { id: string; name: string; type: string; value: unknown; options: string[]; max_length: number | null; fp: string; e: boolean; r: string | null; widgets: { page: number; rect: number[]; state?: string | null }[] };
 export type SignatureInfo = { status: string; validated: boolean; state?: string; label?: string; detail?: string; trust_policy_configured?: boolean;
   docmdp?: { permission: number; meaning: string } | null; limits?: string[];
@@ -156,8 +156,10 @@ export type Preview = {
 const forceVirtual = () => { try { return sessionStorage.getItem("channel360.virtual") === "1"; } catch { return false; } };
 export const getPreview = (documentId: string, versionId: string, virtual = forceVirtual()) => json<Preview>(`/api/documents/${documentId}/versions/${versionId}/preview${virtual ? "?virtual=true" : ""}`);
 
-export type PdfTextEdit = { id: string; old: string; new: string };
-export type PdfRun = { id: string; page: number; text: string; bbox: [number, number, number, number]; font: string; size: number; e: boolean; r: string | null };
+export type FitStrategy = "size" | "scale" | "spacing" | "expand";
+export type FitOption = { strategy: FitStrategy; label: string; detail: string; factor: number; new_width: number; shift: number };
+export type PdfTextEdit = { id: string; old: string; new: string; fit?: FitStrategy };
+export type PdfRun = { id: string; page: number; text: string; bbox: [number, number, number, number]; font: string; size: number; e: boolean; r: string | null; adj?: string };
 export type PdfPageText = { page: number; width: number; height: number; runs: PdfRun[] };
 export const getPdfText = (documentId: string, versionId: string, page: number) =>
   json<PdfPageText>(`/api/documents/${documentId}/versions/${versionId}/pdf-text?page=${page}`);
@@ -165,9 +167,9 @@ export async function previewPdfEdits(documentId: string, versionId: string, edi
   const response = await request(`/api/documents/${documentId}/versions/${versionId}/pdf-edit/preview`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pdf_edits: edits }) });
   if (!response.ok) {
-    let body: { code?: string; message?: string } = {};
+    let body: { code?: string; message?: string; details?: Record<string, unknown>[] } = {};
     try { body = await response.json(); } catch { /* generic */ }
-    throw new ApiError(response.status, body.code ?? "error", body.message ?? "That change couldn't be applied safely.");
+    throw new ApiError(response.status, body.code ?? "error", body.message ?? "That change couldn't be applied safely.", body.details ?? []);
   }
   return { bytes: await response.arrayBuffer(), substituted: Number(response.headers.get("X-Preview-Substituted") ?? 0) };
 }
@@ -237,3 +239,15 @@ export const cancelSheetIndex = (documentId: string, versionId: string) => json<
 
 export type FontReport = { declared: string[]; rendered: string[]; substituted: { declared: string; replaced_with: string | null; exact: boolean }[] };
 export const getRenderFonts = (documentId: string, versionId: string) => json<FontReport>(`/api/documents/${documentId}/versions/${versionId}/render/fonts`);
+
+/** Draft preview of a DOCX with the proposed edits applied (rendered in the sandbox; nothing is stored). */
+export async function fetchDocxDraft(documentId: string, versionId: string, changes: { target_id: string; fingerprint: string; value: string }[]): Promise<ArrayBuffer> {
+  const response = await request(`/api/documents/${documentId}/versions/${versionId}/docx-edit/preview`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ changes }) });
+  if (!response.ok) {
+    let body: { code?: string; message?: string } = {};
+    try { body = await response.json(); } catch { /* generic */ }
+    throw new ApiError(response.status, body.code ?? "draft_unavailable", body.message ?? "The preview of your changes could not be produced.");
+  }
+  return response.arrayBuffer();
+}
