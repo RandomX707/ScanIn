@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, getPdfText, previewPdfEdits, type PdfPageText, type PdfRun, type PdfTextEdit, type Preview, type SaveBody } from "../lib/api";
+import { ApiError, getPdfText, previewPdfEdits, type FitOption, type PdfPageText, type PdfRun, type PdfTextEdit, type Preview, type SaveBody } from "../lib/api";
 
 type PdfLib = typeof import("pdfjs-dist");
 type Doc = import("pdfjs-dist").PDFDocumentProxy;
@@ -16,6 +16,8 @@ export function PdfTextEditor({ documentId, versionId, preview, fetchBytes, onBo
   const [edits, setEdits] = useState<Record<string, PdfTextEdit>>({});
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [adjacent, setAdjacent] = useState<Record<string, string>>({});
+  const [proposal, setProposal] = useState<{ run: PdfRun; value: string; message: string; options: FitOption[]; choice: string } | null>(null);
   const original = useRef<ArrayBuffer | null>(null);
   const seq = useRef(0);
 
@@ -35,7 +37,7 @@ export function PdfTextEditor({ documentId, versionId, preview, fetchBytes, onBo
   }, []);
 
   /** Apply the whole edit set to the original on the server and show exactly what would be saved. */
-  async function apply(next: Record<string, PdfTextEdit>, runId: string): Promise<boolean> {
+  async function apply(next: Record<string, PdfTextEdit>, runId: string, run?: PdfRun): Promise<boolean> {
     const list = Object.values(next);
     const mine = ++seq.current;
     setBusy(true);
@@ -48,12 +50,20 @@ export function PdfTextEditor({ documentId, versionId, preview, fetchBytes, onBo
         if (lib) setDoc(await open(bytes, lib));
         if (substituted) notify(`${substituted} edited line${substituted === 1 ? "" : "s"} use a similar standard font because the original font doesn't include every new character.`);
       }
-      setEdits(next); setErrors((e) => { const { [runId]: _drop, ...rest } = e; return rest; });
+      setEdits(next); setErrors((e) => { const { [runId]: _drop, ...rest } = e; return rest; }); setProposal(null);
       onBody(list.length ? { pdf_edits: list } : null);
       return true;
     } catch (error) {
       const message = error instanceof ApiError ? error.message : "That change couldn't be applied safely.";
+      const options = error instanceof ApiError && ["overflow", "fit_unavailable"].includes(error.code)
+        ? ((error.details[0]?.options as FitOption[] | undefined) ?? []) : null;
+      if (run && options && options.length) {
+        // Not a failure of the document: offer the limited, verified ways to fit this text and let the user choose.
+        setProposal({ run, value: next[runId]?.new ?? "", message, options, choice: options[0].strategy });
+        return false;
+      }
       setErrors((e) => ({ ...e, [runId]: message }));
+      setProposal(null);
       notify(message, true);
       return false;
     } finally { if (mine === seq.current) setBusy(false); }
@@ -62,14 +72,53 @@ export function PdfTextEditor({ documentId, versionId, preview, fetchBytes, onBo
   const change = useCallback(async (run: PdfRun, value: string) => {
     const current = edits[run.id]?.new ?? run.text;
     if (value === current) return;
+    if (run.adj) setAdjacent((a) => ({ ...a, [run.id]: run.adj! }));
     const next = { ...edits };
     if (value === run.text) delete next[run.id]; else next[run.id] = { id: run.id, old: run.text, new: value };
-    await apply(next, run.id);
+    await apply(next, run.id, run);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [edits, lib]);
 
+  const previewFitted = async () => {
+    if (!proposal) return;
+    const { run, value, choice } = proposal;
+    await apply({ ...edits, [run.id]: { id: run.id, old: run.text, new: value, fit: choice as PdfTextEdit["fit"] } }, run.id, run);
+  };
+  const revertRun = async (id: string) => { const { [id]: _drop, ...rest } = edits; await apply(rest, id); };
+  const numeric = Object.values(edits).some((e) => /\d/.test(e.old) && /\d/.test(e.new));
+  const fitted = Object.values(edits).filter((e) => e.fit);
+
   return (
     <div className="pdf-editor" role="region" aria-label="PDF text editor" aria-busy={busy}>
+      {proposal ? (
+        <div className="fit-panel" role="alertdialog" aria-label="Fit the longer text" data-testid="fit-panel">
+          <strong>That text doesn't fit as-is.</strong>
+          <p>{proposal.message}</p>
+          <p className="fit-sub">“{proposal.run.text}” → “{proposal.value}”. These limited adjustments keep it inside its space; nothing else on the page moves.</p>
+          <ul className="fit-options">
+            {proposal.options.map((o) => (
+              <li key={o.strategy}>
+                <label><input type="radio" name="fit" checked={proposal.choice === o.strategy} onChange={() => setProposal({ ...proposal, choice: o.strategy })} data-testid={`fit-${o.strategy}`} />
+                  <span><b>{o.label}</b><br /><small>{o.detail}</small></span></label>
+              </li>
+            ))}
+          </ul>
+          <div className="dpe-actions">
+            <button className="btn dark small" data-testid="fit-preview" disabled={busy} onClick={previewFitted}>Preview fitted result</button>
+            <button className="btn outline small" onClick={() => setProposal(null)}>Keep the original value</button>
+          </div>
+        </div>
+      ) : null}
+      {fitted.length ? (
+        <div className="fit-note" role="status" data-testid="fit-applied">
+          {fitted.map((e) => <span key={e.id}>Fitted “{e.new}” by {e.fit === "size" ? "a small size reduction" : e.fit === "scale" ? "horizontal condensing" : e.fit === "spacing" ? "tighter letter spacing" : "using the free space of its cell"}.{" "}
+            <button className="btn outline small" onClick={() => revertRun(e.id)}>Revert to original value</button> </span>)}
+        </div>
+      ) : null}
+      {Object.values(edits).filter((e) => adjacent[e.id]).map((e) => (
+        <div key={e.id} className="dpe-warn" role="note" data-testid="adjacent-text-note">This will read “{e.new}{adjacent[e.id]}” on the page: “{adjacent[e.id]}” beside it is a separate text object and is not changed. Check the whole value, including any decimals.</div>
+      ))}
+      {numeric ? <div className="dpe-warn" role="note" data-testid="amount-warning">You changed an amount. Totals and other figures that depend on it are not recalculated here — please review them before saving.</div> : null}
       {doc && lib ? pages.map((page) => (
         <TextPage key={page.page} doc={doc} documentId={documentId} versionId={versionId} page={page}
           edits={edits} errors={errors} onChange={change} />

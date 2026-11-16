@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { appendToDocxText, openDocxEditor } from './docx-edit-helpers.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
@@ -28,13 +29,10 @@ test.describe('Real DOCX (Track Changes setting on, no actual revisions)', () =>
     await expect(page.locator('.file-main h2')).toHaveText('Health Quote Format.docx', { timeout: 90_000 });
     await page.locator('.tab', { hasText: 'Edits' }).click();
     await expect(page.locator('.empty')).toHaveCount(0);                       // not blocked: a setting is not a revision
-    const editable = page.locator('.docx-editor [data-target]');
-    await expect(editable.first()).toBeVisible({ timeout: 30_000 });
-    expect(await editable.count()).toBeGreaterThan(10);
-    expect(await page.locator('.docx-editor table').count()).toBeGreaterThanOrEqual(1);    // the table is shown as a table
-    await editable.nth(3).click();
-    await page.keyboard.press('End');
-    await page.keyboard.type(' e2e');
+    await openDocxEditor(page);
+    expect(await page.getByTestId('target-list').locator('button').count()).toBeGreaterThan(10);
+    await expect(page.getByTestId('docx-edit-viewer').locator('canvas').first()).toBeVisible({ timeout: 60_000 });   // the real pages (tables, images), not a rebuilt HTML table
+    await appendToDocxText(page, 3, ' e2e');
     await expect(page.locator('#edit-state')).toHaveText('Unsaved changes');
     await page.getByRole('button', { name: 'Save as next version' }).click();
     await expect(page.locator('.toast')).toContainText('saved inside', { timeout: 120_000 });

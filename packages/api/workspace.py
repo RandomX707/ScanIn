@@ -660,7 +660,7 @@ def version_preview(document_id: str, version_id: str, request: Request, virtual
                                "heading": block.get("heading_level"), "table": block.get("table"),
                                "target_id": single["id"] if editable and single else None,
                                "fp": single["fingerprint"] if editable and single else None,
-                               "e": editable, "r": reason})
+                               "e": editable, "r": reason, "props": block.get("props") or {}})
             level = str(report.capability.get("level"))
             reasons = list(report.capability.get("reasons") or [])
             renderer = request.app.state.office_renderer
@@ -748,6 +748,30 @@ def pdf_text_runs(document_id: str, version_id: str, request: Request, page: int
 class PdfPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     pdf_edits: list[PdfTextEdit] = Field(min_length=1, max_length=200)
+
+
+@router.post("/documents/{document_id}/versions/{version_id}/pdf-edit/fit")
+def pdf_edit_fit(document_id: str, version_id: str, payload: PdfPreviewRequest, request: Request,
+                 identity: AuthenticatedIdentity = Depends(require_identity)) -> dict[str, object]:
+    """Does each proposed text fit as-is, and which safe fitting options (size, width, spacing, free cell space) exist?  Nothing is stored."""
+    from packages.workers.pdf_edit import PdfEditRefused, PdfEditUnavailable
+    try:
+        parsed_document, parsed_version = UUID(document_id), UUID(version_id)
+    except ValueError:
+        raise APIError(404, "not_found", "The requested version was not found.") from None
+    _guard_ready(request, identity, parsed_document, parsed_version)
+    version, source = _source_version(request, identity, parsed_document, parsed_version)
+    sig = pdf_signature.classify(source)
+    if pdf_signature.blocks_editing(sig["status"]):
+        raise APIError(409, "pdf_signed", pdf_signature.REASONS[sig["status"]])
+    path = request.app.state.document_storage.root / str(version["storage_key"])
+    try:
+        report = request.app.state.pdf_editor.fit(path, [{"id": e.id, "old": e.old, "new": e.new} for e in payload.pdf_edits])
+    except PdfEditRefused as refused:
+        raise APIError(422, refused.code, refused.message or "These edits couldn't be checked.") from None
+    except PdfEditUnavailable:
+        raise APIError(503, "pdf_edit_unavailable", "PDF editing is unavailable right now. Try again in a moment.") from None
+    return {"fits": report["fits"], "note": "A dependent total or related amount is not recalculated. Review other figures that depend on a changed value."}
 
 
 @router.post("/documents/{document_id}/versions/{version_id}/pdf-edit/preview")
