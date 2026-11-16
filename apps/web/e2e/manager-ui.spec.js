@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { appendToDocxText } from './docx-edit-helpers.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
@@ -200,10 +201,7 @@ test.describe('Scan In workspace: upload, read, edit, save as next version', () 
     await chunkNavigation(page);
     await page.locator('.tab', { hasText: 'Edits' }).click();
     await expect(page.getByRole('button', { name: /^B$/ })).toHaveCount(0); // no bold/italic/heading buttons
-    const target = page.locator('[data-target]').first();
-    await target.click();
-    await page.keyboard.press('End');
-    await page.keyboard.type(' (revised)');
+    await appendToDocxText(page, 0, ' (revised)');
     await saveNextVersion(page);
     await checkFolderAndVersions(page, { name, ext: 'docx', original, kind: 'docx', expected: '(revised)' });
   });

@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { appendToDocxText, openDocxEditor } from './docx-edit-helpers.js';
 
 // The four features together, in a real browser, on the real stakeholder files (private, gitignored; skipped, never faked, when absent).
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -132,11 +133,7 @@ test.describe('Document experience: all four features, real browser, real files'
     expect(painted).toBeGreaterThan(0.03);                                                // logo + illustration actually drawn
     await page.screenshot({ path: path.join(evidence, 'docx-pages.png') });
     await page.locator('.tab', { hasText: 'Edits' }).click();
-    const editable = page.locator('.docx-editor [data-target]'); await expect(editable.first()).toBeVisible({ timeout: 30_000 });
-    const target = editable.nth(3); const oldText = await target.evaluate((el) => el.textContent);   // exact text, not whitespace-normalised
-    await target.click();
-    await target.evaluate((el) => { const r = document.createRange(); r.selectNodeContents(el); r.collapse(false); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r); });   // caret at the true end (the line may wrap)
-    await page.keyboard.type(' (reviewed)');
+    const oldText = await appendToDocxText(page, 3, ' (reviewed)');   // exact original text from the native target
     await saveNext(page, 2);
     const out = await exportFile(page); expect(path.extname(out.name).toLowerCase()).toBe('.docx');
     const a = path.join(scratch, 'health-v1.docx'), b = path.join(scratch, 'health-v2.docx'); fs.writeFileSync(a, original); fs.writeFileSync(b, out.bytes);

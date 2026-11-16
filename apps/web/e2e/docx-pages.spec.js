@@ -69,6 +69,7 @@ test.describe('Health Quote Format.docx is shown as real pages', () => {
 
     // Edits still offer native DOCX editing
     await page.locator('.tab', { hasText: 'Edits' }).click();
-    await expect(page.locator('.docx-editor [data-target]').first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId('docx-page-editor')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId('docx-edit-viewer').locator('.viewer-page')).toHaveCount(4, { timeout: 60_000 });
   });
 });

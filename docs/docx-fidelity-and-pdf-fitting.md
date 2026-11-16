@@ -1,0 +1,222 @@
+# High-fidelity DOCX editing and smart PDF text fitting
+
+Base: `main` @ `af02ec5` (the deployed release). Scope: the Edits experience for Word documents and longer replacement text in ordinary
+(unsigned) PDFs. Signed-PDF handling, Excel, ZIP, authentication, version lineage, audit chain and download gates are unchanged.
+
+## 1. DOCX: the Edits tab shows the real pages
+
+**Problem.** Original rendered the document with LibreOffice (colours, table geometry, images). Edits rebuilt a simplified HTML view, so the
+same file looked different in each tab.
+
+**Design.**
+
+```
+Edits tab  ──►  PageViewer (same LibreOffice pages as Original, GET …/render, cached by version+sha)
+            ──►  edit panel + synchronized list of native text targets (from the existing sandboxed inspection, /preview → blocks)
+            ──►  Preview changes: POST …/docx-edit/preview  → candidate DOCX in memory → sandboxed LibreOffice → PDF (never stored)
+            ──►  Save as next version: the UNCHANGED verified native save path (/save → edit set → verification → release)
+```
+
+* **Editing surface = the faithful page rendering.** No HTML is ever saved as DOCX and no PDF→DOCX conversion is used anywhere.
+* **Native targets.** Each editable text is a single-run `w:t` identified by `docx:<part>:p<i>:r<j>:t<k>` plus a SHA-256 fingerprint of that
+  node. Identical texts in different cells have different ids, so a selection can never edit "the other Yes".
+* **Where is it on the page? Only when verified** (`apps/web/src/lib/docxLocate.ts`). The rendering carries no native ids, so a block is placed on a page only if (1) exactly one block has
+  that normalised text, (2) the text occurs exactly once anywhere in the rendered text (including inside other text), (3) that occurrence starts and ends on rendered-item boundaries (never a fragment of a
+  longer element), (4) no other rendered item touches it on the same line, (5) it is on one page and every page is upright with its box at the origin (one unreadable page means uniqueness cannot be proven, so
+  nothing is located). Everything else (repeated labels, identical cells, repeating headers, fragments, reshaped text) is **list-only**. An earlier version matched substrings and could advertise a
+  position for a fragment of a longer element; that was reproduced with synthetic items and fixed. On the Health Quote document 33 of 40 editable texts have a verified position (unchanged); every one of the 33
+  highlights was clicked and selects exactly its own native block. The list shows "Showing N of M" with *Show more / Show all* (200 per step), a highlight click always reveals its entry, and search covers all entries.
+* **Draft preview** (`packages/api/render.py: docx_edit_preview`, `DocxAdapter.draft`): authenticated, tenant-scoped and strictly read-only; applies the edits to
+  a copy in memory after re-validating every id, editable flag and fingerprint against freshly computed targets, re-reads the candidate and
+  asserts that it differs from the source only at the edited targets, renders it in the same sandboxed renderer (shared 2-slot semaphore,
+  timeout and size limits), returns the PDF with `Cache-Control: no-store`. No file, version, edit set or audit row is created. Stale
+  fingerprint → 409, other tenant → 404, read-only/multi-run target → 422 with a plain message.
+* **UX.** "This version" / "Preview of your changes" tabs; a stale draft is labelled *out of date* until re-previewed; if the page count changes
+  a reflow warning is shown; per-text *Revert*, *Discard changes*, search, "Editable text only". The Save button, version naming, History and
+  Compare are the existing ones.
+* **Fallback.** If the page renderer is unavailable the previous text editor is used (`preview.render.available`).
+
+## 2. PDF: layout-aware fitting (`packages/core/pdf_text.py`)
+
+The content-stream interpreter now also records **table borders and rules** (stroked lines, stroked rectangles, thin filled rectangles), and
+the **clip** and **text direction** in effect for every run.
+
+`PdfTextEngine.plan_fit` decides, from geometry only (nothing is written):
+
+| Order | Strategy | Limit | Mechanism |
+|---|---|---|---|
+| A | natural placement | original size/shape | bounded by neighbouring text (2 pt gap), borders (1.5 pt), clip, page margin; alignment inferred from the cell (left/right/centre) when both borders are detected |
+| B | `size` | ≥ 85 % of the original size | `Tf` before the new text, restored after |
+| C | `scale` | ≥ 85 % horizontal | `Tz`, restored after |
+| D | `spacing` | ≤ 0.04 em tighter per character | `Tc`, restored after |
+| E | `expand` | only if a cell is detected | uses the free space of the same cell on both sides (TJ pen adjustment) |
+
+Never made longer: rotated/transformed text, text a border crosses, text inside a clip that cannot be measured. Fonts without width data, missing
+glyphs (no safe substitute) and multi-line text keep their existing refusals. The font program is never replaced for fitting.
+
+API: `POST …/pdf-edit/fit` (read-only) returns per edit `{fits, options[], refusal, cell_detected, anchor}`; `pdf_edits[].fit` selects a strategy for
+`/pdf-edit/preview` and `/save`. A default (no `fit`) edit that overflows is refused with code `overflow` and the available options in `details`.
+
+**Verification (inside the sandboxed worker, nothing weakened).** All previous checks remain. Added: `no_border_or_neighbour_collision`
+(independent re-measure of the *output*: no vertical rule crosses the new text and no other text box overlaps it; fails closed if a grown edit
+cannot be located) and `border_pixels_untouched` (no new ink on border strips next to the edit; removing old ink is fine). Pixel-confinement and
+unedited-text checks use the edit's full extent (including a shifted start).
+
+**UX** (`PdfTextEditor.tsx`): an overflow that has safe options opens a sticky panel listing them with the expected difference; *Preview fitted
+result* renders the real edited PDF; a "Fitted … by …" note offers *Revert to original value*; no option → plain refusal with the reason. Any edit of
+a numeric value shows a non-blocking notice that dependent totals are **not** recalculated (no consistency is claimed).
+
+## 3. Tests
+
+* `tests/unit/test_docx_draft.py` (draft validity, identical-text targets, stale/unknown/duplicate/read-only refusals, only `document.xml` changes).
+* `tests/unit/test_pdf_fit.py` (natural fit, option reporting, fitted save verified, following text keeps its state, very long refused, neighbour,
+  right-aligned growth, expand, rotated, clip, unknown strategy, short/slightly longer unchanged).
+* `scripts/dev/release_smoke.py`: draft preview stores nothing, 409/404 paths.
+* Playwright `docx-locate.spec.js` (14 pure locator tests: exact, substring, repeated, identical cells, split runs, wrapped lines, adjacent text, whitespace, merged cell, absent, cross-page, non-upright, unreadable page) and `docx-list-and-click.spec.js` (450-paragraph list reachability; ambiguous-text document; click-every-highlight on the real document), `docx-edit-fidelity.spec.js` (Original vs Edits composition on the real Health Quote document, click-to-target, list selection, draft,
+  out-of-date draft, save, derived DOCX, original hash) and `pdf-smart-fit.spec.js` (real Fire policy: natural fit, option panel, fitted preview,
+  revert, refusal, save, original unchanged, comparison identifies the edit). Four older specs were migrated from the removed contentEditable
+  DOCX editor to the page editor via `e2e/docx-edit-helpers.js`.
+
+## 4. Known limitations
+
+* DOCX: only single-run text can be edited (existing rule); multi-run paragraphs, hyperlinks, fields, content controls and text boxes stay read-only
+  and are labelled. Page locations exist only where the text is unique (see above). A draft is rendered by LibreOffice, which can differ slightly
+  from Word (fonts); the original remains unchanged.
+* PDF: fitting handles one line of text in a detected cell or against neighbouring text. Cell *backgrounds* (filled rectangles) are not treated as
+  borders; dashed/curved borders are not detected; text on curved paths and rotated text are never lengthened; table reflow is not attempted;
+  a cell whose neighbouring text object sits directly beside the value is refused (real example: 6 of 30 sampled sum-insured amounts in one
+  corpus PDF).
+* Signed PDFs: unchanged (still require the explicit unsigned working copy). Linux Bubblewrap and container confinement remain not runtime verified.
+
+## 5. Deployment and rollback
+
+No migration, no new dependency, no configuration. Backend and frontend ship together (the new editor calls `/docx-edit/preview` and `/pdf-edit/fit`).
+Rollback = redeploy the previous release (`af02ec5`); data written by the new code is ordinary DOCX/PDF versions and remains valid. The draft endpoint
+adds no persistent state.
+
+---
+
+# Final acceptance and independent review
+
+Run on isolated resources only (`channel360_iso_fidelity`, `channel360_iso_fidpytest`, ports 8010/5180, own storage); shared services, `channel360_test`
+and the release checkout were not touched. Private evidence (screenshots, derived files, per-document JSON) is under `.private/`; nothing below quotes
+stakeholder content.
+
+## A. DOCX on the real Health Quote document
+
+| Check | Result |
+|---|---|
+| Original v1 after the whole flow | byte-identical (SHA-256 equal to the corpus file) |
+| Draft preview created a version | no (history length 1 after the draft; 1 after 8 concurrent drafts) |
+| Save: lineage | v2 `derived`, parent v1, classification `standard`; save outcome from the verified native path |
+| Targets changed by the save | exactly 1 of 175 (ids identical sets); edited value exact |
+| Package parts changed | `word/document.xml` plus the existing provenance parts (`docProps/custom.xml`, `[Content_Types].xml`, `_rels/.rels`); none removed |
+| `document.xml` after restoring the one edited text | canonically identical to the original, i.e. formatting, shading, borders, merged cells, column/row dimensions, alignment, image references are unchanged |
+| Saved file reopened independently | python-docx opens it (1 table, 81 paragraphs); sandboxed LibreOffice renders it (4 pages) |
+| **Draft preview vs independent render of the saved DOCX** | **0 differing pixels on all 4 pages** (same candidate) |
+| Original render vs saved render | 0 changed pixels on pages 1, 3, 4; page 2: 2,427 pixels inside a 50 × 7 pt box (the edited cell) |
+| Colours | yellow premium-row pixels on page 2 identical (43,970) in original, saved and draft |
+| Original tab vs Edits tab (before changes) | both use the same `/render` PDF; page proportions equal and coloured/dark pixel shares within the spec tolerances (Playwright `docx-edit-fidelity`) |
+| Repeated text in different cells | the real document has no repeated editable text, so a synthetic table (`Yes`, `Yes`, `Yes`; labelled synthetic) was used: editing the middle cell changed exactly that target; the other two stayed `Yes` |
+| Texts without a verified page position | 7 of 40 editable blocks; all 7 selected from the synchronized list showed the correct native text and produced a draft (HTTP 200) without creating a version |
+
+## B. PDF: the Fire policy example
+
+The acceptance example (a sum-insured amount with extra digits appended, e.g. `<amount>,678`) was applied to the first sum-insured amount on page 2 of the supplied Fire policy. The page-2 amounts
+are three 12-character values and one total, each followed by a separate adjacent `.00` text object, in right-aligned cells. The literal value used in an earlier manual test does not occur in that file. No stakeholder figure is quoted in this repository.
+
+| Measurement (pt) | Value |
+|---|---|
+| Field | page 2, 10 pt Helvetica-family font, right edge 565.53, original width 58.31 |
+| Cell borders detected | left 475.66, right 584.88 |
+| Neighbour | `.00` object starts at 565.54 (0.01 pt gap) |
+| Replacement width | 77.53 |
+| Available width (right-anchored, inside borders and 1.5 pt padding) | 88.4 (left limit 477.16) |
+| Strategy | A, natural placement, right edge kept (grows leftwards); no size, scale or spacing change (size 100 %, Tz 100 %) |
+| Verdict | **accepted**; all 14 worker checks pass including `no_border_or_neighbour_collision` and `border_pixels_untouched` |
+| Saved derived PDF | v2, parent v1; original byte-identical; 72 pages reopen in pypdf and pdfium |
+| Searchable | the new amount is extractable from page 2; the old amount no longer occurs at that position |
+| Pixels | 4,083 changed pixels in x 488.0–565.0 pt, y 420–429 pt only; 0 pixels changed on the two cell borders; 0 changed on the other 71 pages; the change stays right of the left limit and ends before the `.00` object |
+| Surrounding content | the two other sum-insured amounts, the total and every other page's text are identical |
+| No silent reformatting or recalculation | the amount is stored exactly as typed (typed digits + the original `.00`); the total is untouched; the UI shows the non-blocking "dependent figures are not recalculated" notice |
+| Version comparison | 1 modified, 0 added, 0 removed, scan COMPLETE |
+
+The same edit on the other three sum-insured values and the total of that table gives the same result (natural, verified).
+Across the corpus, appending `,678` to the 30 sampled thousand-separated amounts: 24 fit naturally (Fire policy), 6 are refused because another text
+object sits directly beside the value (QCR health policy); no relaxation was made to force them.
+Fitting strategies exercised on real documents: A (natural, right-anchored) and `size` (through the UI on the Fire policy). `scale`, `spacing` and `expand`
+are covered by synthetic unit tests with verification, not by real-document runs.
+
+## C. Regression results (final code)
+
+| Suite | PASS | FAIL | SKIP/BLOCKED |
+|---|---|---|---|
+| Backend `pytest tests` (PostgreSQL env set) | 778 | 0 | 0 |
+| Playwright, production build, all specs except ZIP | 111 | 0 | ZIP spec excluded (out of scope); includes the 4 new acceptance tests |
+| Non-ZIP stakeholder acceptance (`acceptance_run --skip-zip`) | 17 | 0 | ZIP stage reported OUT OF SCOPE |
+| `compare_flow` / `branch_compare_flow` | 31 / 11 | 0 | |
+| `xlsx_fidelity` / `xlsx_index_fidelity` | 91 / 36 | 0 | |
+| `xlsx_benchmark` / `xlsx_compare_stress` | 32 / 20 | 0 | |
+| `docx_fidelity` / `docx_geometry` | 26 / 9 | 0 | |
+| `signed_flow` / `security_flow` (signed PDFs, tenant isolation, downloads) | 82 / 23 | 0 | |
+| `pdf_api_flow` / `docx_api_flow` / `office_api_flow` | exit 0 | | |
+| `release_smoke.py` (isolated stack) | 33 | 0 | |
+| Sandbox runtime (`check-sandbox.py`, `tests/unit/test_sandbox.py`) | READY / passes | 0 | Linux Bubblewrap and containers NOT RUNTIME VERIFIED |
+
+**Test inventory.** Baseline 751 (development branch) vs 778 now. `main` @ `af02ec5` collects 698 in a clean checkout: the 751 included 57 parametrisations over
+private CSV fixture packs that exist only under the development worktree's `artifacts/` (`test_csv_compact_parser`, `test_csv_summary_one_pass`,
+`test_csv_verifier_compact`: 19 each), minus 2 `test_corpus_runner_hardening` cases and 2 `test_dependency_manifest` cases that the development branch does not contain.
+This branch adds 23 tests (5 DOCX draft, 18 PDF fitting). Linking those fixture packs into the worktree (untracked) gives 698 + 57 + 23 = 778, so no test was
+dropped or excluded. Two earlier observations are explained, not re-run away: a first pytest run showed 32 skips because the PostgreSQL environment variables were
+not exported in that shell (skips are reported `NOT_VERIFIED`; with them set: 0 skips), and `pdf_api_flow`/`docx_api_flow` first failed with `IndexError` because
+I called them without their required file argument (harness misuse, not a product failure).
+
+## D. Independent review of the three commits
+
+Fixed during this review (each with a test or an acceptance run that showed it):
+
+| # | Finding | Fix |
+|---|---|---|
+| R1 | Clip state was not inherited by nested form XObjects, so text inside a parent clip could be grown beyond it | clip passed into nested walks |
+| R2 | Rectangular clips drawn as `m/l/h` (not `re`) counted as "unmeasurable", refusing every growth in a real policy (all 1,870 sampled runs of one PDF); surfaced as an `acceptance_run` FAIL (`clipped_text` instead of `overflow`) | an axis-aligned polygon is measured as a box; non-rectangular clips still refuse |
+| R3 | The collision check ignored other edited texts, so two edits on one line could touch undetected | new `edited_texts_do_not_overlap` verification check (engine ordering already prevented it; this is defence in depth) |
+| R4 | The page locator assumed an upright page with origin (0,0), so a rotated/offset rendering could place a highlight wrongly | positions are claimed only for upright, origin-aligned pages; otherwise list only |
+
+Reviewed and found sound: target id + fingerprint validation is recomputed from the stored source for every draft; draft authorisation = bearer token + tenant RLS (the only role is OWNER), 409 stale, 404 other tenant (see section F for the correction); the
+draft candidate is re-read and must differ from the source only at the edited targets; the renderer copies input into a private scratch directory removed in `finally`
+(8 concurrent drafts: all 200, 0 leftover scratch directories, no version created); the sandbox and its self-test are the existing ones; draft and save are the same text replacement and
+the render of the saved file is pixel-identical to the draft; original files are never written; a refused PDF save raises before anything is staged; comparison of draft-derived versions is the existing comparer.
+
+Open findings are listed in section F (O1 and O2 of the first review were examined again and corrected or reclassified there).
+
+## E. Push and deployment readiness
+
+**Recommendation: READY TO PUSH FOR REVIEW.** All suites above pass on the final code with 0 failures and 0 unexplained skips; the four review findings that touched correctness
+were fixed and re-verified; the open findings (O1-O4) are limitations, not defects, and are documented.
+
+Deployment: no migration, dependency or configuration change; backend and frontend must be deployed together (the editor calls `/docx-edit/preview` and `/pdf-edit/fit`). Before deploying, rerun
+`scripts/dev/release_smoke.py` against the release configuration. Rollback: redeploy `af02ec5`; versions created by this code are ordinary DOCX/PDF files. Not verified: Linux Bubblewrap, containers, ZIP.
+
+## F. Residual-risk review before the pull request
+
+**A. Number presentation (Fire policy sum-insured amounts).** Each amount is a whole-number object followed by a separate `.00` object that touches its right edge (0.01 pt). A longer
+replacement therefore *reads* as `<new>.00` on the page and in extracted text (verified: the saved page extracts `…678.00` contiguously). That is a faithful, non-reformatted result, but a user who types
+their own decimals would get a doubled decimal part. Confirmed gap, now handled: the engine reports an adjacent separate object (`adj`, in the run listing) and the PDF editor shows a
+non-blocking note stating the complete displayed value ("This will read “…678.00”: “.00” is a separate object and is not changed. Check the whole value, including any decimals."). Totals and other
+amounts are never recalculated.
+
+**B. Render pool.** Measured before the change: with 60 queued drafts an uncached page preview took ~26 s (limit 30 s, then `render_busy`) because drafts and previews shared the same 2 slots. Not indefinite
+starvation (the queue drains), but one client could degrade page previews. Fixed: drafts use their own single slot (they can no longer occupy the preview slots), wait at most 10 s (`503 render_busy`),
+and a tenant may have at most 2 drafts in flight (`429 draft_rate_limited`). Measured after: preview 0.9–1.7 s during the same 60-draft flood; excess drafts get 429. At most 3 LibreOffice processes run at once.
+
+**C. Authorization.** Findings:
+
+* **Confirmed defect (fixed): the DOCX draft was not read-only.** It called `authorize_owner_upload`, which is not an authorization check: it *writes* (sets the document category to `insurer-authored`) and
+  appends a `document.owner_upload_authorized` audit event. A first draft therefore changed the document row and audit log, contradicting "a draft stores nothing" and the earlier statement that it
+  enforced an owner-edit permission. Measured: category `unknown → insurer-authored`, audit events 6 → 7. Fix: the draft no longer calls it; measured after: category and audit count unchanged; regression
+  check added to `release_smoke.py`. (The earlier "no version created" evidence stands; the audit/category side effect was not checked then.)
+* **Access model (confirmed, intentional single-owner design):** `OWNER` is the only role in the system. Measured for PDF fit, PDF preview, PDF save, DOCX draft and DOCX save: no token → 401, another
+  tenant → 404, owner → 200. Differences between the flows are not authorization differences: the native DOCX save (existing code) sets the document category as part of the edit-set authorization and audits it,
+  the ordinary-PDF text save does not, and the preview/fit/draft endpoints do neither.
+* Potential improvements (not defects): introduce non-owner roles with explicit edit permission if the product ever leaves the single-owner model; rate-limit PDF preview/fit as drafts now are; audit drafts
+  if a trail of previews is wanted.
